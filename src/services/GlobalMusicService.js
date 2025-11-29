@@ -115,6 +115,11 @@ class GlobalMusicService {
   }
 
   async loadTracks() {
+    if (!this.businessId) {
+      console.error('[loadTracks] Cannot load tracks - businessId is not set!');
+      return;
+    }
+
     const { data, error } = await supabase
       .from('music_tracks')
       .select('*')
@@ -122,6 +127,7 @@ class GlobalMusicService {
       .eq('include_in_shuffle', true);
 
     if (error) {
+      console.error('[loadTracks] Error loading tracks:', error);
       return;
     }
 
@@ -130,7 +136,12 @@ class GlobalMusicService {
     this.shuffleMode = true;
     this.currentPlaylistId = null;
     this.playlistInfo = null;
-    this.shufflePlaylist();
+    
+    if (this.playlist.length > 0) {
+      this.shufflePlaylist();
+    } else {
+      console.warn('[loadTracks] No tracks available for playback!');
+    }
     this.notifyListeners();
   }
 
@@ -358,6 +369,22 @@ class GlobalMusicService {
   }
 
   async loadFirstTrack() {
+    // CRITICAL FIX: If playlist is empty, try to reload tracks first
+    if (this.playlist.length === 0) {
+      console.warn('[loadFirstTrack] Playlist is empty - attempting to reload tracks...');
+      try {
+        await this.loadTracks();
+        if (this.playlist.length === 0) {
+          console.error('[loadFirstTrack] Still no tracks after reload - cannot load first track');
+          return;
+        }
+        console.log(`[loadFirstTrack] Reloaded ${this.playlist.length} tracks - loading first track`);
+      } catch (error) {
+        console.error('[loadFirstTrack] Failed to reload tracks:', error);
+        return;
+      }
+    }
+    
     if (this.playlist.length > 0) {
       this.currentIndex = Math.floor(Math.random() * this.playlist.length);
       await this.loadTrack(this.playlist[this.currentIndex]);
@@ -409,7 +436,21 @@ class GlobalMusicService {
   }
 
   async next() {
-    if (this.playlist.length === 0) return;
+    // CRITICAL FIX: If playlist is empty, try to reload tracks before giving up
+    if (this.playlist.length === 0) {
+      console.warn('[next] Playlist is empty - attempting to reload tracks...');
+      try {
+        await this.loadTracks();
+        if (this.playlist.length === 0) {
+          console.error('[next] Still no tracks after reload - cannot play next track');
+          return;
+        }
+        console.log(`[next] Reloaded ${this.playlist.length} tracks - continuing playback`);
+      } catch (error) {
+        console.error('[next] Failed to reload tracks:', error);
+        return;
+      }
+    }
     
     this.currentIndex = (this.currentIndex + 1) % this.playlist.length;
     await this.loadTrack(this.playlist[this.currentIndex]);
