@@ -180,7 +180,16 @@ async function answerCall(callControlId) {
  */
 async function startMediaStream(callControlId) {
   try {
-    const webhookUrl = `${process.env.RAILWAY_PUBLIC_DOMAIN || 'http://localhost:3000'}/media-stream`;
+    // Get Railway public domain (Railway sets this automatically)
+    let baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL || `http://localhost:${PORT}`;
+    
+    // Ensure URL has https:// protocol (required by Telnyx)
+    if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+      baseUrl = `https://${baseUrl}`;
+    }
+    
+    const webhookUrl = `${baseUrl}/media-stream`;
+    console.log(`🎵 Starting media stream with URL: ${webhookUrl}`);
     
     const response = await axios.post(
       `https://api.telnyx.com/v2/calls/${callControlId}/actions/streaming_start`,
@@ -408,9 +417,11 @@ app.post('/media-stream', async (req, res) => {
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Tavari Voice Agent server running on port ${PORT}`);
-  console.log(`📞 Webhook: POST http://localhost:${PORT}/webhook`);
-  console.log(`🎵 Media stream: POST http://localhost:${PORT}/media-stream`);
-  console.log(`❤️  Health check: GET http://localhost:${PORT}/health`);
+  const PUBLIC_URL = process.env.RAILWAY_PUBLIC_DOMAIN || `http://localhost:${PORT}`;
+
+  console.log(`📞 Webhook: POST ${PUBLIC_URL}/webhook`);
+  console.log(`🎵 Media stream: POST ${PUBLIC_URL}/media-stream`);
+  console.log(`❤️  Health check: GET ${PUBLIC_URL}/health`);
   console.log(`\n✅ Ready to receive calls!`);
 });
 
