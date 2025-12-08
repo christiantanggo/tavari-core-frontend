@@ -1,12 +1,18 @@
-// screens/POS/TabScreen.jsx - Updated with Foundation Components
+// screens/POS/TabScreen.jsx - WITH PERMISSION SYSTEM + NO CONSOLE LOGGING
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
-import { logAction } from '../../helpers/posAudit';
+import toast from 'react-hot-toast';
+import { Eye } from 'lucide-react';
 
-// Foundation Components and Hooks
+// Security & Authentication
+import { SecurityWrapper, useSecurityContext } from '../../Security';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+
+// Foundation Components and Hooks
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
@@ -21,8 +27,40 @@ import { ManagerOverrideModal, TabDetailsModal, QRManualInputModal, QRScannerMod
 const TabScreen = () => {
   const navigate = useNavigate();
   
+  // Security context for sensitive tab operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'TabScreen',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
   // Authentication (will be handled by POSAuthWrapper)
   const [authData, setAuthData] = useState(null);
+  
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewTabs = hasAnyPermission(['pos.sales.create', 'pos.sales.view_all']) || hasElevatedPrivileges();
+  const canCreateTabs = hasPermission('pos.sales.create') || hasElevatedPrivileges();
+  const canEditTabs = hasPermission('pos.sales.create') || hasElevatedPrivileges();
+  const canDeleteTabs = hasPermission('pos.sales.void') || isOwner();
+  const canCloseTabs = hasAnyPermission(['pos.sales.create', 'pos.cash.count']) || hasElevatedPrivileges();
+  const canProcessPayments = hasPermission('pos.sales.create') || hasElevatedPrivileges();
   
   // Tax calculations
   const taxCalculations = useTaxCalculations(authData?.selectedBusinessId);
@@ -52,20 +90,33 @@ const TabScreen = () => {
   const [overrideReason, setOverrideReason] = useState('');
   const [pendingAction, setPendingAction] = useState(null);
 
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewTabs) {
+      toast.error('You do not have permission to view tabs');
+      navigate('/dashboard/pos');
+    }
+  }, [permissionsLoading, canViewTabs, navigate]);
+
   // Helper function to format currency using TavariStyles
   const formatCurrency = (amount) => {
     return `$${(Number(amount) || 0).toFixed(2)}`;
   };
 
   // Initialize when auth is ready
-  const handleAuthReady = (auth) => {
-    console.log('TabScreen: Authentication ready:', auth);
+  const handleAuthReady = async (auth) => {
+    await logSecurityEvent('tab_screen_accessed', {
+      action: 'tab_screen_loaded',
+      business_id: auth.selectedBusinessId,
+      user_id: auth.authUser?.id
+    }, 'low');
+
     setAuthData(auth);
   };
 
   // Load tabs when business ID is available
   useEffect(() => {
-    if (authData?.selectedBusinessId) {
+    if (authData?.selectedBusinessId && !permissionsLoading && canViewTabs) {
       loadTabs();
       
       // Set up real-time subscription
@@ -81,7 +132,7 @@ const TabScreen = () => {
         supabase.removeChannel(subscription);
       };
     }
-  }, [authData?.selectedBusinessId]);
+  }, [authData?.selectedBusinessId, permissionsLoading, canViewTabs]);
 
   const loadTabs = async () => {
     if (!authData?.selectedBusinessId) return;
@@ -89,6 +140,21 @@ const TabScreen = () => {
     try {
       setLoading(true);
       setError(null);
+
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('load_tabs');
+      if (!rateLimitCheck.allowed) {
+        setError('Too many requests. Please wait a moment.');
+        setLoading(false);
+        return;
+      }
+
+      await logSecurityEvent('tabs_load_initiated', {
+        action: 'load_tabs',
+        business_id: authData.selectedBusinessId,
+        sort_by: sortBy,
+        sort_order: sortOrder
+      }, 'low');
 
       // Fixed query - removed category_id that doesn't exist in pos_tab_items table
       const { data, error: tabError } = await supabase
@@ -115,26 +181,28 @@ const TabScreen = () => {
           
           // If tab shows $0 but has items, recalculate with proper tax logic
           if ((Number(tab.subtotal) || 0) === 0 && itemsSubtotal > 0) {
-            console.log(`Tab ${tab.tab_number} has items but $0 totals, recalculating with tax logic...`);
+            await logSecurityEvent('tab_recalculation', {
+              action: 'recalculate_tab_totals',
+              business_id: authData.selectedBusinessId,
+              tab_id: tab.id,
+              tab_number: tab.tab_number
+            }, 'low');
             
             // Since pos_tab_items doesn't have category_id, we'll use a fallback tax calculation
-            // This assumes items without category info get default business tax rates
             let taxAmount = 0;
             
             if (!taxCalculations.loading && taxCalculations.taxCategories.length > 0) {
-              // Use tax calculation hook if available, but provide fallback items structure
               const itemsForTaxCalc = tab.pos_tab_items.map(item => ({
                 ...item,
                 price: item.unit_price || 0,
                 quantity: item.quantity || 1,
-                // Use a default category if available, or null for manual tax calculation
                 category_id: null
               }));
               
               const taxResult = taxCalculations.calculateTotalTax(
                 itemsForTaxCalc, 
-                0, // no discount
-                0, // no loyalty redemption
+                0,
+                0,
                 itemsSubtotal
               );
               
@@ -187,8 +255,21 @@ const TabScreen = () => {
       }));
 
       setTabs(tabsWithLoyalty || []);
+
+      await recordAction('tabs_loaded', authData.selectedBusinessId, true);
+      await logSecurityEvent('tabs_loaded', {
+        action: 'load_tabs_success',
+        business_id: authData.selectedBusinessId,
+        tab_count: tabsWithLoyalty.length
+      }, 'low');
+
     } catch (err) {
-      console.error('Error loading tabs:', err);
+      await logSecurityEvent('tabs_load_error', {
+        action: 'load_tabs_failed',
+        business_id: authData.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
       setError('Failed to load tabs: ' + err.message);
     } finally {
       setLoading(false);
@@ -201,22 +282,35 @@ const TabScreen = () => {
       return;
     }
 
+    // Rate limit check
+    const rateLimitCheck = await checkRateLimit('manager_override');
+    if (!rateLimitCheck.allowed) {
+      toast.error('Too many override attempts. Please wait a moment.');
+      return;
+    }
+
     const isValidPin = await authData.validateManagerPin(pin);
     if (!isValidPin) {
+      await logSecurityEvent('invalid_manager_override', {
+        action: 'manager_override_failed',
+        business_id: authData.selectedBusinessId,
+        reason: overrideReason
+      }, 'high');
+      
       setError('Invalid manager PIN');
       return;
     }
 
     try {
-      await logAction({
+      await logSecurityEvent('manager_override_approved', {
         action: 'manager_override_tab',
-        context: 'TabScreen',
-        metadata: {
-          reason: overrideReason,
-          action: pendingAction?.type,
-          tab_id: pendingAction?.tab?.id
-        }
-      });
+        business_id: authData.selectedBusinessId,
+        reason: overrideReason,
+        pending_action: pendingAction?.type,
+        tab_id: pendingAction?.tab?.id
+      }, 'high');
+
+      await recordAction('manager_override_tab', pendingAction?.tab?.id, true);
 
       // Execute the pending action
       if (pendingAction?.type === 'close_tab') {
@@ -232,15 +326,18 @@ const TabScreen = () => {
       setPendingAction(null);
       
     } catch (err) {
-      console.error('Manager override error:', err);
+      await logSecurityEvent('manager_override_error', {
+        action: 'manager_override_execution_failed',
+        business_id: authData.selectedBusinessId,
+        error_message: err.message
+      }, 'high');
+      
       setError('Failed to execute override: ' + err.message);
     }
   };
 
   // Handle barcode scanner input for QR codes
   const handleBarcodeOrQRScan = (code) => {
-    console.log('Barcode/QR scanned:', code);
-    
     if (showSearchScanner) {
       handleSearchQRScan(code);
     }
@@ -250,9 +347,21 @@ const TabScreen = () => {
     if (!authData?.selectedBusinessId) return;
 
     try {
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('qr_scan_search');
+      if (!rateLimitCheck.allowed) {
+        toast.error('Too many scan attempts. Please wait a moment.');
+        return;
+      }
+
       setShowSearchScanner(false);
       setQrSearchValue('');
-      console.log('Processing search QR code data:', qrData);
+      
+      await logSecurityEvent('qr_search_scan', {
+        action: 'qr_search_initiated',
+        business_id: authData.selectedBusinessId,
+        code_length: qrData.length
+      }, 'low');
       
       let searchValue = '';
       
@@ -272,7 +381,7 @@ const TabScreen = () => {
           }
         }
       } catch (jsonError) {
-        console.log('Not valid JSON, trying other formats');
+        // Not JSON, continue to other formats
       }
 
       // Try as direct loyalty account ID (UUID format)
@@ -302,18 +411,34 @@ const TabScreen = () => {
 
       if (searchValue) {
         setSearchTerm(searchValue);
-        console.log('Search term set to:', searchValue);
+        await recordAction('qr_search_completed', authData.selectedBusinessId, true);
       } else {
+        await logSecurityEvent('qr_search_invalid', {
+          action: 'qr_search_failed',
+          business_id: authData.selectedBusinessId
+        }, 'low');
         setError('Could not determine search term from QR code');
       }
 
     } catch (err) {
-      console.error('Search QR scan error:', err);
+      await logSecurityEvent('qr_search_error', {
+        action: 'qr_search_error',
+        business_id: authData.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
       setError('Failed to process QR code for search: ' + err.message);
     }
   };
 
   const handleManualQRSearch = async () => {
+    // Validate input
+    const validation = await validateInput(qrSearchValue.trim(), 'text', 'qr_search');
+    if (!validation.valid) {
+      setError('Invalid QR code input');
+      return;
+    }
+
     if (!qrSearchValue.trim()) {
       setError('Please enter a QR code value');
       return;
@@ -355,98 +480,169 @@ const TabScreen = () => {
     setShowCustomerSelectionModal(true);
   };
 
-  const proceedToPayment = () => {
-    // Calculate totals for selected items using tax calculations
-    const selectedSubtotal = selectedItems.reduce((sum, item) => sum + (Number(item.total_price) || 0), 0);
-    
-    // Prepare items for tax calculation (add fallback structure)
-    const itemsForTaxCalc = selectedItems.map(item => ({
-      ...item,
-      price: item.unit_price || 0,
-      quantity: item.quantity || 1,
-      category_id: null // Fallback since pos_tab_items doesn't have category_id
-    }));
-    
-    let taxResult = { totalTax: 0, aggregatedTaxes: {}, aggregatedRebates: {}, itemTaxDetails: [] };
-    
-    // Use tax calculation hook if available
-    if (!taxCalculations.loading && taxCalculations.taxCategories.length > 0) {
-      taxResult = taxCalculations.calculateTotalTax(itemsForTaxCalc, 0, 0, selectedSubtotal);
-    } else {
-      // Fallback tax calculation
-      taxResult.totalTax = selectedSubtotal * 0.13; // 13% HST fallback
+  const proceedToPayment = async () => {
+    if (!canProcessPayments) {
+      toast.error('You do not have permission to process payments');
+      return;
     }
-    
-    const selectedTotal = selectedSubtotal + taxResult.totalTax;
 
-    // Navigate to payment screen with selected items and customer
-    navigate('/dashboard/pos/payment', {
-      state: {
-        saleData: {
-          ...selectedPaymentTab,
-          items: selectedItems,
-          loyaltyCustomer: paymentCustomer,
-          tab_mode: true,
-          payment_type: 'partial',
-          subtotal: selectedSubtotal,
-          tax_amount: taxResult.totalTax,
-          total_amount: selectedTotal,
-          amount_paid: 0,
-          balance_remaining: selectedTotal,
-          is_partial_payment: true,
-          original_tab_id: selectedPaymentTab.id,
-          // Include tax breakdown for payment screen
-          aggregatedTaxes: taxResult.aggregatedTaxes,
-          aggregatedRebates: taxResult.aggregatedRebates,
-          itemTaxDetails: taxResult.itemTaxDetails
-        }
+    try {
+      // Calculate totals for selected items using tax calculations
+      const selectedSubtotal = selectedItems.reduce((sum, item) => sum + (Number(item.total_price) || 0), 0);
+      
+      // Prepare items for tax calculation (add fallback structure)
+      const itemsForTaxCalc = selectedItems.map(item => ({
+        ...item,
+        price: item.unit_price || 0,
+        quantity: item.quantity || 1,
+        category_id: null
+      }));
+      
+      let taxResult = { totalTax: 0, aggregatedTaxes: {}, aggregatedRebates: {}, itemTaxDetails: [] };
+      
+      // Use tax calculation hook if available
+      if (!taxCalculations.loading && taxCalculations.taxCategories.length > 0) {
+        taxResult = taxCalculations.calculateTotalTax(itemsForTaxCalc, 0, 0, selectedSubtotal);
+      } else {
+        // Fallback tax calculation
+        taxResult.totalTax = selectedSubtotal * 0.13; // 13% HST fallback
       }
-    });
+      
+      const selectedTotal = selectedSubtotal + taxResult.totalTax;
 
-    // Reset modal states
-    setShowCustomerSelectionModal(false);
-    setSelectedPaymentTab(null);
-    setSelectedItems([]);
-    setPaymentCustomer(null);
+      await logSecurityEvent('tab_payment_initiated', {
+        action: 'proceed_to_payment',
+        business_id: authData.selectedBusinessId,
+        tab_id: selectedPaymentTab.id,
+        item_count: selectedItems.length,
+        total_amount: selectedTotal
+      }, 'medium');
+
+      await recordAction('tab_payment_initiated', selectedPaymentTab.id, true);
+
+      // Navigate to payment screen with selected items and customer
+      navigate('/dashboard/pos/payment', {
+        state: {
+          saleData: {
+            ...selectedPaymentTab,
+            items: selectedItems,
+            loyaltyCustomer: paymentCustomer,
+            tab_mode: true,
+            payment_type: 'partial',
+            subtotal: selectedSubtotal,
+            tax_amount: taxResult.totalTax,
+            total_amount: selectedTotal,
+            amount_paid: 0,
+            balance_remaining: selectedTotal,
+            is_partial_payment: true,
+            original_tab_id: selectedPaymentTab.id,
+            aggregatedTaxes: taxResult.aggregatedTaxes,
+            aggregatedRebates: taxResult.aggregatedRebates,
+            itemTaxDetails: taxResult.itemTaxDetails
+          }
+        }
+      });
+
+      // Reset modal states
+      setShowCustomerSelectionModal(false);
+      setSelectedPaymentTab(null);
+      setSelectedItems([]);
+      setPaymentCustomer(null);
+
+    } catch (err) {
+      await logSecurityEvent('tab_payment_error', {
+        action: 'proceed_to_payment_failed',
+        business_id: authData.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
+      toast.error('Failed to proceed to payment: ' + err.message);
+    }
   };
 
   const handleCreateTab = async (tabData) => {
-    const { data: tab, error } = await supabase
-      .from('pos_tabs')
-      .insert(tabData)
-      .select()
-      .single();
+    if (!canCreateTabs) {
+      toast.error('You do not have permission to create tabs');
+      return;
+    }
 
-    if (error) throw error;
+    try {
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('create_tab');
+      if (!rateLimitCheck.allowed) {
+        toast.error('Too many requests. Please wait a moment.');
+        return;
+      }
 
-    await logAction({
-      action: 'tab_created',
-      context: 'TabScreen',
-      metadata: {
+      await logSecurityEvent('tab_create_initiated', {
+        action: 'create_tab',
+        business_id: authData.selectedBusinessId,
+        customer_name: tabData.customer_name
+      }, 'medium');
+
+      const { data: tab, error } = await supabase
+        .from('pos_tabs')
+        .insert(tabData)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      await recordAction('tab_created', tab.id, true);
+      await logSecurityEvent('tab_created', {
+        action: 'create_tab_success',
+        business_id: authData.selectedBusinessId,
         tab_id: tab.id,
         tab_number: tab.tab_number,
         customer_name: tab.customer_name,
         loyalty_customer_id: tab.loyalty_customer_id
-      }
-    });
+      }, 'medium');
 
-    setShowCreateModal(false);
+      setShowCreateModal(false);
+      toast.success('Tab created successfully');
 
-    navigate('/dashboard/pos/register', {
-      state: {
-        activeTab: tab,
-        mode: 'tab',
-        justCreated: true
-      }
-    });
+      navigate('/dashboard/pos/register', {
+        state: {
+          activeTab: tab,
+          mode: 'tab',
+          justCreated: true
+        }
+      });
+
+    } catch (err) {
+      await logSecurityEvent('tab_create_error', {
+        action: 'create_tab_failed',
+        business_id: authData.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
+      toast.error('Failed to create tab: ' + err.message);
+    }
   };
 
-  const handleSelectTab = (tab) => {
+  const handleSelectTab = async (tab) => {
+    await logSecurityEvent('tab_details_viewed', {
+      action: 'view_tab_details',
+      business_id: authData.selectedBusinessId,
+      tab_id: tab.id
+    }, 'low');
+
     setSelectedTab(tab);
     setShowTabDetails(true);
   };
 
-  const handleAddItemsToTab = (tab) => {
+  const handleAddItemsToTab = async (tab) => {
+    if (!canEditTabs) {
+      toast.error('You do not have permission to edit tabs');
+      return;
+    }
+
+    await logSecurityEvent('tab_edit_initiated', {
+      action: 'add_items_to_tab',
+      business_id: authData.selectedBusinessId,
+      tab_id: tab.id
+    }, 'medium');
+
     navigate('/dashboard/pos/register', {
       state: {
         activeTab: tab,
@@ -455,7 +651,19 @@ const TabScreen = () => {
     });
   };
 
-  const handlePayTab = (tab, paymentType = 'partial') => {
+  const handlePayTab = async (tab, paymentType = 'partial') => {
+    if (!canProcessPayments) {
+      toast.error('You do not have permission to process payments');
+      return;
+    }
+
+    await logSecurityEvent('tab_payment_modal_opened', {
+      action: 'open_payment_modal',
+      business_id: authData.selectedBusinessId,
+      tab_id: tab.id,
+      payment_type: paymentType
+    }, 'medium');
+
     setSelectedPaymentTab(tab);
     setSelectedItems([]);
     setPaymentCustomer(null);
@@ -463,6 +671,11 @@ const TabScreen = () => {
   };
 
   const handleCloseTab = (tab) => {
+    if (!canCloseTabs) {
+      toast.error('You do not have permission to close tabs');
+      return;
+    }
+
     if (tab.balance_remaining > 0.01) {
       setPendingAction({ type: 'close_tab', tab });
       setOverrideReason('Closing tab with remaining balance');
@@ -475,6 +688,14 @@ const TabScreen = () => {
   const executeCloseTab = async (tab) => {
     try {
       setLoading(true);
+
+      await logSecurityEvent('tab_close_initiated', {
+        action: 'close_tab',
+        business_id: authData.selectedBusinessId,
+        tab_id: tab.id,
+        final_balance: tab.balance_remaining
+      }, 'high');
+
       const { error } = await supabase
         .from('pos_tabs')
         .update({ 
@@ -486,19 +707,26 @@ const TabScreen = () => {
 
       if (error) throw error;
 
-      await logAction({
-        action: 'tab_closed',
-        context: 'TabScreen',
-        metadata: {
-          tab_id: tab.id,
-          tab_number: tab.tab_number,
-          final_balance: tab.balance_remaining
-        }
-      });
+      await recordAction('tab_closed', tab.id, true);
+      await logSecurityEvent('tab_closed', {
+        action: 'close_tab_success',
+        business_id: authData.selectedBusinessId,
+        tab_id: tab.id,
+        tab_number: tab.tab_number,
+        final_balance: tab.balance_remaining
+      }, 'high');
 
+      toast.success('Tab closed successfully');
       loadTabs();
+
     } catch (err) {
-      console.error('Error closing tab:', err);
+      await logSecurityEvent('tab_close_error', {
+        action: 'close_tab_failed',
+        business_id: authData.selectedBusinessId,
+        tab_id: tab.id,
+        error_message: err.message
+      }, 'high');
+      
       setError('Failed to close tab: ' + err.message);
     } finally {
       setLoading(false);
@@ -506,6 +734,11 @@ const TabScreen = () => {
   };
 
   const handleDeleteTab = (tab) => {
+    if (!canDeleteTabs) {
+      toast.error('You do not have permission to delete tabs');
+      return;
+    }
+
     setPendingAction({ type: 'delete_tab', tab });
     setOverrideReason('Deleting tab - requires manager approval');
     setShowManagerOverride(true);
@@ -514,6 +747,13 @@ const TabScreen = () => {
   const executeDeleteTab = async (tab) => {
     try {
       setLoading(true);
+
+      await logSecurityEvent('tab_delete_initiated', {
+        action: 'delete_tab',
+        business_id: authData.selectedBusinessId,
+        tab_id: tab.id,
+        tab_number: tab.tab_number
+      }, 'high');
       
       // First delete associated tab items
       await supabase
@@ -529,23 +769,39 @@ const TabScreen = () => {
 
       if (error) throw error;
 
-      await logAction({
-        action: 'tab_deleted',
-        context: 'TabScreen',
-        metadata: {
-          tab_id: tab.id,
-          tab_number: tab.tab_number,
-          customer_name: tab.customer_name
-        }
-      });
+      await recordAction('tab_deleted', tab.id, true);
+      await logSecurityEvent('tab_deleted', {
+        action: 'delete_tab_success',
+        business_id: authData.selectedBusinessId,
+        tab_id: tab.id,
+        tab_number: tab.tab_number,
+        customer_name: tab.customer_name
+      }, 'high');
 
+      toast.success('Tab deleted successfully');
       loadTabs();
+
     } catch (err) {
-      console.error('Error deleting tab:', err);
+      await logSecurityEvent('tab_delete_error', {
+        action: 'delete_tab_failed',
+        business_id: authData.selectedBusinessId,
+        tab_id: tab.id,
+        error_message: err.message
+      }, 'high');
+      
       setError('Failed to delete tab: ' + err.message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSearchChange = async (value) => {
+    // Validate search input
+    const validation = await validateInput(value, 'text', 'tab_search');
+    if (!validation.valid) {
+      return;
+    }
+    setSearchTerm(value);
   };
 
   const filteredTabs = tabs.filter(tab => {
@@ -860,7 +1116,7 @@ const TabScreen = () => {
               <input
                 type="text"
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
+                onChange={(e) => handleSearchChange(e.target.value)}
                 placeholder="Customer name, phone, or tab number..."
                 style={styles.searchInput}
               />
@@ -910,12 +1166,14 @@ const TabScreen = () => {
             </div>
           </div>
           
-          <button
-            style={styles.createButton}
-            onClick={() => setShowCreateModal(true)}
-          >
-            + Create New Tab
-          </button>
+          <PermissionGate permission="pos.sales.create">
+            <button
+              style={styles.createButton}
+              onClick={() => setShowCreateModal(true)}
+            >
+              + Create New Tab
+            </button>
+          </PermissionGate>
         </div>
 
         {/* Stats */}
@@ -948,12 +1206,14 @@ const TabScreen = () => {
                 {searchTerm ? 'No tabs match your search criteria' : 'Create a new tab to get started'}
               </div>
               {!searchTerm && (
-                <button
-                  style={styles.createButton}
-                  onClick={() => setShowCreateModal(true)}
-                >
-                  Create First Tab
-                </button>
+                <PermissionGate permission="pos.sales.create">
+                  <button
+                    style={styles.createButton}
+                    onClick={() => setShowCreateModal(true)}
+                  >
+                    Create First Tab
+                  </button>
+                </PermissionGate>
               )}
             </div>
           ) : (
@@ -1025,39 +1285,50 @@ const TabScreen = () => {
                       onClick={() => handleSelectTab(tab)}
                       title="View Details"
                     >
-                      👁️ View
+                      <Eye size={16} style={{ marginRight: '4px', verticalAlign: 'middle' }} /> View
                     </button>
-                    <button
-                      style={styles.actionButton}
-                      onClick={() => handleAddItemsToTab(tab)}
-                      title="Add Items"
-                    >
-                      ➕ Add Items
-                    </button>
+                    
+                    <PermissionGate permission="pos.sales.create">
+                      <button
+                        style={styles.actionButton}
+                        onClick={() => handleAddItemsToTab(tab)}
+                        title="Add Items"
+                      >
+                        ➕ Add Items
+                      </button>
+                    </PermissionGate>
+                    
                     {tab.balance_remaining > 0 ? (
-                      <button
-                        style={styles.payButton}
-                        onClick={() => handlePayTab(tab, 'partial')}
-                        title="Make Payment"
-                      >
-                        💳 Pay
-                      </button>
+                      <PermissionGate permission="pos.sales.create">
+                        <button
+                          style={styles.payButton}
+                          onClick={() => handlePayTab(tab, 'partial')}
+                          title="Make Payment"
+                        >
+                          💳 Pay
+                        </button>
+                      </PermissionGate>
                     ) : (
-                      <button
-                        style={styles.closeButton}
-                        onClick={() => handleCloseTab(tab)}
-                        title="Close Tab"
-                      >
-                        ✅ Close
-                      </button>
+                      <PermissionGate permissions={['pos.sales.create', 'pos.cash.count']} requireAny>
+                        <button
+                          style={styles.closeButton}
+                          onClick={() => handleCloseTab(tab)}
+                          title="Close Tab"
+                        >
+                          ✅ Close
+                        </button>
+                      </PermissionGate>
                     )}
-                    <button
-                      style={styles.deleteButton}
-                      onClick={() => handleDeleteTab(tab)}
-                      title="Delete Tab"
-                    >
-                      🗑️
-                    </button>
+                    
+                    <PermissionGate permission="pos.sales.void" requireOwner>
+                      <button
+                        style={styles.deleteButton}
+                        onClick={() => handleDeleteTab(tab)}
+                        title="Delete Tab"
+                      >
+                        🗑️
+                      </button>
+                    </PermissionGate>
                   </div>
                 </div>
               ))}
@@ -1159,14 +1430,21 @@ const TabScreen = () => {
   };
 
   return (
-    <POSAuthWrapper
-      requireBusiness={true}
-      requiredRoles={['cashier', 'manager', 'owner']}
-      componentName="Tab Management"
-      onAuthReady={handleAuthReady}
+    <SecurityWrapper
+      componentName="TabScreen"
+      sensitiveComponent={true}
+      requireSecureConnection={false}
+      securityLevel="high"
     >
-      <TabScreenContent />
-    </POSAuthWrapper>
+      <POSAuthWrapper
+        requireBusiness={true}
+        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        componentName="Tab Management"
+        onAuthReady={handleAuthReady}
+      >
+        <TabScreenContent />
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

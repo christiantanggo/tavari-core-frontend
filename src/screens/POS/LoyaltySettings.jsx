@@ -1,4 +1,4 @@
-// screens/POS/LoyaltySettings.jsx - Updated with Tavari Standards and Audit Logging
+// screens/POS/LoyaltySettings.jsx - Updated with Permissions and Clean Logging
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
@@ -10,12 +10,33 @@ import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
 import { useAuditLog } from '../../hooks/useAuditLog';
 
+// Permission system integration
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
+import { FiLock, FiAlertCircle } from 'react-icons/fi';
+
 const LoyaltySettings = () => {
   const navigate = useNavigate();
   const auditLog = useAuditLog();
   
   // Auth state will be handled by POSAuthWrapper
   const [authData, setAuthData] = useState(null);
+  
+  // Permission system integration
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewLoyaltySettings = hasAnyPermission(['pos.settings.view', 'pos.settings.edit']) || hasElevatedPrivileges();
+  const canEditLoyaltySettings = hasPermission('pos.settings.edit') || isOwner();
+  const canManageLoyaltyProgram = hasPermission('pos.loyalty.manage') || hasElevatedPrivileges();
   
   const [settings, setSettings] = useState({
     // Program Configuration
@@ -76,23 +97,33 @@ const LoyaltySettings = () => {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(false);
 
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewLoyaltySettings) {
+      toast.error('You do not have permission to access loyalty settings');
+      navigate('/dashboard/pos');
+    }
+  }, [permissionsLoading, canViewLoyaltySettings, navigate]);
+
   // Handle auth ready callback
   const handleAuthReady = async (auth) => {
-    console.log('LoyaltySettings: Auth ready:', auth);
     setAuthData(auth);
     
     // Log access to loyalty settings
     await auditLog.logPOS('loyalty_settings_accessed', {
       user_role: auth.userRole,
-      business_name: auth.businessData?.name
+      business_name: auth.businessData?.name,
+      can_edit: canEditLoyaltySettings
     });
   };
 
   useEffect(() => {
-    if (authData?.selectedBusinessId) {
-      loadSettings();
+    if (authData?.selectedBusinessId && !permissionsLoading) {
+      if (canViewLoyaltySettings) {
+        loadSettings();
+      }
     }
-  }, [authData?.selectedBusinessId]);
+  }, [authData?.selectedBusinessId, permissionsLoading, canViewLoyaltySettings]);
 
   const loadSettings = async () => {
     try {
@@ -135,8 +166,8 @@ const LoyaltySettings = () => {
         });
       }
     } catch (err) {
-      console.error('Error loading loyalty settings:', err);
       setError('Failed to load loyalty settings');
+      toast.error('Failed to load loyalty settings');
       
       await auditLog.logPOS('loyalty_settings_load_failed', {
         error: err.message
@@ -147,6 +178,12 @@ const LoyaltySettings = () => {
   };
 
   const handleSave = async () => {
+    // Permission check
+    if (!canEditLoyaltySettings) {
+      toast.error('You do not have permission to edit loyalty settings');
+      return;
+    }
+
     try {
       setSaving(true);
       setError(null);
@@ -182,6 +219,7 @@ const LoyaltySettings = () => {
 
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
+      toast.success('Loyalty settings saved successfully');
 
       // Log successful save with detailed changes
       await auditLog.logUpdate(
@@ -202,8 +240,8 @@ const LoyaltySettings = () => {
       });
 
     } catch (err) {
-      console.error('Error saving loyalty settings:', err);
       setError('Failed to save settings');
+      toast.error('Failed to save settings');
       
       await auditLog.logPOS('loyalty_settings_save_failed', {
         error: err.message,
@@ -215,6 +253,12 @@ const LoyaltySettings = () => {
   };
 
   const handleInputChange = async (field, value) => {
+    // Permission check for editing
+    if (!canEditLoyaltySettings) {
+      toast.error('You do not have permission to edit loyalty settings');
+      return;
+    }
+
     const oldValue = settings[field];
     
     setSettings(prev => {
@@ -294,6 +338,51 @@ const LoyaltySettings = () => {
       fontSize: TavariStyles.typography.fontSize.lg,
       color: TavariStyles.colors.gray600
     },
+
+    readOnlyBadge: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.md}`,
+      backgroundColor: TavariStyles.colors.warningBg,
+      border: `2px solid ${TavariStyles.colors.warning}`,
+      borderRadius: TavariStyles.borderRadius.md,
+      color: TavariStyles.colors.warningText,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      fontWeight: TavariStyles.typography.fontWeight.medium,
+      marginTop: TavariStyles.spacing.md
+    },
+
+    accessDenied: {
+      ...TavariStyles.layout.card,
+      padding: TavariStyles.spacing['4xl'],
+      textAlign: 'center',
+      marginTop: TavariStyles.spacing['4xl']
+    },
+
+    accessDeniedIcon: {
+      fontSize: '64px',
+      color: TavariStyles.colors.danger,
+      marginBottom: TavariStyles.spacing.lg
+    },
+
+    accessDeniedTitle: {
+      fontSize: TavariStyles.typography.fontSize['2xl'],
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray800,
+      marginBottom: TavariStyles.spacing.md
+    },
+
+    accessDeniedText: {
+      fontSize: TavariStyles.typography.fontSize.md,
+      color: TavariStyles.colors.gray600,
+      marginBottom: TavariStyles.spacing.xl
+    },
+
+    backButton: {
+      ...TavariStyles.components.button.base,
+      ...TavariStyles.components.button.variants.primary
+    },
     
     tabNav: {
       display: 'flex',
@@ -355,6 +444,13 @@ const LoyaltySettings = () => {
         outline: 'none'
       }
     },
+
+    inputDisabled: {
+      ...TavariStyles.components.form.input,
+      backgroundColor: TavariStyles.colors.gray100,
+      cursor: 'not-allowed',
+      opacity: 0.6
+    },
     
     select: {
       ...TavariStyles.components.form.select,
@@ -362,6 +458,13 @@ const LoyaltySettings = () => {
         borderColor: TavariStyles.colors.primary,
         outline: 'none'
       }
+    },
+
+    selectDisabled: {
+      ...TavariStyles.components.form.select,
+      backgroundColor: TavariStyles.colors.gray100,
+      cursor: 'not-allowed',
+      opacity: 0.6
     },
     
     buttonGroup: {
@@ -382,6 +485,11 @@ const LoyaltySettings = () => {
       backgroundColor: TavariStyles.colors.primary,
       borderColor: TavariStyles.colors.primary,
       color: TavariStyles.colors.white
+    },
+
+    toggleButtonDisabled: {
+      opacity: 0.5,
+      cursor: 'not-allowed'
     },
     
     flexRow: {
@@ -436,10 +544,35 @@ const LoyaltySettings = () => {
   };
 
   const LoyaltySettingsContent = () => {
-    if (loading) {
+    // Show loading while permissions are being checked
+    if (permissionsLoading || loading) {
       return (
         <div style={styles.loading}>
-          <div>Loading loyalty settings...</div>
+          <div>{permissionsLoading ? 'Loading permissions...' : 'Loading loyalty settings...'}</div>
+        </div>
+      );
+    }
+
+    // Show access denied if no permission
+    if (!canViewLoyaltySettings) {
+      return (
+        <div style={styles.container}>
+          <div style={styles.accessDenied}>
+            <FiLock style={styles.accessDeniedIcon} />
+            <h2 style={styles.accessDeniedTitle}>Access Denied</h2>
+            <p style={styles.accessDeniedText}>
+              You do not have permission to access loyalty settings.
+            </p>
+            <p style={styles.accessDeniedText}>
+              Contact your administrator to request access.
+            </p>
+            <button 
+              style={styles.backButton}
+              onClick={() => navigate('/dashboard/pos')}
+            >
+              Back to POS Dashboard
+            </button>
+          </div>
         </div>
       );
     }
@@ -449,6 +582,12 @@ const LoyaltySettings = () => {
         <div style={styles.header}>
           <h2 style={styles.title}>Advanced Loyalty Program Settings</h2>
           <p style={styles.subtitle}>Configure your complete customer loyalty and rewards program</p>
+          {!canEditLoyaltySettings && (
+            <div style={styles.readOnlyBadge}>
+              <FiAlertCircle />
+              <span>View-Only Mode - Contact admin to make changes</span>
+            </div>
+          )}
         </div>
 
         {/* Tab Navigation */}
@@ -486,18 +625,22 @@ const LoyaltySettings = () => {
                   <button
                     style={{
                       ...styles.toggleButton,
-                      ...(settings.is_active ? styles.toggleButtonActive : {})
+                      ...(settings.is_active ? styles.toggleButtonActive : {}),
+                      ...(!canEditLoyaltySettings ? styles.toggleButtonDisabled : {})
                     }}
                     onClick={() => handleInputChange('is_active', true)}
+                    disabled={!canEditLoyaltySettings}
                   >
                     Active
                   </button>
                   <button
                     style={{
                       ...styles.toggleButton,
-                      ...(!settings.is_active ? styles.toggleButtonActive : {})
+                      ...(!settings.is_active ? styles.toggleButtonActive : {}),
+                      ...(!canEditLoyaltySettings ? styles.toggleButtonDisabled : {})
                     }}
                     onClick={() => handleInputChange('is_active', false)}
+                    disabled={!canEditLoyaltySettings}
                   >
                     Inactive
                   </button>
@@ -509,7 +652,8 @@ const LoyaltySettings = () => {
                 <select
                   value={settings.loyalty_mode}
                   onChange={(e) => handleInputChange('loyalty_mode', e.target.value)}
-                  style={styles.select}
+                  style={canEditLoyaltySettings ? styles.select : styles.selectDisabled}
+                  disabled={!canEditLoyaltySettings}
                 >
                   <option value="points">Points System (like PC Optimum)</option>
                   <option value="dollars">Dollar Credits</option>
@@ -525,7 +669,8 @@ const LoyaltySettings = () => {
                   step="0.1"
                   min="0"
                   max="10"
-                  style={styles.input}
+                  style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                  disabled={!canEditLoyaltySettings}
                 />
                 <div style={styles.helperText}>
                   Examples: {settings.loyalty_mode === 'points' ? 
@@ -545,7 +690,11 @@ const LoyaltySettings = () => {
                       onChange={(e) => handleInputChange('redemption_rate', parseInt(e.target.value) || 10000)}
                       step="1000"
                       min="1000"
-                      style={{...styles.input, width: '120px'}}
+                      style={{
+                        ...(canEditLoyaltySettings ? styles.input : styles.inputDisabled),
+                        width: '120px'
+                      }}
+                      disabled={!canEditLoyaltySettings}
                     />
                     <span style={styles.flexText}>points = $10.00</span>
                   </div>
@@ -561,6 +710,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('points_on_tax', checked)}
                   label="Earn Points on Tax"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
 
@@ -570,6 +720,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('points_on_discounted_items', checked)}
                   label="Earn Points on Discounted Items"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
             </div>
@@ -585,7 +736,8 @@ const LoyaltySettings = () => {
                 <select
                   value={settings.auto_apply}
                   onChange={(e) => handleInputChange('auto_apply', e.target.value)}
-                  style={styles.select}
+                  style={canEditLoyaltySettings ? styles.select : styles.selectDisabled}
+                  disabled={!canEditLoyaltySettings}
                 >
                   <option value="always">Always auto-apply when minimum reached</option>
                   <option value="customer_choice">Let customer choose each time</option>
@@ -601,7 +753,8 @@ const LoyaltySettings = () => {
                   onChange={(e) => handleInputChange('min_redemption', parseInt(e.target.value) || 0)}
                   step={settings.loyalty_mode === 'points' ? '1000' : '1'}
                   min="0"
-                  style={styles.input}
+                  style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                  disabled={!canEditLoyaltySettings}
                 />
                 <div style={styles.helperText}>
                   {settings.loyalty_mode === 'points' ? 
@@ -620,7 +773,8 @@ const LoyaltySettings = () => {
                   step={settings.loyalty_mode === 'points' ? '1000' : '1'}
                   min="0"
                   placeholder="No limit"
-                  style={styles.input}
+                  style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
 
@@ -633,7 +787,8 @@ const LoyaltySettings = () => {
                   step={settings.loyalty_mode === 'points' ? '1000' : '1'}
                   min="0"
                   placeholder="No daily limit"
-                  style={styles.input}
+                  style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
 
@@ -643,6 +798,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('allow_partial_redemption', checked)}
                   label="Allow Partial Redemption"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
 
@@ -652,6 +808,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('credits_expire', checked)}
                   label="Credits Expire"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
 
@@ -662,7 +819,8 @@ const LoyaltySettings = () => {
                     <select
                       value={settings.expiry_months}
                       onChange={(e) => handleInputChange('expiry_months', parseInt(e.target.value))}
-                      style={styles.select}
+                      style={canEditLoyaltySettings ? styles.select : styles.selectDisabled}
+                      disabled={!canEditLoyaltySettings}
                     >
                       <option value={3}>3 months</option>
                       <option value={6}>6 months</option>
@@ -679,7 +837,8 @@ const LoyaltySettings = () => {
                       onChange={(e) => handleInputChange('expiry_warning_days', parseInt(e.target.value) || 30)}
                       min="0"
                       max="90"
-                      style={styles.input}
+                      style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                      disabled={!canEditLoyaltySettings}
                     />
                     <div style={styles.helperText}>
                       Notify customers this many days before expiration
@@ -704,7 +863,8 @@ const LoyaltySettings = () => {
                   step={settings.loyalty_mode === 'points' ? '100' : '1'}
                   min="0"
                   placeholder="No daily earning limit"
-                  style={styles.input}
+                  style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
 
@@ -716,7 +876,8 @@ const LoyaltySettings = () => {
                   onChange={(e) => handleInputChange('max_total_balance', parseInt(e.target.value) || 100000)}
                   step={settings.loyalty_mode === 'points' ? '10000' : '100'}
                   min="0"
-                  style={styles.input}
+                  style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                  disabled={!canEditLoyaltySettings}
                 />
                 <div style={styles.helperText}>
                   Prevent unlimited point accumulation for fraud protection
@@ -728,7 +889,8 @@ const LoyaltySettings = () => {
                 <select
                   value={settings.refund_point_policy}
                   onChange={(e) => handleInputChange('refund_point_policy', e.target.value)}
-                  style={styles.select}
+                  style={canEditLoyaltySettings ? styles.select : styles.selectDisabled}
+                  disabled={!canEditLoyaltySettings}
                 >
                   <option value="deduct_unvested_first">Deduct pending points first, then available</option>
                   <option value="deduct_available_first">Deduct available points first</option>
@@ -742,6 +904,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('email_point_summaries', checked)}
                   label="Send Monthly Email Summaries"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
 
@@ -751,6 +914,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('sms_balance_alerts', checked)}
                   label="Send SMS Balance Alerts"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
             </div>
@@ -767,6 +931,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('require_id_for_large_redemptions', checked)}
                   label="Require ID for Large Redemptions"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
               </div>
 
@@ -779,7 +944,8 @@ const LoyaltySettings = () => {
                     onChange={(e) => handleInputChange('large_redemption_threshold', parseInt(e.target.value) || 50000)}
                     step={settings.loyalty_mode === 'points' ? '10000' : '50'}
                     min="0"
-                    style={styles.input}
+                    style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                    disabled={!canEditLoyaltySettings}
                   />
                   <div style={styles.helperText}>
                     Require ID when redeeming above this amount in a single transaction
@@ -795,7 +961,8 @@ const LoyaltySettings = () => {
                   onChange={(e) => handleInputChange('suspicious_activity_threshold', parseInt(e.target.value) || 10000)}
                   step={settings.loyalty_mode === 'points' ? '1000' : '10'}
                   min="0"
-                  style={styles.input}
+                  style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                  disabled={!canEditLoyaltySettings}
                 />
                 <div style={styles.helperText}>
                   Flag unusual earning patterns above this daily amount
@@ -815,6 +982,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('allow_family_pooling', checked)}
                   label="Allow Family Account Pooling"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
                 <div style={styles.helperText}>
                   Allow families to combine points/credits
@@ -831,7 +999,8 @@ const LoyaltySettings = () => {
                       onChange={(e) => handleInputChange('max_linked_accounts', parseInt(e.target.value) || 5)}
                       min="2"
                       max="10"
-                      style={styles.input}
+                      style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                      disabled={!canEditLoyaltySettings}
                     />
                   </div>
 
@@ -841,6 +1010,7 @@ const LoyaltySettings = () => {
                       onChange={(checked) => handleInputChange('allow_point_transfers', checked)}
                       label="Allow Point Transfers Between Family Members"
                       size="md"
+                      disabled={!canEditLoyaltySettings}
                     />
                   </div>
                 </>
@@ -859,6 +1029,7 @@ const LoyaltySettings = () => {
                   onChange={(checked) => handleInputChange('enable_bonus_campaigns', checked)}
                   label="Enable Bonus Campaigns"
                   size="md"
+                  disabled={!canEditLoyaltySettings}
                 />
                 <div style={styles.helperText}>
                   Allow special promotions and bonus earning events
@@ -875,7 +1046,8 @@ const LoyaltySettings = () => {
                       onChange={(e) => handleInputChange('welcome_bonus', parseInt(e.target.value) || 0)}
                       step={settings.loyalty_mode === 'points' ? '100' : '1'}
                       min="0"
-                      style={styles.input}
+                      style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                      disabled={!canEditLoyaltySettings}
                     />
                     <div style={styles.helperText}>
                       {settings.loyalty_mode === 'points' ? 'Points' : 'Dollars'} awarded for signing up
@@ -890,7 +1062,8 @@ const LoyaltySettings = () => {
                       onChange={(e) => handleInputChange('birthday_bonus', parseInt(e.target.value) || 0)}
                       step={settings.loyalty_mode === 'points' ? '100' : '1'}
                       min="0"
-                      style={styles.input}
+                      style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                      disabled={!canEditLoyaltySettings}
                     />
                     <div style={styles.helperText}>
                       Annual birthday reward
@@ -905,7 +1078,8 @@ const LoyaltySettings = () => {
                       onChange={(e) => handleInputChange('review_bonus', parseInt(e.target.value) || 0)}
                       step={settings.loyalty_mode === 'points' ? '10' : '0.5'}
                       min="0"
-                      style={styles.input}
+                      style={canEditLoyaltySettings ? styles.input : styles.inputDisabled}
+                      disabled={!canEditLoyaltySettings}
                     />
                     <div style={styles.helperText}>
                       Reward for leaving product/service reviews
@@ -928,18 +1102,20 @@ const LoyaltySettings = () => {
             </div>
           )}
 
-          <div style={styles.actions}>
-            <button
-              style={{
-                ...styles.saveButton,
-                ...(saving ? { opacity: 0.6, cursor: 'not-allowed' } : {})
-              }}
-              onClick={handleSave}
-              disabled={saving}
-            >
-              {saving ? 'Saving...' : 'Save All Settings'}
-            </button>
-          </div>
+          {canEditLoyaltySettings && (
+            <div style={styles.actions}>
+              <button
+                style={{
+                  ...styles.saveButton,
+                  ...(saving ? { opacity: 0.6, cursor: 'not-allowed' } : {})
+                }}
+                onClick={handleSave}
+                disabled={saving}
+              >
+                {saving ? 'Saving...' : 'Save All Settings'}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );

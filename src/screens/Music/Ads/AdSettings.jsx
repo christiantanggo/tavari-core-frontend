@@ -4,12 +4,32 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../../supabaseClient';
 import { useBusiness } from '../../../contexts/BusinessContext';
 import { useUserProfile } from '../../../hooks/useUserProfile';
+import { usePermissions } from '../../../hooks/usePermissions';
+import PermissionGate from '../../../components/Auth/PermissionGate';
 import SessionManager from '../../../components/SessionManager';
+import toast from 'react-hot-toast';
+import { FiLock } from 'react-icons/fi';
 
 const AdSettings = () => {
   const navigate = useNavigate();
   const { business } = useBusiness();
   const { profile } = useUserProfile();
+  
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canEditSettings = hasPermission('music.settings.edit') || hasElevatedPrivileges();
+  const canManageAds = hasPermission('music.ads.manage') || hasElevatedPrivileges();
+  const canAccessSettings = hasAnyPermission(['music.settings.edit', 'music.ads.manage']) || hasElevatedPrivileges();
+  const canViewRevenue = hasAnyPermission(['reports.financial.view', 'music.ads.manage']) || hasElevatedPrivileges();
   
   const [settings, setSettings] = useState({
     // Global Ad Settings
@@ -50,11 +70,17 @@ const AdSettings = () => {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (business?.id) {
+    if (business?.id && !permissionsLoading) {
+      if (!canAccessSettings) {
+        toast.error('You do not have permission to access ad settings');
+        navigate('/dashboard/music');
+        return;
+      }
+      
       loadSettings();
       loadApiProviders();
     }
-  }, [business?.id]);
+  }, [business?.id, permissionsLoading, canAccessSettings]);
 
   const loadSettings = async () => {
     if (!business?.id) return;
@@ -132,8 +158,8 @@ const AdSettings = () => {
       setSettings(loadedSettings);
       
     } catch (err) {
-      console.error('Error loading settings:', err);
       setError(err.message);
+      toast.error('Failed to load settings');
     } finally {
       setIsLoading(false);
     }
@@ -163,11 +189,17 @@ const AdSettings = () => {
       }));
       
     } catch (err) {
-      console.error('Error loading API providers:', err);
+      toast.error('Failed to load API providers');
     }
   };
 
   const updateSetting = (path, value) => {
+    // Permission check
+    if (!canEditSettings) {
+      toast.error('You do not have permission to edit settings');
+      return;
+    }
+
     setSettings(prev => {
       const newSettings = { ...prev };
       const keys = path.split('.');
@@ -187,6 +219,12 @@ const AdSettings = () => {
   };
 
   const saveSettings = async () => {
+    // Permission check
+    if (!canEditSettings) {
+      toast.error('You do not have permission to save settings');
+      return;
+    }
+
     if (!business?.id) return;
     
     try {
@@ -239,18 +277,23 @@ const AdSettings = () => {
       }
       
       setIsDirty(false);
-      alert('Ad settings saved successfully');
+      toast.success('Ad settings saved successfully');
       
     } catch (err) {
-      console.error('Error saving settings:', err);
       setError(err.message);
-      alert('Failed to save settings: ' + err.message);
+      toast.error('Failed to save settings: ' + err.message);
     } finally {
       setIsSaving(false);
     }
   };
 
   const testAdProvider = async (providerName) => {
+    // Permission check
+    if (!canManageAds) {
+      toast.error('You do not have permission to test ad providers');
+      return;
+    }
+
     try {
       setTestingProvider(providerName);
       
@@ -261,19 +304,25 @@ const AdSettings = () => {
       const success = Math.random() > 0.2; // 80% success rate for testing
       
       if (success) {
-        alert(`✅ ${providerName} test successful - API is responding correctly`);
+        toast.success(`${providerName} test successful - API is responding correctly`);
       } else {
-        alert(`❌ ${providerName} test failed - Check your API credentials`);
+        toast.error(`${providerName} test failed - Check your API credentials`);
       }
       
     } catch (err) {
-      alert(`❌ ${providerName} test failed: ${err.message}`);
+      toast.error(`${providerName} test failed: ${err.message}`);
     } finally {
       setTestingProvider(null);
     }
   };
 
   const clearAdCache = async () => {
+    // Permission check
+    if (!canManageAds) {
+      toast.error('You do not have permission to clear ad cache');
+      return;
+    }
+
     const confirmed = window.confirm(
       'This will remove all cached ads and force fresh requests from all providers. Continue?'
     );
@@ -288,10 +337,9 @@ const AdSettings = () => {
         
         if (error) throw error;
         
-        alert('✅ Ad cache cleared successfully');
+        toast.success('Ad cache cleared successfully');
       } catch (err) {
-        console.error('Error clearing cache:', err);
-        alert('❌ Failed to clear cache: ' + err.message);
+        toast.error('Failed to clear cache: ' + err.message);
       }
     }
   };
@@ -317,6 +365,42 @@ const AdSettings = () => {
       currency: 'CAD'
     }).format(amount);
   };
+
+  // Show loading while permissions are being checked
+  if (permissionsLoading) {
+    return (
+      <SessionManager>
+        <div style={styles.loadingContainer}>
+          <div style={styles.spinner}></div>
+          <div style={styles.loadingText}>Loading permissions...</div>
+        </div>
+      </SessionManager>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canAccessSettings) {
+    return (
+      <SessionManager>
+        <div style={styles.errorContainer}>
+          <FiLock size={64} style={{ color: '#f44336', marginBottom: '20px' }} />
+          <h2 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>Access Denied</h2>
+          <p style={{ fontSize: '16px', color: '#666', marginBottom: '20px' }}>
+            You do not have permission to access ad settings.
+          </p>
+          <p style={{ fontSize: '14px', color: '#999', marginBottom: '30px' }}>
+            Contact your manager or administrator for access.
+          </p>
+          <button 
+            onClick={() => navigate('/dashboard/music')} 
+            style={styles.retryButton}
+          >
+            Return to Music Dashboard
+          </button>
+        </div>
+      </SessionManager>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -349,6 +433,22 @@ const AdSettings = () => {
         <div style={styles.card}>
           <h1 style={styles.title}>Ad Settings</h1>
           <p style={styles.subtitle}>Configure ad serving, revenue sharing, and content preferences</p>
+          {!canEditSettings && (
+            <div style={{ 
+              marginTop: '15px', 
+              padding: '10px', 
+              backgroundColor: '#fff3cd', 
+              borderRadius: '4px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}>
+              <FiLock size={16} style={{ color: '#856404' }} />
+              <span style={{ color: '#856404', fontSize: '14px' }}>
+                View-only mode - You need edit permissions to modify settings
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Global Ad Settings */}
@@ -357,7 +457,10 @@ const AdSettings = () => {
 
           <div style={styles.settingRow}>
             <div style={styles.settingInfo}>
-              <h3 style={styles.settingLabel}>Enable Advertisements</h3>
+              <h3 style={styles.settingLabel}>
+                Enable Advertisements
+                {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+              </h3>
               <p style={styles.settingDescription}>Turn ads on or off for your music system</p>
             </div>
             <label style={styles.switch}>
@@ -365,6 +468,7 @@ const AdSettings = () => {
                 type="checkbox"
                 checked={settings.adsEnabled}
                 onChange={(e) => updateSetting('adsEnabled', e.target.checked)}
+                disabled={!canEditSettings}
               />
               <span style={styles.slider}></span>
             </label>
@@ -374,17 +478,20 @@ const AdSettings = () => {
 
           <div style={styles.settingRow}>
             <div style={styles.settingInfo}>
-              <h3 style={styles.settingLabel}>Ad Frequency: Every {settings.adFrequency} songs</h3>
+              <h3 style={styles.settingLabel}>
+                Ad Frequency: Every {settings.adFrequency} songs
+                {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+              </h3>
               <p style={styles.settingDescription}>How often ads play between music tracks</p>
             </div>
             <div style={styles.frequencyControls}>
               <button
                 onClick={() => updateSetting('adFrequency', Math.max(3, settings.adFrequency - 1))}
-                disabled={settings.adFrequency <= 3}
+                disabled={settings.adFrequency <= 3 || !canEditSettings}
                 style={{
                   ...styles.controlButton,
-                  opacity: settings.adFrequency <= 3 ? 0.5 : 1,
-                  cursor: settings.adFrequency <= 3 ? 'not-allowed' : 'pointer'
+                  opacity: (settings.adFrequency <= 3 || !canEditSettings) ? 0.5 : 1,
+                  cursor: (settings.adFrequency <= 3 || !canEditSettings) ? 'not-allowed' : 'pointer'
                 }}
               >
                 -
@@ -392,11 +499,11 @@ const AdSettings = () => {
               <span style={styles.frequencyValue}>{settings.adFrequency}</span>
               <button
                 onClick={() => updateSetting('adFrequency', Math.min(15, settings.adFrequency + 1))}
-                disabled={settings.adFrequency >= 15}
+                disabled={settings.adFrequency >= 15 || !canEditSettings}
                 style={{
                   ...styles.controlButton,
-                  opacity: settings.adFrequency >= 15 ? 0.5 : 1,
-                  cursor: settings.adFrequency >= 15 ? 'not-allowed' : 'pointer'
+                  opacity: (settings.adFrequency >= 15 || !canEditSettings) ? 0.5 : 1,
+                  cursor: (settings.adFrequency >= 15 || !canEditSettings) ? 'not-allowed' : 'pointer'
                 }}
               >
                 +
@@ -408,17 +515,20 @@ const AdSettings = () => {
 
           <div style={styles.settingRow}>
             <div style={styles.settingInfo}>
-              <h3 style={styles.settingLabel}>Max Ads Per Hour: {settings.maxAdsPerHour}</h3>
+              <h3 style={styles.settingLabel}>
+                Max Ads Per Hour: {settings.maxAdsPerHour}
+                {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+              </h3>
               <p style={styles.settingDescription}>Limit total ads played per hour</p>
             </div>
             <div style={styles.frequencyControls}>
               <button
                 onClick={() => updateSetting('maxAdsPerHour', Math.max(1, settings.maxAdsPerHour - 1))}
-                disabled={settings.maxAdsPerHour <= 1}
+                disabled={settings.maxAdsPerHour <= 1 || !canEditSettings}
                 style={{
                   ...styles.controlButton,
-                  opacity: settings.maxAdsPerHour <= 1 ? 0.5 : 1,
-                  cursor: settings.maxAdsPerHour <= 1 ? 'not-allowed' : 'pointer'
+                  opacity: (settings.maxAdsPerHour <= 1 || !canEditSettings) ? 0.5 : 1,
+                  cursor: (settings.maxAdsPerHour <= 1 || !canEditSettings) ? 'not-allowed' : 'pointer'
                 }}
               >
                 -
@@ -426,11 +536,11 @@ const AdSettings = () => {
               <span style={styles.frequencyValue}>{settings.maxAdsPerHour}</span>
               <button
                 onClick={() => updateSetting('maxAdsPerHour', Math.min(12, settings.maxAdsPerHour + 1))}
-                disabled={settings.maxAdsPerHour >= 12}
+                disabled={settings.maxAdsPerHour >= 12 || !canEditSettings}
                 style={{
                   ...styles.controlButton,
-                  opacity: settings.maxAdsPerHour >= 12 ? 0.5 : 1,
-                  cursor: settings.maxAdsPerHour >= 12 ? 'not-allowed' : 'pointer'
+                  opacity: (settings.maxAdsPerHour >= 12 || !canEditSettings) ? 0.5 : 1,
+                  cursor: (settings.maxAdsPerHour >= 12 || !canEditSettings) ? 'not-allowed' : 'pointer'
                 }}
               >
                 +
@@ -442,17 +552,20 @@ const AdSettings = () => {
 
           <div style={styles.settingRow}>
             <div style={styles.settingInfo}>
-              <h3 style={styles.settingLabel}>Ad Volume: {Math.round(settings.volumeAdjustment * 100)}%</h3>
+              <h3 style={styles.settingLabel}>
+                Ad Volume: {Math.round(settings.volumeAdjustment * 100)}%
+                {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+              </h3>
               <p style={styles.settingDescription}>Volume level for advertisements relative to music</p>
             </div>
             <div style={styles.frequencyControls}>
               <button
                 onClick={() => updateSetting('volumeAdjustment', Math.max(0.3, Math.round((settings.volumeAdjustment - 0.1) * 10) / 10))}
-                disabled={settings.volumeAdjustment <= 0.3}
+                disabled={settings.volumeAdjustment <= 0.3 || !canEditSettings}
                 style={{
                   ...styles.controlButton,
-                  opacity: settings.volumeAdjustment <= 0.3 ? 0.5 : 1,
-                  cursor: settings.volumeAdjustment <= 0.3 ? 'not-allowed' : 'pointer'
+                  opacity: (settings.volumeAdjustment <= 0.3 || !canEditSettings) ? 0.5 : 1,
+                  cursor: (settings.volumeAdjustment <= 0.3 || !canEditSettings) ? 'not-allowed' : 'pointer'
                 }}
               >
                 -
@@ -460,11 +573,11 @@ const AdSettings = () => {
               <span style={styles.frequencyValue}>{Math.round(settings.volumeAdjustment * 100)}%</span>
               <button
                 onClick={() => updateSetting('volumeAdjustment', Math.min(1.0, Math.round((settings.volumeAdjustment + 0.1) * 10) / 10))}
-                disabled={settings.volumeAdjustment >= 1.0}
+                disabled={settings.volumeAdjustment >= 1.0 || !canEditSettings}
                 style={{
                   ...styles.controlButton,
-                  opacity: settings.volumeAdjustment >= 1.0 ? 0.5 : 1,
-                  cursor: settings.volumeAdjustment >= 1.0 ? 'not-allowed' : 'pointer'
+                  opacity: (settings.volumeAdjustment >= 1.0 || !canEditSettings) ? 0.5 : 1,
+                  cursor: (settings.volumeAdjustment >= 1.0 || !canEditSettings) ? 'not-allowed' : 'pointer'
                 }}
               >
                 +
@@ -491,7 +604,10 @@ const AdSettings = () => {
                 <React.Fragment key={provider.id}>
                   <div style={styles.settingRow}>
                     <div style={styles.settingInfo}>
-                      <h3 style={styles.settingLabel}>{provider.display_name}</h3>
+                      <h3 style={styles.settingLabel}>
+                        {provider.display_name}
+                        {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+                      </h3>
                       <p style={styles.settingDescription}>
                         Priority: {provider.priority} • Status: {status}
                         {provider.rate_limit_requests && ` • ${provider.rate_limit_requests} req/hr`}
@@ -504,18 +620,32 @@ const AdSettings = () => {
                           backgroundColor: getProviderStatusColor(status)
                         }}
                       />
-                      <button
-                        onClick={() => testAdProvider(provider.display_name)}
-                        disabled={testingProvider === provider.display_name || !isEnabled}
-                        style={styles.testButton}
+                      <PermissionGate
+                        permission="music.ads.manage"
+                        fallback={
+                          <button
+                            disabled
+                            style={{ ...styles.testButton, opacity: 0.5, cursor: 'not-allowed' }}
+                            title="Permission required to test providers"
+                          >
+                            <FiLock size={12} />
+                          </button>
+                        }
                       >
-                        {testingProvider === provider.display_name ? '🧪 Testing...' : '🧪 Test'}
-                      </button>
+                        <button
+                          onClick={() => testAdProvider(provider.display_name)}
+                          disabled={testingProvider === provider.display_name || !isEnabled}
+                          style={styles.testButton}
+                        >
+                          {testingProvider === provider.display_name ? '🧪 Testing...' : '🧪 Test'}
+                        </button>
+                      </PermissionGate>
                       <label style={styles.switch}>
                         <input
                           type="checkbox"
                           checked={isEnabled}
                           onChange={(e) => updateSetting(`enabledProviders.${provider.api_name}`, e.target.checked)}
+                          disabled={!canEditSettings}
                         />
                         <span style={styles.slider}></span>
                       </label>
@@ -529,47 +659,81 @@ const AdSettings = () => {
         </div>
 
         {/* Revenue & Payout Settings */}
-        <div style={styles.card}>
-          <h2 style={styles.sectionTitle}>Revenue & Payouts</h2>
-
-          <div style={styles.settingRow}>
-            <div style={styles.settingInfo}>
-              <h3 style={styles.settingLabel}>Minimum Payout: {formatCurrency(settings.minimumPayout)}</h3>
-              <p style={styles.settingDescription}>Minimum amount before payout is processed</p>
+        <PermissionGate
+          permissions={['reports.financial.view', 'music.ads.manage', 'music.settings.edit']}
+          requireAny
+          fallback={
+            <div style={styles.card}>
+              <h2 style={styles.sectionTitle}>Revenue & Payouts</h2>
+              <div style={{ 
+                padding: '40px', 
+                textAlign: 'center',
+                backgroundColor: '#fff3cd',
+                borderRadius: '8px'
+              }}>
+                <FiLock size={48} style={{ color: '#ff9800', marginBottom: '15px' }} />
+                <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '10px' }}>Access Restricted</h3>
+                <p style={{ color: '#856404' }}>
+                  You need financial reporting permissions to view revenue settings.
+                </p>
+              </div>
             </div>
-            <button
-              onClick={() => {
-                const amount = prompt('Enter minimum payout amount (CAD):', settings.minimumPayout.toString());
-                if (amount && !isNaN(parseFloat(amount)) && parseFloat(amount) >= 10) {
-                  updateSetting('minimumPayout', parseFloat(amount));
-                } else if (amount) {
-                  alert('Please enter a valid amount (minimum $10 CAD)');
-                }
-              }}
-              style={styles.editButton}
-            >
-              Edit
-            </button>
-          </div>
+          }
+        >
+          <div style={styles.card}>
+            <h2 style={styles.sectionTitle}>Revenue & Payouts</h2>
 
-          <div style={styles.divider} />
-
-          <div style={styles.settingRow}>
-            <div style={styles.settingInfo}>
-              <h3 style={styles.settingLabel}>Payout Schedule</h3>
-              <p style={styles.settingDescription}>How often payouts are processed</p>
+            <div style={styles.settingRow}>
+              <div style={styles.settingInfo}>
+                <h3 style={styles.settingLabel}>
+                  Minimum Payout: {formatCurrency(settings.minimumPayout)}
+                  {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+                </h3>
+                <p style={styles.settingDescription}>Minimum amount before payout is processed</p>
+              </div>
+              <button
+                onClick={() => {
+                  if (!canEditSettings) {
+                    toast.error('You do not have permission to edit settings');
+                    return;
+                  }
+                  const amount = prompt('Enter minimum payout amount (CAD):', settings.minimumPayout.toString());
+                  if (amount && !isNaN(parseFloat(amount)) && parseFloat(amount) >= 10) {
+                    updateSetting('minimumPayout', parseFloat(amount));
+                  } else if (amount) {
+                    toast.error('Please enter a valid amount (minimum $10 CAD)');
+                  }
+                }}
+                style={styles.editButton}
+                disabled={!canEditSettings}
+              >
+                {canEditSettings ? 'Edit' : <FiLock size={14} />}
+              </button>
             </div>
-            <select
-              value={settings.payoutSchedule}
-              onChange={(e) => updateSetting('payoutSchedule', e.target.value)}
-              style={styles.select}
-            >
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-              <option value="quarterly">Quarterly</option>
-            </select>
+
+            <div style={styles.divider} />
+
+            <div style={styles.settingRow}>
+              <div style={styles.settingInfo}>
+                <h3 style={styles.settingLabel}>
+                  Payout Schedule
+                  {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+                </h3>
+                <p style={styles.settingDescription}>How often payouts are processed</p>
+              </div>
+              <select
+                value={settings.payoutSchedule}
+                onChange={(e) => updateSetting('payoutSchedule', e.target.value)}
+                style={styles.select}
+                disabled={!canEditSettings}
+              >
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="quarterly">Quarterly</option>
+              </select>
+            </div>
           </div>
-        </div>
+        </PermissionGate>
 
         {/* Content Filtering */}
         <div style={styles.card}>
@@ -586,7 +750,10 @@ const AdSettings = () => {
             <React.Fragment key={filter.key}>
               <div style={styles.settingRow}>
                 <div style={styles.settingInfo}>
-                  <h3 style={styles.settingLabel}>{filter.label}</h3>
+                  <h3 style={styles.settingLabel}>
+                    {filter.label}
+                    {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+                  </h3>
                   <p style={styles.settingDescription}>{filter.desc}</p>
                 </div>
                 <label style={styles.switch}>
@@ -594,6 +761,7 @@ const AdSettings = () => {
                     type="checkbox"
                     checked={settings.contentFiltering[filter.key]}
                     onChange={(e) => updateSetting(`contentFiltering.${filter.key}`, e.target.checked)}
+                    disabled={!canEditSettings}
                   />
                   <span style={styles.slider}></span>
                 </label>
@@ -609,14 +777,18 @@ const AdSettings = () => {
           
           <div style={styles.settingRow}>
             <div style={styles.settingInfo}>
-              <h3 style={styles.settingLabel}>Business Type</h3>
+              <h3 style={styles.settingLabel}>
+                Business Type
+                {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+              </h3>
               <p style={styles.settingDescription}>{settings.targetingPreferences.businessType}</p>
             </div>
             <button
-              onClick={() => setShowTargetingModal(true)}
+              onClick={() => canEditSettings && setShowTargetingModal(true)}
               style={styles.editButton}
+              disabled={!canEditSettings}
             >
-              Change
+              {canEditSettings ? 'Change' : <FiLock size={14} />}
             </button>
           </div>
 
@@ -624,19 +796,27 @@ const AdSettings = () => {
 
           <div style={styles.settingRow}>
             <div style={styles.settingInfo}>
-              <h3 style={styles.settingLabel}>Location</h3>
+              <h3 style={styles.settingLabel}>
+                Location
+                {!canEditSettings && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
+              </h3>
               <p style={styles.settingDescription}>{settings.targetingPreferences.location}</p>
             </div>
             <button
               onClick={() => {
+                if (!canEditSettings) {
+                  toast.error('You do not have permission to edit settings');
+                  return;
+                }
                 const location = prompt('Enter your location:', settings.targetingPreferences.location);
                 if (location && location.trim()) {
                   updateSetting('targetingPreferences.location', location.trim());
                 }
               }}
               style={styles.editButton}
+              disabled={!canEditSettings}
             >
-              Edit
+              {canEditSettings ? 'Edit' : <FiLock size={14} />}
             </button>
           </div>
         </div>
@@ -646,12 +826,25 @@ const AdSettings = () => {
           <h2 style={styles.sectionTitle}>Testing & Maintenance</h2>
 
           <div style={styles.testingButtons}>
-            <button
-              onClick={clearAdCache}
-              style={styles.testButton}
+            <PermissionGate
+              permission="music.ads.manage"
+              fallback={
+                <button
+                  disabled
+                  style={{ ...styles.testButton, opacity: 0.5, cursor: 'not-allowed' }}
+                >
+                  <FiLock size={16} style={{ marginRight: '8px' }} />
+                  Clear Ad Cache
+                </button>
+              }
             >
-              🗑️ Clear Ad Cache
-            </button>
+              <button
+                onClick={clearAdCache}
+                style={styles.testButton}
+              >
+                🗑️ Clear Ad Cache
+              </button>
+            </PermissionGate>
 
             <button
               onClick={() => navigate('/dashboard/music/ads/dashboard')}
@@ -660,17 +853,31 @@ const AdSettings = () => {
               📊 View Analytics
             </button>
 
-            <button
-              onClick={() => navigate('/dashboard/music/ads/revenue')}
-              style={styles.testButton}
+            <PermissionGate
+              permissions={['reports.financial.view', 'music.ads.manage']}
+              requireAny
+              fallback={
+                <button
+                  disabled
+                  style={{ ...styles.testButton, opacity: 0.5, cursor: 'not-allowed' }}
+                >
+                  <FiLock size={16} style={{ marginRight: '8px' }} />
+                  Revenue Reports
+                </button>
+              }
             >
-              💰 Revenue Reports
-            </button>
+              <button
+                onClick={() => navigate('/dashboard/music/ads/revenue')}
+                style={styles.testButton}
+              >
+                💰 Revenue Reports
+              </button>
+            </PermissionGate>
           </div>
         </div>
 
         {/* Save Button */}
-        {isDirty && (
+        {isDirty && canEditSettings && (
           <div style={styles.card}>
             <div style={styles.saveSection}>
               <button
@@ -689,7 +896,7 @@ const AdSettings = () => {
         )}
 
         {/* Targeting Modal */}
-        {showTargetingModal && (
+        {showTargetingModal && canEditSettings && (
           <div style={styles.modalOverlay} onClick={() => setShowTargetingModal(false)}>
             <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
               <h2 style={styles.modalTitle}>Business Type</h2>
@@ -802,7 +1009,10 @@ const styles = {
     fontWeight: 'bold',
     color: '#333',
     marginBottom: '5px',
-    margin: '0 0 5px 0'
+    margin: '0 0 5px 0',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px'
   },
   sectionDescription: {
     fontSize: '14px',
@@ -825,7 +1035,10 @@ const styles = {
     fontWeight: '500',
     color: '#333',
     marginBottom: '5px',
-    margin: '0 0 5px 0'
+    margin: '0 0 5px 0',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px'
   },
   settingDescription: {
     fontSize: '14px',
@@ -897,7 +1110,10 @@ const styles = {
     color: '#009688',
     cursor: 'pointer',
     fontSize: '12px',
-    fontWeight: '500'
+    fontWeight: '500',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
   },
   editButton: {
     padding: '8px 16px',
@@ -907,7 +1123,10 @@ const styles = {
     color: '#009688',
     cursor: 'pointer',
     fontSize: '14px',
-    fontWeight: '500'
+    fontWeight: '500',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
   },
   select: {
     padding: '8px 12px',
@@ -1019,6 +1238,11 @@ if (!document.querySelector('#ad-settings-styles')) {
       background-color: #009688;
     }
     
+    input:disabled + .slider {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    
     input:checked + .slider:before {
       transform: translateX(26px);
     }
@@ -1035,11 +1259,16 @@ if (!document.querySelector('#ad-settings-styles')) {
       border-radius: 50%;
     }
     
-    button:hover {
+    button:hover:not(:disabled) {
       opacity: 0.8;
     }
     
     button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    select:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }

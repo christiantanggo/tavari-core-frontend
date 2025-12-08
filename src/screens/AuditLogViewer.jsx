@@ -1,10 +1,15 @@
+// src/screens/AuditLogViewer.jsx - WITH PERMISSION SYSTEM
 import React, { useEffect, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import { useBusiness } from '../contexts/BusinessContext';
 import { TavariStyles } from '../utils/TavariStyles';
 import POSAuthWrapper from '../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../hooks/usePOSAuth';
+import { usePermissions } from '../hooks/usePermissions';
+import { SecurityWrapper, useSecurityContext } from '../Security';
+import PermissionGate from '../components/Auth/PermissionGate';
 import { Download } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 const AuditLogViewer = () => {
   const [logs, setLogs] = useState([]);
@@ -18,28 +23,70 @@ const AuditLogViewer = () => {
   const [expandedRow, setExpandedRow] = useState(null);
   const [exporting, setExporting] = useState(false);
   
-  // Use the exact same business pattern as HeaderBar
+  // Business context
   const { business } = useBusiness();
   const selectedBiz = business?.id || '';
 
+  // Security context for sensitive audit log access
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'AuditLogViewer',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
+  // Authentication
   const auth = usePOSAuth({
-    requiredRoles: ['owner', 'manager'],
+    requiredRoles: ['owner', 'manager', 'admin'],
     requireBusiness: true,
     componentName: 'AuditLogViewer'
   });
 
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewAuditLogs = hasAnyPermission([
+    'settings.security.view_logs',
+    'reports.audit.view'
+  ]) || hasElevatedPrivileges();
+
+  const canExportAuditLogs = hasPermission('settings.security.export_logs') || isOwner();
+  const canViewAllUsers = hasPermission('hr.employees.view') || hasElevatedPrivileges();
+
+  // Check permissions on mount
   useEffect(() => {
-    if (auth.isReady && selectedBiz) {
-      console.log('AuditLogViewer: Auth ready, loading data for business:', selectedBiz);
+    if (!permissionsLoading && !canViewAuditLogs) {
+      toast.error('You do not have permission to view audit logs');
+      // Could redirect here if needed
+    }
+  }, [permissionsLoading, canViewAuditLogs]);
+
+  useEffect(() => {
+    if (auth.isReady && selectedBiz && !permissionsLoading && canViewAuditLogs) {
       loadUsers();
       loadLogs();
     }
-  }, [selectedBiz, auth.isReady]);
+  }, [selectedBiz, auth.isReady, permissionsLoading, canViewAuditLogs]);
 
   const loadUsers = async () => {
-    if (!selectedBiz) return;
+    if (!selectedBiz || !canViewAllUsers) return;
 
     try {
+      await recordAction('audit_log_users_load', selectedBiz, true);
+
       const { data } = await supabase
         .from('user_roles')
         .select('user_id, users(email)')
@@ -52,22 +99,40 @@ const AuditLogViewer = () => {
           email: entry.users?.email || ''
         }));
         setUsers(mapped);
-        console.log('AuditLogViewer: Loaded users:', mapped.length);
       }
     } catch (err) {
-      console.error('Error loading users:', err);
+      await logSecurityEvent('audit_log_users_load_error', {
+        error: err.message,
+        business_id: selectedBiz
+      }, 'medium');
       setError('Failed to load users');
     }
   };
 
   const loadLogs = async () => {
-    if (!selectedBiz) return;
+    if (!selectedBiz || !canViewAuditLogs) return;
+
+    // Rate limit check
+    const rateLimitOk = await checkRateLimit('audit_log_view', 10, 60000);
+    if (!rateLimitOk) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
 
     setLoading(true);
     setError(null);
 
     try {
-      console.log('AuditLogViewer: Loading logs for business:', selectedBiz);
+      await recordAction('audit_log_view', selectedBiz, true);
+      await logSecurityEvent('audit_logs_accessed', {
+        business_id: selectedBiz,
+        filters: {
+          event_type: eventTypeFilter || 'all',
+          user_filter: userFilter || 'all',
+          start_date: startDate || 'none',
+          end_date: endDate || 'none'
+        }
+      }, 'medium');
       
       let query = supabase
         .from('audit_logs')
@@ -90,36 +155,44 @@ const AuditLogViewer = () => {
       }
 
       const { data, error } = await query;
-      console.log('AuditLogViewer: Audit logs query result:', { 
-        data, 
-        error, 
-        count: data?.length,
-        business_id_filter: selectedBiz
-      });
       
       if (error) throw error;
       
       setLogs(data || []);
     } catch (err) {
-      console.error('Error loading logs:', err);
+      await logSecurityEvent('audit_log_load_error', {
+        error: err.message,
+        business_id: selectedBiz
+      }, 'high');
       setError(`Failed to load audit logs: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  // NEW: CSV Export functionality
   const exportToCSV = async () => {
+    if (!canExportAuditLogs) {
+      toast.error('You do not have permission to export audit logs');
+      return;
+    }
+
     if (!selectedBiz) {
-      alert('No business selected for export');
+      toast.error('No business selected for export');
+      return;
+    }
+
+    // Rate limit check for exports
+    const rateLimitOk = await checkRateLimit('audit_log_export', 3, 300000);
+    if (!rateLimitOk) {
+      toast.error('Export rate limit exceeded. Please wait 5 minutes.');
       return;
     }
 
     setExporting(true);
+    
     try {
-      console.log('AuditLogViewer: Starting CSV export...');
+      await recordAction('audit_log_export', selectedBiz, true);
 
-      // Load ALL logs with current filters (not limited to 200)
       let query = supabase
         .from('audit_logs')
         .select('*')
@@ -144,14 +217,11 @@ const AuditLogViewer = () => {
       if (error) throw error;
 
       if (!exportLogs || exportLogs.length === 0) {
-        alert('No audit logs found to export with current filters');
+        toast.error('No audit logs found to export with current filters');
         return;
       }
 
-      // Convert logs to CSV format
       const csvContent = generateCSV(exportLogs);
-      
-      // Create and download file
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const link = document.createElement('a');
       
@@ -159,7 +229,6 @@ const AuditLogViewer = () => {
         const url = URL.createObjectURL(blob);
         link.setAttribute('href', url);
         
-        // Generate filename with current date and filters
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
         const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
@@ -178,7 +247,18 @@ const AuditLogViewer = () => {
         link.click();
         document.body.removeChild(link);
         
-        // Log the export action
+        await logSecurityEvent('audit_logs_exported', {
+          business_id: selectedBiz,
+          exported_count: exportLogs.length,
+          filters: {
+            event_type: eventTypeFilter || 'all',
+            user_filter: userFilter || 'all',
+            start_date: startDate || 'none',
+            end_date: endDate || 'none'
+          },
+          filename: filename
+        }, 'high');
+
         await supabase.from('audit_logs').insert({
           business_id: selectedBiz,
           user_id: auth.authUser.id,
@@ -195,21 +275,21 @@ const AuditLogViewer = () => {
           }
         });
 
-        console.log(`AuditLogViewer: Exported ${exportLogs.length} logs to ${filename}`);
-        alert(`Successfully exported ${exportLogs.length} audit logs to ${filename}`);
+        toast.success(`Successfully exported ${exportLogs.length} audit logs`);
       }
       
     } catch (err) {
-      console.error('Error exporting CSV:', err);
-      alert('Failed to export CSV: ' + err.message);
+      await logSecurityEvent('audit_log_export_error', {
+        error: err.message,
+        business_id: selectedBiz
+      }, 'high');
+      toast.error('Failed to export CSV: ' + err.message);
     } finally {
       setExporting(false);
     }
   };
 
-  // Generate CSV content from audit logs
   const generateCSV = (logsData) => {
-    // CSV Headers
     const headers = [
       'Date',
       'Time',
@@ -220,23 +300,19 @@ const AuditLogViewer = () => {
       'Details'
     ];
 
-    // Convert each log to CSV row
     const rows = logsData.map(log => {
       const date = new Date(log.created_at);
       const userEmail = formatUserEmail(log.user_id);
       
-      // Flatten details object to string for CSV
       let detailsStr = '';
       if (log.details && typeof log.details === 'object') {
         try {
-          // Create a readable summary of key details
           const keyDetails = extractKeyDetails(log.details);
           if (Object.keys(keyDetails).length > 0) {
             detailsStr = Object.entries(keyDetails)
               .map(([key, value]) => `${key}=${value}`)
               .join('; ');
           } else {
-            // Fallback to JSON string
             detailsStr = JSON.stringify(log.details);
           }
         } catch (err) {
@@ -245,32 +321,28 @@ const AuditLogViewer = () => {
       }
 
       return [
-        date.toLocaleDateString('en-CA'), // Date
-        date.toLocaleTimeString('en-CA', { hour12: false }), // Time
-        log.event_type || '', // Event Type
-        userEmail, // User Email
-        log.user_id || '', // User ID
-        log.business_id || '', // Business ID
-        escapeCSVField(detailsStr) // Details
+        date.toLocaleDateString('en-CA'),
+        date.toLocaleTimeString('en-CA', { hour12: false }),
+        log.event_type || '',
+        userEmail,
+        log.user_id || '',
+        log.business_id || '',
+        escapeCSVField(detailsStr)
       ];
     });
 
-    // Combine headers and rows
     const csvLines = [headers, ...rows];
     
-    // Convert to CSV string
     return csvLines.map(row => 
       row.map(field => escapeCSVField(String(field))).join(',')
     ).join('\n');
   };
 
-  // Escape CSV fields containing commas, quotes, or newlines
   const escapeCSVField = (field) => {
     if (!field) return '""';
     
     const str = String(field);
     
-    // If field contains comma, quote, or newline, wrap in quotes and escape internal quotes
     if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
       return '"' + str.replace(/"/g, '""') + '"';
     }
@@ -288,7 +360,6 @@ const AuditLogViewer = () => {
     
     const keyFields = {};
     
-    // Extract important fields in readable format
     if (details.original_event_type) keyFields.action = details.original_event_type;
     if (details.url) keyFields.page = details.url.split('/').pop() || details.url;
     if (details.to_tab) keyFields.tab = details.to_tab;
@@ -297,7 +368,6 @@ const AuditLogViewer = () => {
     if (details.old_value) keyFields.old_value = details.old_value;
     if (details.new_value) keyFields.new_value = details.new_value;
     if (details.user_agent) {
-      // Extract browser info
       const ua = details.user_agent;
       if (ua.includes('Chrome')) keyFields.browser = 'Chrome';
       else if (ua.includes('Firefox')) keyFields.browser = 'Firefox';
@@ -338,7 +408,6 @@ const AuditLogViewer = () => {
       fontStyle: 'italic'
     },
 
-    // NEW: Export button styles
     headerActions: {
       display: 'flex',
       gap: TavariStyles.spacing.md,
@@ -553,14 +622,40 @@ const AuditLogViewer = () => {
       fontSize: TavariStyles.typography.fontSize.xs,
       fontWeight: TavariStyles.typography.fontWeight.semibold,
       display: 'inline-block'
+    },
+
+    noPermissionContainer: {
+      ...TavariStyles.layout.flexCenter,
+      height: '400px',
+      flexDirection: 'column',
+      color: TavariStyles.colors.gray600
+    },
+
+    noPermissionText: {
+      fontSize: TavariStyles.typography.fontSize.xl,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      marginBottom: TavariStyles.spacing.md
     }
   };
 
   const renderContent = () => {
-    if (loading) {
+    if (loading || permissionsLoading) {
       return (
         <div style={styles.loadingContainer}>
           Loading audit logs...
+        </div>
+      );
+    }
+
+    if (!canViewAuditLogs) {
+      return (
+        <div style={styles.noPermissionContainer}>
+          <div style={styles.noPermissionText}>
+            Access Denied
+          </div>
+          <div>
+            You do not have permission to view audit logs
+          </div>
         </div>
       );
     }
@@ -685,7 +780,7 @@ const AuditLogViewer = () => {
 
   return (
     <POSAuthWrapper
-      requiredRoles={['owner', 'manager']}
+      requiredRoles={['owner', 'manager', 'admin']}
       requireBusiness={true}
       componentName="AuditLogViewer"
     >
@@ -700,18 +795,23 @@ const AuditLogViewer = () => {
             )}
           </div>
           
-          {/* NEW: Export button in header */}
-          <div style={styles.headerActions}>
-            <button
-              style={exporting ? styles.exportButtonDisabled : styles.exportButton}
-              onClick={exportToCSV}
-              disabled={exporting || loading || logs.length === 0}
-              title="Export current filtered logs to CSV"
-            >
-              <Download size={16} />
-              {exporting ? 'Exporting...' : 'Export CSV'}
-            </button>
-          </div>
+          <PermissionGate
+            permissions={['settings.security.export_logs']}
+            requireAny
+            fallback={null}
+          >
+            <div style={styles.headerActions}>
+              <button
+                style={exporting ? styles.exportButtonDisabled : styles.exportButton}
+                onClick={exportToCSV}
+                disabled={exporting || loading || logs.length === 0}
+                title="Export current filtered logs to CSV"
+              >
+                <Download size={16} />
+                {exporting ? 'Exporting...' : 'Export CSV'}
+              </button>
+            </div>
+          </PermissionGate>
         </div>
 
         <div style={styles.filtersCard}>
@@ -735,19 +835,25 @@ const AuditLogViewer = () => {
               </select>
             </div>
 
-            <div style={styles.filterGroup}>
-              <label style={styles.label}>User</label>
-              <select 
-                style={styles.select}
-                value={userFilter} 
-                onChange={e => setUserFilter(e.target.value)}
-              >
-                <option value="">All Users</option>
-                {users.map(u => (
-                  <option key={u.id} value={u.id}>{u.email}</option>
-                ))}
-              </select>
-            </div>
+            <PermissionGate
+              permissions={['hr.employees.view']}
+              requireAny
+              fallback={null}
+            >
+              <div style={styles.filterGroup}>
+                <label style={styles.label}>User</label>
+                <select 
+                  style={styles.select}
+                  value={userFilter} 
+                  onChange={e => setUserFilter(e.target.value)}
+                >
+                  <option value="">All Users</option>
+                  {users.map(u => (
+                    <option key={u.id} value={u.id}>{u.email}</option>
+                  ))}
+                </select>
+              </div>
+            </PermissionGate>
 
             <div style={styles.filterGroup}>
               <label style={styles.label}>Start Date</label>
@@ -773,7 +879,7 @@ const AuditLogViewer = () => {
           <button 
             onClick={loadLogs} 
             style={styles.refreshButton}
-            disabled={loading}
+            disabled={loading || permissionsLoading}
           >
             {loading ? 'Loading...' : 'Refresh Logs'}
           </button>

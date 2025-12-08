@@ -92,7 +92,7 @@ const RegisterHeader = ({
           Logged in as: {employeeName}
           {currentUnlockingUser && currentUnlockingUser.id !== authUser?.id && (
             <span style={{ marginLeft: '10px', color: TavariStyles.colors.warning }}>
-              (Register unlocked by: {currentUnlockingUser.full_name || currentUnlockingUser.email})
+              (Register unlocked by: {currentUnlockingUser.name || currentUnlockingUser.full_name || currentUnlockingUser.email})
             </span>
           )}
         </p>

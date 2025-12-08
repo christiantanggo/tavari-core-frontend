@@ -183,6 +183,20 @@
   background: #fef2f2;
 }
 
+.addTrackButton {
+  min-width: 110px;
+  padding: 10px 16px;
+  border-color: #14B8A6;
+  color: #14B8A6;
+  background: white;
+  font-weight: 600;
+  gap: 6px;
+}
+
+.addTrackButton:hover {
+  background: #f0fdfa;
+}
+
 .playlistDescription {
   font-size: 0.9rem;
   color: #4b5563;

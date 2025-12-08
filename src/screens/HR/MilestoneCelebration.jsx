@@ -1,6 +1,10 @@
-// src/screens/HR/MilestoneCelebration.jsx
+// src/screens/HR/MilestoneCelebration.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
+import { usePermissions } from '../../hooks/usePermissions';
+import { useSecurityContext } from '../../Security';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import toast from 'react-hot-toast';
 
 const MilestoneCelebration = ({ employeeId, onCelebrationComplete }) => {
   const [pendingCelebrations, setPendingCelebrations] = useState([]);
@@ -8,20 +12,70 @@ const MilestoneCelebration = ({ employeeId, onCelebrationComplete }) => {
   const [showModal, setShowModal] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const businessId = localStorage.getItem('currentBusinessId');
+  // Security context
+  const {
+    recordAction,
+    logSecurityEvent,
+    checkRateLimit
+  } = useSecurityContext({
+    componentName: 'MilestoneCelebration',
+    sensitiveComponent: false,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Authentication
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    authLoading
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin', 'hr_admin'],
+    requireBusiness: true,
+    componentName: 'MilestoneCelebration'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewMilestones = hasAnyPermission([
+    'hr.onboarding.view',
+    'hr.milestones.view'
+  ]) || hasElevatedPrivileges();
+
+  const canSendCelebrations = hasPermission('hr.celebrations.send') || hasElevatedPrivileges();
 
   useEffect(() => {
-    if (employeeId && businessId) {
+    if (employeeId && selectedBusinessId && !authLoading && !permissionsLoading && canViewMilestones) {
       checkForPendingCelebrations();
     }
-  }, [employeeId, businessId]);
+  }, [employeeId, selectedBusinessId, authLoading, permissionsLoading, canViewMilestones]);
 
   const checkForPendingCelebrations = async () => {
+    if (!canViewMilestones) {
+      console.log('User does not have permission to view milestones');
+      return;
+    }
+
     try {
+      await logSecurityEvent('milestone_celebration_check', {
+        action: 'check_pending_celebrations',
+        employee_id: employeeId,
+        business_id: selectedBusinessId
+      }, 'low');
+
       const { data, error } = await supabase
         .rpc('get_employee_milestone_achievements', {
           p_employee_id: employeeId,
-          p_business_id: businessId
+          p_business_id: selectedBusinessId
         });
 
       if (error) throw error;
@@ -32,22 +86,50 @@ const MilestoneCelebration = ({ employeeId, onCelebrationComplete }) => {
       if (pending.length > 0) {
         setCurrentCelebration(pending[0]);
         setShowModal(true);
+        
+        recordAction('view_pending_celebration', employeeId);
       }
     } catch (error) {
       console.error('Error checking for celebrations:', error);
+      
+      await logSecurityEvent('celebration_check_failed', {
+        error_message: error.message,
+        employee_id: employeeId,
+        business_id: selectedBusinessId
+      }, 'medium');
     }
   };
 
   const sendCelebration = async () => {
     if (!currentCelebration) return;
 
+    if (!canSendCelebrations) {
+      toast.error('You do not have permission to send celebrations');
+      return;
+    }
+
+    // Rate limiting check
+    const canProceed = await checkRateLimit('send_celebration', 10, 60);
+    if (!canProceed) {
+      toast.error('Too many celebration requests. Please wait a moment.');
+      return;
+    }
+
     try {
       setLoading(true);
       
+      await logSecurityEvent('milestone_celebration_send', {
+        action: 'send_milestone_celebration',
+        employee_id: employeeId,
+        business_id: selectedBusinessId,
+        milestone_type: currentCelebration.milestone_type,
+        sent_by: authUser?.id
+      }, 'low');
+
       const { error } = await supabase
         .rpc('send_milestone_celebration', {
           p_employee_id: employeeId,
-          p_business_id: businessId,
+          p_business_id: selectedBusinessId,
           p_milestone_type: currentCelebration.milestone_type
         });
 
@@ -58,6 +140,13 @@ const MilestoneCelebration = ({ employeeId, onCelebrationComplete }) => {
         c => c.milestone_type !== currentCelebration.milestone_type
       );
       setPendingCelebrations(remainingCelebrations);
+
+      recordAction('celebration_sent', {
+        employee_id: employeeId,
+        milestone_type: currentCelebration.milestone_type
+      });
+
+      toast.success('Celebration sent successfully! 🎉');
 
       // Show next celebration or close modal
       if (remainingCelebrations.length > 0) {
@@ -71,12 +160,26 @@ const MilestoneCelebration = ({ employeeId, onCelebrationComplete }) => {
       }
     } catch (error) {
       console.error('Error sending celebration:', error);
+      toast.error('Failed to send celebration');
+      
+      await logSecurityEvent('celebration_send_failed', {
+        error_message: error.message,
+        employee_id: employeeId,
+        milestone_type: currentCelebration.milestone_type
+      }, 'medium');
     } finally {
       setLoading(false);
     }
   };
 
   const skipCelebration = () => {
+    if (!currentCelebration) return;
+
+    recordAction('celebration_skipped', {
+      employee_id: employeeId,
+      milestone_type: currentCelebration.milestone_type
+    });
+
     const remainingCelebrations = pendingCelebrations.filter(
       c => c.milestone_type !== currentCelebration.milestone_type
     );
@@ -123,6 +226,11 @@ const MilestoneCelebration = ({ employeeId, onCelebrationComplete }) => {
       </div>
     );
   };
+
+  // Don't render if user doesn't have permission
+  if (!canViewMilestones) {
+    return null;
+  }
 
   if (!showModal || !currentCelebration) {
     return null;
@@ -207,20 +315,26 @@ const MilestoneCelebration = ({ employeeId, onCelebrationComplete }) => {
             )}
             
             <div className="flex space-x-3">
-              <button
-                onClick={sendCelebration}
-                disabled={loading}
-                className="flex-1 bg-gradient-to-r from-teal-600 to-blue-600 text-white py-3 px-6 rounded-lg hover:from-teal-700 hover:to-blue-700 transition-all duration-200 font-semibold disabled:opacity-50"
-              >
-                {loading ? (
-                  <div className="flex items-center justify-center">
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                    Celebrating...
-                  </div>
-                ) : (
-                  'Send Celebration 🎉'
-                )}
-              </button>
+              {canSendCelebrations ? (
+                <button
+                  onClick={sendCelebration}
+                  disabled={loading}
+                  className="flex-1 bg-gradient-to-r from-teal-600 to-blue-600 text-white py-3 px-6 rounded-lg hover:from-teal-700 hover:to-blue-700 transition-all duration-200 font-semibold disabled:opacity-50"
+                >
+                  {loading ? (
+                    <div className="flex items-center justify-center">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Celebrating...
+                    </div>
+                  ) : (
+                    'Send Celebration 🎉'
+                  )}
+                </button>
+              ) : (
+                <div className="flex-1 bg-gray-300 text-gray-600 py-3 px-6 rounded-lg font-semibold cursor-not-allowed">
+                  No Permission to Send
+                </div>
+              )}
               
               <button
                 onClick={skipCelebration}

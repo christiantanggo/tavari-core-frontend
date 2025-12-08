@@ -4,13 +4,33 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../../supabaseClient';
 import { useBusiness } from '../../../contexts/BusinessContext';
 import { useUserProfile } from '../../../hooks/useUserProfile';
+import { usePermissions } from '../../../hooks/usePermissions';
+import PermissionGate from '../../../components/Auth/PermissionGate';
 import SessionManager from '../../../components/SessionManager';
 import AdPlayer from '../../../components/Ads/AdPlayer';
+import toast from 'react-hot-toast';
+import { FiLock } from 'react-icons/fi';
 
 const AdDashboard = () => {
   const navigate = useNavigate();
   const { business } = useBusiness();
   const { profile } = useUserProfile();
+  
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canManageAds = hasPermission('music.ads.manage') || hasElevatedPrivileges();
+  const canViewRevenue = hasAnyPermission(['reports.financial.view', 'music.ads.manage']) || hasElevatedPrivileges();
+  const canEditSettings = hasPermission('music.settings.edit') || hasElevatedPrivileges();
+  const canAccessAdDashboard = hasAnyPermission(['music.ads.manage', 'reports.financial.view']) || hasElevatedPrivileges();
   
   const [dashboardData, setDashboardData] = useState({
     isInitialized: false,
@@ -33,13 +53,19 @@ const AdDashboard = () => {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (business?.id) {
+    if (business?.id && !permissionsLoading) {
+      if (!canAccessAdDashboard) {
+        toast.error('You do not have permission to access the ad dashboard');
+        navigate('/dashboard/music');
+        return;
+      }
+      
       loadDashboardData();
       // Set up refresh interval
       const interval = setInterval(loadDashboardData, 30000); // Refresh every 30 seconds
       return () => clearInterval(interval);
     }
-  }, [business?.id]);
+  }, [business?.id, permissionsLoading, canAccessAdDashboard]);
 
   const loadDashboardData = async () => {
     if (!business?.id) return;
@@ -67,7 +93,6 @@ const AdDashboard = () => {
       });
       
     } catch (err) {
-      console.error('Error loading dashboard data:', err);
       setError(err.message);
     } finally {
       setIsLoading(false);
@@ -76,6 +101,16 @@ const AdDashboard = () => {
   };
 
   const loadRevenueData = async () => {
+    // Permission check
+    if (!canViewRevenue) {
+      return {
+        totalRevenue: 0,
+        todayRevenue: 0,
+        weekRevenue: 0,
+        totalPlays: 0
+      };
+    }
+
     try {
       const today = new Date().toISOString().split('T')[0];
       const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -115,7 +150,6 @@ const AdDashboard = () => {
       };
       
     } catch (error) {
-      console.error('Error loading revenue data:', error);
       return {
         totalRevenue: 0,
         todayRevenue: 0,
@@ -170,7 +204,6 @@ const AdDashboard = () => {
       return { providers, providerHealth };
       
     } catch (error) {
-      console.error('Error loading API health:', error);
       return { 
         providers: [
           { provider: 'spotify', displayName: 'Spotify Ad Studio', status: 'unknown' },
@@ -210,12 +243,16 @@ const AdDashboard = () => {
       })) || [];
       
     } catch (error) {
-      console.error('Error loading recent activity:', error);
       return [];
     }
   };
 
   const onRefresh = async () => {
+    if (!canAccessAdDashboard) {
+      toast.error('You do not have permission to refresh dashboard data');
+      return;
+    }
+    
     setRefreshing(true);
     await loadDashboardData();
   };
@@ -269,6 +306,42 @@ const AdDashboard = () => {
 
   const healthStatus = getSystemHealthStatus();
 
+  // Show loading while permissions are being checked
+  if (permissionsLoading) {
+    return (
+      <SessionManager>
+        <div style={styles.loadingContainer}>
+          <div style={styles.spinner}></div>
+          <div style={styles.loadingText}>Loading permissions...</div>
+        </div>
+      </SessionManager>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canAccessAdDashboard) {
+    return (
+      <SessionManager>
+        <div style={styles.errorContainer}>
+          <FiLock size={64} style={{ color: '#f44336', marginBottom: '20px' }} />
+          <h2 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>Access Denied</h2>
+          <p style={{ fontSize: '16px', color: '#666', marginBottom: '20px' }}>
+            You do not have permission to access the ad dashboard.
+          </p>
+          <p style={{ fontSize: '14px', color: '#999', marginBottom: '30px' }}>
+            Contact your manager or administrator for access.
+          </p>
+          <button 
+            onClick={() => navigate('/dashboard/music')} 
+            style={styles.retryButton}
+          >
+            Return to Music Dashboard
+          </button>
+        </div>
+      </SessionManager>
+    );
+  }
+
   if (isLoading && !dashboardData.isInitialized) {
     return (
       <SessionManager>
@@ -300,27 +373,47 @@ const AdDashboard = () => {
         <div style={styles.card}>
           <h1 style={styles.headerTitle}>Ad Revenue Dashboard</h1>
           
-          <div style={styles.statsGrid}>
-            <div style={styles.statBox}>
-              <div style={styles.statValue}>{formatCurrency(dashboardData.todayRevenue)}</div>
-              <div style={styles.statLabel}>Today's Revenue</div>
+          <PermissionGate 
+            permissions={['reports.financial.view', 'music.ads.manage']}
+            requireAny
+            fallback={
+              <div style={{ 
+                textAlign: 'center', 
+                padding: '40px', 
+                backgroundColor: '#fff3cd',
+                borderRadius: '8px',
+                border: '2px solid #ffc107'
+              }}>
+                <FiLock size={48} style={{ color: '#ff9800', marginBottom: '15px' }} />
+                <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '10px' }}>Revenue Data Hidden</h3>
+                <p style={{ color: '#856404' }}>
+                  You need financial reporting permissions to view revenue statistics.
+                </p>
+              </div>
+            }
+          >
+            <div style={styles.statsGrid}>
+              <div style={styles.statBox}>
+                <div style={styles.statValue}>{formatCurrency(dashboardData.todayRevenue)}</div>
+                <div style={styles.statLabel}>Today's Revenue</div>
+              </div>
+              
+              <div style={styles.statBox}>
+                <div style={styles.statValue}>{formatCurrency(dashboardData.weekRevenue)}</div>
+                <div style={styles.statLabel}>7-Day Revenue</div>
+              </div>
+              
+              <div style={styles.statBox}>
+                <div style={styles.statValue}>{formatCurrency(dashboardData.totalRevenue)}</div>
+                <div style={styles.statLabel}>Total Revenue</div>
+              </div>
+              
+              <div style={styles.statBox}>
+                <div style={styles.statValue}>{dashboardData.totalPlays.toLocaleString()}</div>
+                <div style={styles.statLabel}>Total Ad Plays</div>
+              </div>
             </div>
-            
-            <div style={styles.statBox}>
-              <div style={styles.statValue}>{formatCurrency(dashboardData.weekRevenue)}</div>
-              <div style={styles.statLabel}>7-Day Revenue</div>
-            </div>
-            
-            <div style={styles.statBox}>
-              <div style={styles.statValue}>{formatCurrency(dashboardData.totalRevenue)}</div>
-              <div style={styles.statLabel}>Total Revenue</div>
-            </div>
-            
-            <div style={styles.statBox}>
-              <div style={styles.statValue}>{dashboardData.totalPlays.toLocaleString()}</div>
-              <div style={styles.statLabel}>Total Ad Plays</div>
-            </div>
-          </div>
+          </PermissionGate>
         </div>
 
         {/* System Health */}
@@ -362,37 +455,95 @@ const AdDashboard = () => {
           <h2 style={styles.sectionTitle}>Quick Actions</h2>
           
           <div style={styles.actionsGrid}>
-            <button
-              onClick={() => navigate('/dashboard/music/ads/revenue')}
-              style={styles.actionButton}
+            <PermissionGate 
+              permissions={['reports.financial.view', 'music.ads.manage']}
+              requireAny
+              fallback={
+                <button
+                  disabled
+                  style={{ ...styles.actionButton, opacity: 0.5, cursor: 'not-allowed' }}
+                  title="Permission required to view revenue reports"
+                >
+                  <FiLock style={{ marginRight: '8px' }} />
+                  Revenue Reports
+                </button>
+              }
             >
-              📊 Revenue Reports
-            </button>
+              <button
+                onClick={() => navigate('/dashboard/music/ads/revenue')}
+                style={styles.actionButton}
+              >
+                📊 Revenue Reports
+              </button>
+            </PermissionGate>
             
-            <button
-              onClick={() => navigate('/dashboard/music/ads/settings')}
-              style={styles.actionButton}
+            <PermissionGate 
+              permission="music.settings.edit"
+              fallback={
+                <button
+                  disabled
+                  style={{ ...styles.actionButton, opacity: 0.5, cursor: 'not-allowed' }}
+                  title="Permission required to edit ad settings"
+                >
+                  <FiLock style={{ marginRight: '8px' }} />
+                  Ad Settings
+                </button>
+              }
             >
-              ⚙️ Ad Settings
-            </button>
+              <button
+                onClick={() => navigate('/dashboard/music/ads/settings')}
+                style={styles.actionButton}
+              >
+                ⚙️ Ad Settings
+              </button>
+            </PermissionGate>
             
-            <button
-              onClick={() => navigate('/dashboard/music/ads/payouts')}
-              style={styles.actionButton}
+            <PermissionGate 
+              permissions={['reports.financial.view', 'music.ads.manage']}
+              requireAny
+              fallback={
+                <button
+                  disabled
+                  style={{ ...styles.actionButton, opacity: 0.5, cursor: 'not-allowed' }}
+                  title="Permission required to view payout history"
+                >
+                  <FiLock style={{ marginRight: '8px' }} />
+                  Payout History
+                </button>
+              }
             >
-              🏦 Payout History
-            </button>
+              <button
+                onClick={() => navigate('/dashboard/music/ads/payouts')}
+                style={styles.actionButton}
+              >
+                🏦 Payout History
+              </button>
+            </PermissionGate>
             
-            <button
-              onClick={() => setShowScheduler(!showScheduler)}
-              style={{
-                ...styles.actionButton,
-                backgroundColor: showScheduler ? '#009688' : '#fff',
-                color: showScheduler ? '#fff' : '#009688'
-              }}
+            <PermissionGate 
+              permission="music.ads.manage"
+              fallback={
+                <button
+                  disabled
+                  style={{ ...styles.actionButton, opacity: 0.5, cursor: 'not-allowed' }}
+                  title="Permission required to manage ad scheduler"
+                >
+                  <FiLock style={{ marginRight: '8px' }} />
+                  Ad Scheduler
+                </button>
+              }
             >
-              ⏰ {showScheduler ? 'Hide Scheduler' : 'Ad Scheduler'}
-            </button>
+              <button
+                onClick={() => setShowScheduler(!showScheduler)}
+                style={{
+                  ...styles.actionButton,
+                  backgroundColor: showScheduler ? '#009688' : '#fff',
+                  color: showScheduler ? '#fff' : '#009688'
+                }}
+              >
+                ⏰ {showScheduler ? 'Hide Scheduler' : 'Ad Scheduler'}
+              </button>
+            </PermissionGate>
             
             <button
               onClick={onRefresh}
@@ -408,7 +559,7 @@ const AdDashboard = () => {
         </div>
 
         {/* Ad Scheduler Section */}
-        {showScheduler && (
+        {showScheduler && canManageAds && (
           <div style={styles.card}>
             <div style={styles.schedulerHeader}>
               <h2 style={styles.sectionTitle}>Ad Scheduler</h2>
@@ -423,37 +574,37 @@ const AdDashboard = () => {
               business={business}
               profile={profile}
               onSettingsChange={(settings) => {
-                console.log('Schedule updated:', settings);
-                // Optionally refresh dashboard data
                 loadDashboardData();
               }}
             />
           </div>
         )}
 
-        {/* Test AdPlayer Component - FIXED VERSION */}
-        <div style={styles.card}>
-          <h2 style={styles.sectionTitle}>Ad Player Test - Updated {Date.now()}</h2>
-          <div style={{marginBottom: '10px', fontSize: '12px', color: '#666'}}>
-            Testing with proper UUID format
+        {/* Test AdPlayer Component */}
+        <PermissionGate permission="music.ads.manage">
+          <div style={styles.card}>
+            <h2 style={styles.sectionTitle}>Ad Player Test</h2>
+            <div style={{marginBottom: '10px', fontSize: '12px', color: '#666'}}>
+              Testing with proper UUID format
+            </div>
+            <AdPlayer
+              key={`test-ad-player-${Math.random()}`}
+              ad={{
+                id: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                title: 'Test Advertisement - Fixed',
+                advertiser: 'Test Company',
+                audioUrl: 'https://commondatastorage.googleapis.com/codeskulptor-demos/DDR_assets/Kangaroo_MusiQue_-_The_Neverwritten_Role_Playing_Game.mp3',
+                duration: 30,
+                cpm: 20.00,
+                currency: 'CAD',
+                metadata: { provider: 'test' }
+              }}
+              onAdCompleted={(data) => {}}
+              onAdError={(error) => {}}
+              showControls={true}
+            />
           </div>
-          <AdPlayer
-            key={`test-ad-player-${Math.random()}`}
-            ad={{
-              id: 'f47ac10b-58cc-4372-a567-0e02b2c3d479', // FIXED: Proper UUID instead of 'test_ad_1'
-              title: 'Test Advertisement - Fixed',
-              advertiser: 'Test Company',
-              audioUrl: 'https://commondatastorage.googleapis.com/codeskulptor-demos/DDR_assets/Kangaroo_MusiQue_-_The_Neverwritten_Role_Playing_Game.mp3',
-              duration: 30,
-              cpm: 20.00,
-              currency: 'CAD',
-              metadata: { provider: 'test' }
-            }}
-            onAdCompleted={(data) => console.log('✅ Ad completed:', data)}
-            onAdError={(error) => console.log('❌ Ad error:', error)}
-            showControls={true}
-          />
-        </div>
+        </PermissionGate>
 
         {/* Recent Activity */}
         <div style={styles.card}>
@@ -474,11 +625,16 @@ const AdDashboard = () => {
                     <div style={styles.activityMessage}>{activity.message}</div>
                     <div style={styles.activityTime}>{activity.timestamp.toLocaleString()}</div>
                   </div>
-                  {activity.revenue > 0 && (
-                    <div style={styles.activityRevenue}>
-                      +{formatCurrency(activity.revenue)}
-                    </div>
-                  )}
+                  <PermissionGate 
+                    permissions={['reports.financial.view', 'music.ads.manage']}
+                    requireAny
+                  >
+                    {activity.revenue > 0 && (
+                      <div style={styles.activityRevenue}>
+                        +{formatCurrency(activity.revenue)}
+                      </div>
+                    )}
+                  </PermissionGate>
                 </div>
               ))}
             </div>
@@ -549,6 +705,10 @@ const AdSchedulerWeb = ({ business, profile, onSettingsChange }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Permission system
+  const { hasPermission, hasElevatedPrivileges } = usePermissions();
+  const canEditSchedule = hasPermission('music.ads.manage') || hasElevatedPrivileges();
+
   useEffect(() => {
     if (business?.id) {
       loadSchedules();
@@ -580,7 +740,6 @@ const AdSchedulerWeb = ({ business, profile, onSettingsChange }) => {
       }
       
     } catch (err) {
-      console.error('Error loading schedules:', err);
       setError('Failed to load ad schedules');
     } finally {
       setIsLoading(false);
@@ -589,6 +748,12 @@ const AdSchedulerWeb = ({ business, profile, onSettingsChange }) => {
 
   const updateSchedule = async (field, value) => {
     if (!activeSchedule) return;
+    
+    // Permission check
+    if (!canEditSchedule) {
+      toast.error('You do not have permission to edit ad schedule');
+      return;
+    }
     
     try {
       const { error } = await supabase
@@ -608,8 +773,10 @@ const AdSchedulerWeb = ({ business, profile, onSettingsChange }) => {
         onSettingsChange({ ...activeSchedule, [field]: value });
       }
       
+      toast.success('Schedule updated successfully');
+      
     } catch (err) {
-      console.error('Error updating schedule:', err);
+      toast.error('Failed to update schedule');
     }
   };
 
@@ -676,14 +843,17 @@ const AdSchedulerWeb = ({ business, profile, onSettingsChange }) => {
               checked={activeSchedule.active || false}
               onChange={(e) => updateSchedule('active', e.target.checked)}
               style={schedulerStyles.checkbox}
+              disabled={!canEditSchedule}
             />
             Enable Ad Scheduling
+            {!canEditSchedule && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
           </label>
         </div>
 
         <div style={schedulerStyles.controlGroup}>
           <label style={schedulerStyles.controlLabel}>
             Ad Frequency (Every X songs): {activeSchedule.ad_frequency}
+            {!canEditSchedule && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
           </label>
           <input
             type="range"
@@ -692,12 +862,14 @@ const AdSchedulerWeb = ({ business, profile, onSettingsChange }) => {
             value={activeSchedule.ad_frequency}
             onChange={(e) => updateSchedule('ad_frequency', parseInt(e.target.value))}
             style={schedulerStyles.slider}
+            disabled={!canEditSchedule}
           />
         </div>
 
         <div style={schedulerStyles.controlGroup}>
           <label style={schedulerStyles.controlLabel}>
             Max Ads Per Hour: {activeSchedule.max_ads_per_hour}
+            {!canEditSchedule && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
           </label>
           <input
             type="range"
@@ -706,12 +878,14 @@ const AdSchedulerWeb = ({ business, profile, onSettingsChange }) => {
             value={activeSchedule.max_ads_per_hour}
             onChange={(e) => updateSchedule('max_ads_per_hour', parseInt(e.target.value))}
             style={schedulerStyles.slider}
+            disabled={!canEditSchedule}
           />
         </div>
 
         <div style={schedulerStyles.controlGroup}>
           <label style={schedulerStyles.controlLabel}>
             Ad Volume: {Math.round(activeSchedule.volume_adjustment * 100)}%
+            {!canEditSchedule && <FiLock size={14} style={{ marginLeft: '8px', color: '#999' }} />}
           </label>
           <input
             type="range"
@@ -721,6 +895,7 @@ const AdSchedulerWeb = ({ business, profile, onSettingsChange }) => {
             value={activeSchedule.volume_adjustment}
             onChange={(e) => updateSchedule('volume_adjustment', parseFloat(e.target.value))}
             style={schedulerStyles.slider}
+            disabled={!canEditSchedule}
           />
         </div>
       </div>
@@ -899,7 +1074,10 @@ const styles = {
     fontSize: '14px',
     fontWeight: '500',
     textAlign: 'left',
-    transition: 'all 0.2s'
+    transition: 'all 0.2s',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
   },
   schedulerHeader: {
     display: 'flex',
@@ -1202,7 +1380,6 @@ if (!document.querySelector('#ad-dashboard-styles')) {
       border: none;
     }
 
-    /* Style the checkbox to make it more visible */
     input[type="checkbox"] {
       width: 18px !important;
       height: 18px !important;
@@ -1210,6 +1387,12 @@ if (!document.querySelector('#ad-dashboard-styles')) {
       margin: 0;
       margin-right: 8px;
       accent-color: #009688;
+    }
+
+    input[type="range"]:disabled,
+    input[type="checkbox"]:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
   `;
   document.head.appendChild(styleSheet);

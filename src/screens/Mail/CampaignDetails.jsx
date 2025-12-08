@@ -1,4 +1,4 @@
-// screens/Mail/CampaignDetails.jsx - Step 132: Sending History & Logs with Pause Protection
+// screens/Mail/CampaignDetails.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
@@ -7,13 +7,60 @@ import EmailPauseBanner, { blockEmailSendIfPaused } from '../../components/Email
 import {
   FiArrowLeft, FiMail, FiUsers, FiCheckCircle, FiXCircle, 
   FiClock, FiRefreshCw, FiDownload, FiEye, FiEdit3,
-  FiSend, FiAlertTriangle, FiBarChart2, FiCalendar
+  FiSend, FiAlertTriangle, FiBarChart2, FiCalendar, FiAlertCircle
 } from 'react-icons/fi';
+
+// Permission System Imports
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import toast from 'react-hot-toast';
 
 const CampaignDetails = () => {
   const { campaignId } = useParams();
   const navigate = useNavigate();
   const { business } = useBusiness();
+  
+  // Security context for sensitive campaign data
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'CampaignDetails',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'medium'
+  });
+
+  // Authentication using standardized hook
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin'],
+    requireBusiness: true,
+    componentName: 'CampaignDetails'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   const [campaign, setCampaign] = useState(null);
   const [sendLogs, setSendLogs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -22,12 +69,41 @@ const CampaignDetails = () => {
 
   const businessId = business?.id;
 
+  // Permission checks
+  const canViewCampaigns = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+  const canEditCampaigns = hasPermission('mail.campaigns.create') || hasElevatedPrivileges();
+  const canSendCampaigns = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
+  const canViewAnalytics = hasAnyPermission(['mail.campaigns.view', 'reports.sales.view']) || hasElevatedPrivileges();
+  const canExportLogs = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !authLoading && !canViewCampaigns) {
+      toast.error('You do not have permission to view campaign details');
+      navigate('/dashboard/mail/campaigns');
+    }
+  }, [permissionsLoading, authLoading, canViewCampaigns]);
+
   // Load campaign details
   const loadCampaign = async () => {
-    if (!businessId || !campaignId) return;
+    if (!businessId || !campaignId || !canViewCampaigns) return;
     
+    // Rate limiting
+    if (!checkRateLimit('load_campaign', 10, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
     try {
       setLoading(true);
+
+      await logSecurityEvent('campaign_details_access', {
+        action: 'load_campaign_details',
+        campaign_id: campaignId,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
+
       const { data, error } = await supabase
         .from('mail_campaigns')
         .select('*')
@@ -50,13 +126,16 @@ const CampaignDetails = () => {
             sent_at: null
           };
           setCampaign(mockCampaign);
+          await recordAction('campaign_loaded', false, campaignId);
         }
         return;
       }
       
       setCampaign(data);
+      await recordAction('campaign_loaded', true, campaignId);
     } catch (error) {
       console.error('Error loading campaign:', error);
+      await recordAction('campaign_loaded', false, campaignId);
     } finally {
       setLoading(false);
     }
@@ -64,10 +143,23 @@ const CampaignDetails = () => {
 
   // Load campaign send logs
   const loadSendLogs = async () => {
-    if (!businessId || !campaignId) return;
+    if (!businessId || !campaignId || !canViewCampaigns) return;
     
+    // Rate limiting
+    if (!checkRateLimit('load_send_logs', 10, 60000)) {
+      return;
+    }
+
     try {
       setLogsLoading(true);
+
+      await logSecurityEvent('send_logs_access', {
+        action: 'load_send_logs',
+        campaign_id: campaignId,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
+
       const { data, error } = await supabase
         .from('mail_campaign_sends')
         .select(`
@@ -94,9 +186,11 @@ const CampaignDetails = () => {
   };
 
   useEffect(() => {
-    loadCampaign();
-    loadSendLogs();
-  }, [businessId, campaignId]);
+    if (!authLoading && !permissionsLoading && canViewCampaigns) {
+      loadCampaign();
+      loadSendLogs();
+    }
+  }, [businessId, campaignId, authLoading, permissionsLoading, canViewCampaigns]);
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -128,37 +222,102 @@ const CampaignDetails = () => {
   };
 
   const exportSendLogs = () => {
-    if (sendLogs.length === 0) return;
-    
-    const csvContent = [
-      ['Email', 'Name', 'Status', 'Sent At', 'Error Message'].join(','),
-      ...sendLogs.map(log => [
-        log.email_address,
-        `${log.mail_contacts?.first_name || ''} ${log.mail_contacts?.last_name || ''}`.trim(),
-        log.status,
-        log.sent_at ? new Date(log.sent_at).toISOString() : '',
-        log.error_message || ''
-      ].join(','))
-    ].join('\n');
+    // Permission check
+    if (!canExportLogs) {
+      toast.error('You do not have permission to export send logs');
+      return;
+    }
 
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `campaign_${campaignId}_send_logs.csv`;
-    link.click();
-    window.URL.revokeObjectURL(url);
+    if (sendLogs.length === 0) {
+      toast.error('No logs to export');
+      return;
+    }
+
+    try {
+      logSecurityEvent('send_logs_export', {
+        action: 'export_send_logs',
+        campaign_id: campaignId,
+        business_id: businessId,
+        user_id: authUser?.id,
+        log_count: sendLogs.length
+      }, 'medium');
+
+      const csvContent = [
+        ['Email', 'Name', 'Status', 'Sent At', 'Error Message'].join(','),
+        ...sendLogs.map(log => [
+          log.email_address,
+          `${log.mail_contacts?.first_name || ''} ${log.mail_contacts?.last_name || ''}`.trim(),
+          log.status,
+          log.sent_at ? new Date(log.sent_at).toISOString() : '',
+          log.error_message || ''
+        ].join(','))
+      ].join('\n');
+
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `campaign_${campaignId}_send_logs.csv`;
+      link.click();
+      window.URL.revokeObjectURL(url);
+
+      toast.success('Send logs exported successfully');
+      recordAction('send_logs_exported', true, campaignId);
+    } catch (error) {
+      console.error('Error exporting logs:', error);
+      toast.error('Failed to export send logs');
+      recordAction('send_logs_exported', false, campaignId);
+    }
   };
 
   // Protected navigation functions
   const handleEditCampaign = () => {
+    // Permission check
+    if (!canEditCampaigns) {
+      toast.error('You do not have permission to edit campaigns');
+      return;
+    }
+
     if (blockEmailSendIfPaused('Campaign editing')) return;
+    
+    logSecurityEvent('campaign_edit_navigation', {
+      action: 'navigate_to_campaign_builder',
+      campaign_id: campaignId,
+      business_id: businessId,
+      user_id: authUser?.id
+    }, 'low');
+
     navigate(`/dashboard/mail/builder/${campaignId}`);
   };
 
   const handleSendCampaign = () => {
+    // Permission check
+    if (!canSendCampaigns) {
+      toast.error('You do not have permission to send campaigns');
+      return;
+    }
+
     if (blockEmailSendIfPaused('Campaign sending')) return;
+    
+    logSecurityEvent('campaign_send_navigation', {
+      action: 'navigate_to_campaign_sender',
+      campaign_id: campaignId,
+      business_id: businessId,
+      user_id: authUser?.id
+    }, 'high');
+
     navigate(`/dashboard/mail/sender/${campaignId}`);
+  };
+
+  const handlePreviewCampaign = () => {
+    logSecurityEvent('campaign_preview_navigation', {
+      action: 'navigate_to_campaign_preview',
+      campaign_id: campaignId,
+      business_id: businessId,
+      user_id: authUser?.id
+    }, 'low');
+
+    navigate(`/dashboard/mail/preview/${campaignId}`);
   };
 
   // Calculate stats
@@ -171,350 +330,396 @@ const CampaignDetails = () => {
 
   const successRate = stats.total > 0 ? ((stats.sent / stats.total) * 100).toFixed(1) : 0;
 
-  if (loading) {
+  if (authLoading || permissionsLoading || loading) {
     return (
-      <div style={styles.container}>
-        <div style={styles.loading}>
-          <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
-          <div>Loading campaign details...</div>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.loading}>
+            <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
+            <div>Loading campaign details...</div>
+          </div>
         </div>
-      </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  if (authError) {
+    return (
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.error}>
+            <FiAlertCircle style={styles.errorIcon} />
+            <h2>Authentication Error</h2>
+            <p>{authError}</p>
+          </div>
+        </div>
+      </POSAuthWrapper>
     );
   }
 
   if (!campaign) {
     return (
-      <div style={styles.container}>
-        <div style={styles.error}>
-          <FiAlertTriangle style={styles.errorIcon} />
-          <h2>Campaign Not Found</h2>
-          <p>The campaign you're looking for doesn't exist or you don't have permission to view it.</p>
-          <button 
-            style={styles.backButton}
-            onClick={() => navigate('/dashboard/mail/campaigns')}
-          >
-            <FiArrowLeft style={styles.buttonIcon} />
-            Back to Campaigns
-          </button>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.error}>
+            <FiAlertTriangle style={styles.errorIcon} />
+            <h2>Campaign Not Found</h2>
+            <p>The campaign you're looking for doesn't exist or you don't have permission to view it.</p>
+            <button 
+              style={styles.backButton}
+              onClick={() => navigate('/dashboard/mail/campaigns')}
+            >
+              <FiArrowLeft style={styles.buttonIcon} />
+              Back to Campaigns
+            </button>
+          </div>
         </div>
-      </div>
+      </POSAuthWrapper>
     );
   }
 
   return (
-    <div style={styles.container}>
-      {/* Email Pause Banner */}
-      <EmailPauseBanner />
+    <POSAuthWrapper>
+      <SecurityWrapper>
+        <div style={styles.container}>
+          {/* Email Pause Banner */}
+          <EmailPauseBanner />
 
-      {/* Header */}
-      <div style={styles.header}>
-        <div style={styles.headerLeft}>
-          <button 
-            style={styles.backButton}
-            onClick={() => navigate('/dashboard/mail/campaigns')}
-          >
-            <FiArrowLeft style={styles.buttonIcon} />
-            Back to Campaigns
-          </button>
-          <div style={styles.campaignInfo}>
-            <h1 style={styles.title}>{campaign.name}</h1>
-            <p style={styles.subtitle}>{campaign.subject_line}</p>
-          </div>
-        </div>
-        <div style={styles.headerActions}>
-          {campaign.status === 'draft' && (
-            <button 
-              style={styles.editButton}
-              onClick={handleEditCampaign}
-            >
-              <FiEdit3 style={styles.buttonIcon} />
-              Edit
-            </button>
-          )}
-          <button 
-            style={styles.previewButton}
-            onClick={() => navigate(`/dashboard/mail/preview/${campaignId}`)}
-          >
-            <FiEye style={styles.buttonIcon} />
-            Preview
-          </button>
-          {(campaign.status === 'draft' || campaign.status === 'ready') && (
-            <button 
-              style={styles.sendButton}
-              onClick={handleSendCampaign}
-            >
-              <FiSend style={styles.buttonIcon} />
-              Send Campaign
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Stats Cards */}
-      <div style={styles.statsGrid}>
-        <div style={styles.statCard}>
-          <div style={styles.statIcon}>
-            <FiMail style={{ color: 'teal' }} />
-          </div>
-          <div style={styles.statContent}>
-            <div style={styles.statValue}>{stats.total.toLocaleString()}</div>
-            <div style={styles.statLabel}>Total Recipients</div>
-          </div>
-        </div>
-
-        <div style={styles.statCard}>
-          <div style={styles.statIcon}>
-            <FiCheckCircle style={{ color: '#4caf50' }} />
-          </div>
-          <div style={styles.statContent}>
-            <div style={styles.statValue}>{stats.sent.toLocaleString()}</div>
-            <div style={styles.statLabel}>Successfully Sent</div>
-          </div>
-        </div>
-
-        <div style={styles.statCard}>
-          <div style={styles.statIcon}>
-            <FiXCircle style={{ color: '#f44336' }} />
-          </div>
-          <div style={styles.statContent}>
-            <div style={styles.statValue}>{stats.failed.toLocaleString()}</div>
-            <div style={styles.statLabel}>Failed</div>
-          </div>
-        </div>
-
-        <div style={styles.statCard}>
-          <div style={styles.statIcon}>
-            <FiBarChart2 style={{ color: 'teal' }} />
-          </div>
-          <div style={styles.statContent}>
-            <div style={styles.statValue}>{successRate}%</div>
-            <div style={styles.statLabel}>Success Rate</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div style={styles.tabsContainer}>
-        <div style={styles.tabs}>
-          {[
-            { key: 'overview', label: 'Overview', icon: FiMail },
-            { key: 'logs', label: 'Send Logs', icon: FiSend },
-            { key: 'analytics', label: 'Analytics', icon: FiBarChart2 }
-          ].map(tab => (
-            <button
-              key={tab.key}
-              style={{
-                ...styles.tab,
-                ...(activeTab === tab.key ? styles.activeTab : {})
-              }}
-              onClick={() => setActiveTab(tab.key)}
-            >
-              <tab.icon style={styles.tabIcon} />
-              {tab.label}
-            </button>
-          ))}
-        </div>
-        
-        {activeTab === 'logs' && (
-          <button 
-            style={styles.exportButton}
-            onClick={exportSendLogs}
-            disabled={sendLogs.length === 0}
-          >
-            <FiDownload style={styles.buttonIcon} />
-            Export Logs
-          </button>
-        )}
-      </div>
-
-      {/* Tab Content */}
-      <div style={styles.tabContent}>
-        {activeTab === 'overview' && (
-          <div style={styles.overviewContent}>
-            <div style={styles.campaignDetails}>
-              <h3 style={styles.sectionTitle}>Campaign Details</h3>
-              <div style={styles.detailsGrid}>
-                <div style={styles.detailItem}>
-                  <span style={styles.detailLabel}>Status:</span>
-                  <span style={styles.detailValue}>
-                    <span style={{
-                      ...styles.statusBadge,
-                      backgroundColor: getStatusColor(campaign.status) + '20',
-                      color: getStatusColor(campaign.status)
-                    }}>
-                      {campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
-                    </span>
-                  </span>
-                </div>
-                
-                <div style={styles.detailItem}>
-                  <span style={styles.detailLabel}>Created:</span>
-                  <span style={styles.detailValue}>{formatDate(campaign.created_at)}</span>
-                </div>
-                
-                {campaign.sent_at && (
-                  <div style={styles.detailItem}>
-                    <span style={styles.detailLabel}>Sent:</span>
-                    <span style={styles.detailValue}>{formatDate(campaign.sent_at)}</span>
-                  </div>
-                )}
-                
-                <div style={styles.detailItem}>
-                  <span style={styles.detailLabel}>Subject Line:</span>
-                  <span style={styles.detailValue}>{campaign.subject_line}</span>
-                </div>
-
-                {campaign.preheader_text && (
-                  <div style={styles.detailItem}>
-                    <span style={styles.detailLabel}>Preheader:</span>
-                    <span style={styles.detailValue}>{campaign.preheader_text}</span>
-                  </div>
-                )}
-
-                <div style={styles.detailItem}>
-                  <span style={styles.detailLabel}>Total Recipients:</span>
-                  <span style={styles.detailValue}>{campaign.total_recipients || stats.total}</span>
-                </div>
-
-                <div style={styles.detailItem}>
-                  <span style={styles.detailLabel}>Emails Sent:</span>
-                  <span style={styles.detailValue}>{campaign.emails_sent || stats.sent}</span>
-                </div>
-
-                {campaign.status === 'sent' && (
-                  <div style={styles.detailItem}>
-                    <span style={styles.detailLabel}>Delivery Rate:</span>
-                    <span style={styles.detailValue}>{successRate}%</span>
-                  </div>
-                )}
+          {/* Header */}
+          <div style={styles.header}>
+            <div style={styles.headerLeft}>
+              <button 
+                style={styles.backButton}
+                onClick={() => navigate('/dashboard/mail/campaigns')}
+              >
+                <FiArrowLeft style={styles.buttonIcon} />
+                Back to Campaigns
+              </button>
+              <div style={styles.campaignInfo}>
+                <h1 style={styles.title}>{campaign.name}</h1>
+                <p style={styles.subtitle}>{campaign.subject_line}</p>
               </div>
             </div>
-
-            {/* Quick Actions */}
-            {(campaign.status === 'draft' || campaign.status === 'ready') && (
-              <div style={styles.quickActions}>
-                <h3 style={styles.sectionTitle}>Quick Actions</h3>
-                <div style={styles.actionButtons}>
-                  {campaign.status === 'draft' && (
-                    <button 
-                      style={styles.actionButton}
-                      onClick={handleEditCampaign}
-                    >
-                      <FiEdit3 style={styles.buttonIcon} />
-                      Continue Editing
-                    </button>
-                  )}
+            <div style={styles.headerActions}>
+              <PermissionGate permission="mail.campaigns.create">
+                {campaign.status === 'draft' && (
                   <button 
-                    style={styles.actionButton}
-                    onClick={() => navigate(`/dashboard/mail/preview/${campaignId}`)}
+                    style={styles.editButton}
+                    onClick={handleEditCampaign}
                   >
-                    <FiEye style={styles.buttonIcon} />
-                    Preview Email
+                    <FiEdit3 style={styles.buttonIcon} />
+                    Edit
                   </button>
+                )}
+              </PermissionGate>
+              <button 
+                style={styles.previewButton}
+                onClick={handlePreviewCampaign}
+              >
+                <FiEye style={styles.buttonIcon} />
+                Preview
+              </button>
+              <PermissionGate permission="mail.campaigns.send">
+                {(campaign.status === 'draft' || campaign.status === 'ready') && (
                   <button 
-                    style={styles.primaryActionButton}
+                    style={styles.sendButton}
                     onClick={handleSendCampaign}
                   >
                     <FiSend style={styles.buttonIcon} />
                     Send Campaign
                   </button>
-                </div>
-              </div>
-            )}
+                )}
+              </PermissionGate>
+            </div>
           </div>
-        )}
 
-        {activeTab === 'logs' && (
-          <div style={styles.logsContent}>
-            <div style={styles.logsHeader}>
-              <h3 style={styles.sectionTitle}>Send Logs</h3>
-              <div style={styles.logsFilters}>
-                {/* Future: Add status filters here */}
+          {/* Stats Cards */}
+          <div style={styles.statsGrid}>
+            <div style={styles.statCard}>
+              <div style={styles.statIcon}>
+                <FiMail style={{ color: 'teal' }} />
               </div>
+              <div style={styles.statContent}>
+                <div style={styles.statValue}>{stats.total.toLocaleString()}</div>
+                <div style={styles.statLabel}>Total Recipients</div>
+              </div>
+            </div>
+
+            <div style={styles.statCard}>
+              <div style={styles.statIcon}>
+                <FiCheckCircle style={{ color: '#4caf50' }} />
+              </div>
+              <div style={styles.statContent}>
+                <div style={styles.statValue}>{stats.sent.toLocaleString()}</div>
+                <div style={styles.statLabel}>Successfully Sent</div>
+              </div>
+            </div>
+
+            <div style={styles.statCard}>
+              <div style={styles.statIcon}>
+                <FiXCircle style={{ color: '#f44336' }} />
+              </div>
+              <div style={styles.statContent}>
+                <div style={styles.statValue}>{stats.failed.toLocaleString()}</div>
+                <div style={styles.statLabel}>Failed</div>
+              </div>
+            </div>
+
+            <div style={styles.statCard}>
+              <div style={styles.statIcon}>
+                <FiBarChart2 style={{ color: 'teal' }} />
+              </div>
+              <div style={styles.statContent}>
+                <div style={styles.statValue}>{successRate}%</div>
+                <div style={styles.statLabel}>Success Rate</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div style={styles.tabsContainer}>
+            <div style={styles.tabs}>
+              {[
+                { key: 'overview', label: 'Overview', icon: FiMail },
+                { key: 'logs', label: 'Send Logs', icon: FiSend },
+                { key: 'analytics', label: 'Analytics', icon: FiBarChart2 }
+              ].map(tab => (
+                <button
+                  key={tab.key}
+                  style={{
+                    ...styles.tab,
+                    ...(activeTab === tab.key ? styles.activeTab : {})
+                  }}
+                  onClick={() => setActiveTab(tab.key)}
+                >
+                  <tab.icon style={styles.tabIcon} />
+                  {tab.label}
+                </button>
+              ))}
             </div>
             
-            {logsLoading ? (
-              <div style={styles.logsLoading}>
-                <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
-                <div>Loading send logs...</div>
-              </div>
-            ) : sendLogs.length === 0 ? (
-              <div style={styles.emptyState}>
-                <FiMail style={styles.emptyIcon} />
-                <h4>No Send Logs Found</h4>
-                <p>This campaign hasn't been sent yet or no logs are available.</p>
+            <PermissionGate permission="mail.campaigns.view">
+              {activeTab === 'logs' && (
+                <button 
+                  style={styles.exportButton}
+                  onClick={exportSendLogs}
+                  disabled={sendLogs.length === 0}
+                >
+                  <FiDownload style={styles.buttonIcon} />
+                  Export Logs
+                </button>
+              )}
+            </PermissionGate>
+          </div>
+
+          {/* Tab Content */}
+          <div style={styles.tabContent}>
+            {activeTab === 'overview' && (
+              <div style={styles.overviewContent}>
+                <div style={styles.campaignDetails}>
+                  <h3 style={styles.sectionTitle}>Campaign Details</h3>
+                  <div style={styles.detailsGrid}>
+                    <div style={styles.detailItem}>
+                      <span style={styles.detailLabel}>Status:</span>
+                      <span style={styles.detailValue}>
+                        <span style={{
+                          ...styles.statusBadge,
+                          backgroundColor: getStatusColor(campaign.status) + '20',
+                          color: getStatusColor(campaign.status)
+                        }}>
+                          {campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
+                        </span>
+                      </span>
+                    </div>
+                    
+                    <div style={styles.detailItem}>
+                      <span style={styles.detailLabel}>Created:</span>
+                      <span style={styles.detailValue}>{formatDate(campaign.created_at)}</span>
+                    </div>
+                    
+                    {campaign.sent_at && (
+                      <div style={styles.detailItem}>
+                        <span style={styles.detailLabel}>Sent:</span>
+                        <span style={styles.detailValue}>{formatDate(campaign.sent_at)}</span>
+                      </div>
+                    )}
+                    
+                    <div style={styles.detailItem}>
+                      <span style={styles.detailLabel}>Subject Line:</span>
+                      <span style={styles.detailValue}>{campaign.subject_line}</span>
+                    </div>
+
+                    {campaign.preheader_text && (
+                      <div style={styles.detailItem}>
+                        <span style={styles.detailLabel}>Preheader:</span>
+                        <span style={styles.detailValue}>{campaign.preheader_text}</span>
+                      </div>
+                    )}
+
+                    <div style={styles.detailItem}>
+                      <span style={styles.detailLabel}>Total Recipients:</span>
+                      <span style={styles.detailValue}>{campaign.total_recipients || stats.total}</span>
+                    </div>
+
+                    <div style={styles.detailItem}>
+                      <span style={styles.detailLabel}>Emails Sent:</span>
+                      <span style={styles.detailValue}>{campaign.emails_sent || stats.sent}</span>
+                    </div>
+
+                    {campaign.status === 'sent' && (
+                      <div style={styles.detailItem}>
+                        <span style={styles.detailLabel}>Delivery Rate:</span>
+                        <span style={styles.detailValue}>{successRate}%</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Quick Actions */}
                 {(campaign.status === 'draft' || campaign.status === 'ready') && (
-                  <button 
-                    style={styles.emptySendButton}
-                    onClick={handleSendCampaign}
-                  >
-                    <FiSend style={styles.buttonIcon} />
-                    Send Campaign Now
-                  </button>
+                  <div style={styles.quickActions}>
+                    <h3 style={styles.sectionTitle}>Quick Actions</h3>
+                    <div style={styles.actionButtons}>
+                      <PermissionGate permission="mail.campaigns.create">
+                        {campaign.status === 'draft' && (
+                          <button 
+                            style={styles.actionButton}
+                            onClick={handleEditCampaign}
+                          >
+                            <FiEdit3 style={styles.buttonIcon} />
+                            Continue Editing
+                          </button>
+                        )}
+                      </PermissionGate>
+                      <button 
+                        style={styles.actionButton}
+                        onClick={handlePreviewCampaign}
+                      >
+                        <FiEye style={styles.buttonIcon} />
+                        Preview Email
+                      </button>
+                      <PermissionGate permission="mail.campaigns.send">
+                        <button 
+                          style={styles.primaryActionButton}
+                          onClick={handleSendCampaign}
+                        >
+                          <FiSend style={styles.buttonIcon} />
+                          Send Campaign
+                        </button>
+                      </PermissionGate>
+                    </div>
+                  </div>
                 )}
               </div>
-            ) : (
-              <div style={styles.logsTable}>
-                <table style={styles.table}>
-                  <thead>
-                    <tr style={styles.tableHeader}>
-                      <th style={styles.tableHeaderCell}>Email</th>
-                      <th style={styles.tableHeaderCell}>Name</th>
-                      <th style={styles.tableHeaderCell}>Status</th>
-                      <th style={styles.tableHeaderCell}>Sent At</th>
-                      <th style={styles.tableHeaderCell}>Error</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sendLogs.map(log => (
-                      <tr key={log.id} style={styles.tableRow}>
-                        <td style={styles.tableCell}>{log.email_address}</td>
-                        <td style={styles.tableCell}>
-                          {log.mail_contacts ? 
-                            `${log.mail_contacts.first_name || ''} ${log.mail_contacts.last_name || ''}`.trim() || 'N/A'
-                            : 'N/A'
-                          }
-                        </td>
-                        <td style={styles.tableCell}>
-                          <div style={styles.statusCell}>
-                            {getStatusIcon(log.status)}
-                            <span style={styles.statusText}>{log.status}</span>
-                          </div>
-                        </td>
-                        <td style={styles.tableCell}>{formatDate(log.sent_at)}</td>
-                        <td style={styles.tableCell}>
-                          {log.error_message ? (
-                            <span style={styles.errorText} title={log.error_message}>
-                              {log.error_message.length > 50 
-                                ? log.error_message.substring(0, 50) + '...'
-                                : log.error_message
+            )}
+
+            {activeTab === 'logs' && (
+              <div style={styles.logsContent}>
+                <div style={styles.logsHeader}>
+                  <h3 style={styles.sectionTitle}>Send Logs</h3>
+                  <div style={styles.logsFilters}>
+                    {/* Future: Add status filters here */}
+                  </div>
+                </div>
+                
+                {logsLoading ? (
+                  <div style={styles.logsLoading}>
+                    <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
+                    <div>Loading send logs...</div>
+                  </div>
+                ) : sendLogs.length === 0 ? (
+                  <div style={styles.emptyState}>
+                    <FiMail style={styles.emptyIcon} />
+                    <h4>No Send Logs Found</h4>
+                    <p>This campaign hasn't been sent yet or no logs are available.</p>
+                    <PermissionGate permission="mail.campaigns.send">
+                      {(campaign.status === 'draft' || campaign.status === 'ready') && (
+                        <button 
+                          style={styles.emptySendButton}
+                          onClick={handleSendCampaign}
+                        >
+                          <FiSend style={styles.buttonIcon} />
+                          Send Campaign Now
+                        </button>
+                      )}
+                    </PermissionGate>
+                  </div>
+                ) : (
+                  <div style={styles.logsTable}>
+                    <table style={styles.table}>
+                      <thead>
+                        <tr style={styles.tableHeader}>
+                          <th style={styles.tableHeaderCell}>Email</th>
+                          <th style={styles.tableHeaderCell}>Name</th>
+                          <th style={styles.tableHeaderCell}>Status</th>
+                          <th style={styles.tableHeaderCell}>Sent At</th>
+                          <th style={styles.tableHeaderCell}>Error</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sendLogs.map(log => (
+                          <tr key={log.id} style={styles.tableRow}>
+                            <td style={styles.tableCell}>{log.email_address}</td>
+                            <td style={styles.tableCell}>
+                              {log.mail_contacts ? 
+                                `${log.mail_contacts.first_name || ''} ${log.mail_contacts.last_name || ''}`.trim() || 'N/A'
+                                : 'N/A'
                               }
-                            </span>
-                          ) : (
-                            <span style={styles.successText}>-</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                            </td>
+                            <td style={styles.tableCell}>
+                              <div style={styles.statusCell}>
+                                {getStatusIcon(log.status)}
+                                <span style={styles.statusText}>{log.status}</span>
+                              </div>
+                            </td>
+                            <td style={styles.tableCell}>{formatDate(log.sent_at)}</td>
+                            <td style={styles.tableCell}>
+                              {log.error_message ? (
+                                <span style={styles.errorText} title={log.error_message}>
+                                  {log.error_message.length > 50 
+                                    ? log.error_message.substring(0, 50) + '...'
+                                    : log.error_message
+                                  }
+                                </span>
+                              ) : (
+                                <span style={styles.successText}>-</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'analytics' && (
+              <div style={styles.analyticsContent}>
+                <PermissionGate 
+                  permissions={['mail.campaigns.view', 'reports.sales.view']} 
+                  requireAny
+                  fallback={
+                    <div style={styles.permissionDenied}>
+                      <FiAlertCircle style={styles.permissionIcon} />
+                      <h3>Access Denied</h3>
+                      <p>You do not have permission to view analytics</p>
+                    </div>
+                  }
+                >
+                  <div style={styles.comingSoon}>
+                    <FiBarChart2 style={styles.comingSoonIcon} />
+                    <h3>Analytics Coming Soon</h3>
+                    <p>Email engagement analytics will be available in a future update.</p>
+                    <p>Track opens, clicks, unsubscribes, and more detailed metrics.</p>
+                  </div>
+                </PermissionGate>
               </div>
             )}
           </div>
-        )}
-
-        {activeTab === 'analytics' && (
-          <div style={styles.analyticsContent}>
-            <div style={styles.comingSoon}>
-              <FiBarChart2 style={styles.comingSoonIcon} />
-              <h3>Analytics Coming Soon</h3>
-              <p>Email engagement analytics will be available in a future update.</p>
-              <p>Track opens, clicks, unsubscribes, and more detailed metrics.</p>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+        </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 
@@ -550,6 +755,18 @@ const styles = {
     fontSize: '48px',
     color: '#f44336',
     marginBottom: '20px',
+  },
+  permissionDenied: {
+    backgroundColor: '#fff3cd',
+    border: '2px solid #f39c12',
+    borderRadius: '8px',
+    padding: '40px',
+    textAlign: 'center',
+    color: '#856404',
+  },
+  permissionIcon: {
+    fontSize: '48px',
+    marginBottom: '16px',
   },
   header: {
     display: 'flex',

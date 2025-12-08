@@ -93,7 +93,7 @@ const EmployeeSetupTab = ({ selectedBusinessId, businessData, employees, loadDat
         errors.vacation_percent = vacationValidation.error;
       } else {
         const percent = parseFloat(data.vacation_percent);
-        if (percent < 0 || percent > 20) {
+        if (percent < 0 || percent > 0.20) {
           errors.vacation_percent = 'Vacation percentage must be between 0% and 20%';
         }
       }
@@ -441,7 +441,7 @@ const EmployeeSetupTab = ({ selectedBusinessId, businessData, employees, loadDat
                           type="number"
                           step="0.01"
                           min="0"
-                          max="20"
+                          max="0.20"
                           style={{
                             ...styles.input,
                             ...(validationErrors.vacation_percent ? styles.inputError : {})

@@ -323,6 +323,18 @@ export function generateReceiptHTML(saleData, receiptType = RECEIPT_TYPES.STANDA
       if (item.notes) {
         itemsHTML += `<div class="modifier">Note: ${item.notes}</div>`;
       }
+
+      // If this is a table share item, show the original table items indented
+      if (item.isTableShare && item.originalTableItems && Array.isArray(item.originalTableItems)) {
+        item.originalTableItems.forEach(tableItem => {
+          const tableItemTotal = (tableItem.price || 0) * (tableItem.quantity || 1);
+          itemsHTML += `
+            <div class="modifier" style="margin-left: 20px; padding-left: 10px; border-left: 2px solid #e0e0e0;">
+              ${tableItem.quantity || 1}x ${tableItem.name} - $${(tableItem.price || 0).toFixed(2)} × ${tableItem.quantity || 1} = $${tableItemTotal.toFixed(2)}
+            </div>
+          `;
+        });
+      }
     });
 
     itemsHTML += '</div>';

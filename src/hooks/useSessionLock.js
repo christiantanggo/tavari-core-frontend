@@ -5,8 +5,9 @@ import { supabase } from '../supabaseClient';
 import { logAction } from '../helpers/posAudit';
 import bcrypt from 'bcryptjs';
 
-const AUTO_LOCK_MS = (parseInt(localStorage.getItem('auto_lock_minutes') || '5', 10)) * 60 * 1000;
-const WARNING_WINDOW_MS = 60 * 1000; // 60s visual warning
+// AUTO-LOCK AFTER 5 MINUTES OF INACTIVITY
+const AUTO_LOCK_MS = 5 * 60 * 1000; // 5 minutes in milliseconds
+const WARNING_WINDOW_MS = 0; // No warning window
 
 export function useSessionLock() {
   const [isLocked, setIsLocked] = useState(false);
@@ -28,21 +29,18 @@ export function useSessionLock() {
 
   const startInactivityTimer = useCallback(() => {
     clearTimers();
-    // schedule warning first
+
+    // Set timer to lock after inactivity period
     timerRef.current = setTimeout(() => {
-      let secondsLeft = Math.floor(WARNING_WINDOW_MS / 1000);
-      setWarningSeconds(secondsLeft);
-      warningIntervalRef.current = setInterval(() => {
-        secondsLeft -= 1;
-        setWarningSeconds(secondsLeft);
-        if (secondsLeft <= 0) {
-          clearInterval(warningIntervalRef.current);
-          setWarningSeconds(null);
-          setIsLocked(true);
-          logAction({ action: 'auto_lock', context: 'useSessionLock', metadata: { reason: 'inactivity' } });
-        }
-      }, 1000);
-    }, Math.max(AUTO_LOCK_MS - WARNING_WINDOW_MS, 0));
+      setIsLocked(true);
+      clearTimers();
+      
+      // Set flag in localStorage for navigation handler
+      localStorage.setItem('tavari_session_locked', 'true');
+      
+      // Dispatch custom event for immediate navigation
+      window.dispatchEvent(new CustomEvent('tavari:session-locked'));
+    }, AUTO_LOCK_MS);
   }, []);
 
   const registerActivity = useCallback(() => {
@@ -63,7 +61,6 @@ export function useSessionLock() {
     if (!bizId || !pin) return false;
 
     try {
-      console.log('SessionLock: Validating PIN for business:', bizId);
 
       // Get all authorized users for this business
       const { data: userRoles, error: rolesError } = await supabase
@@ -78,7 +75,6 @@ export function useSessionLock() {
       }
 
       if (!userRoles || userRoles.length === 0) {
-        console.log('SessionLock: No user roles found');
         return false;
       }
 
@@ -88,10 +84,8 @@ export function useSessionLock() {
         .filter(ur => allowedRoles.includes(ur.role))
         .map(ur => ur.user_id);
 
-      console.log('SessionLock: Authorized user count:', authorizedUserIds.length);
 
       if (authorizedUserIds.length === 0) {
-        console.log('SessionLock: No authorized users found');
         return false;
       }
 
@@ -107,16 +101,12 @@ export function useSessionLock() {
       }
 
       if (!staffMembers || staffMembers.length === 0) {
-        console.log('SessionLock: No staff members found');
         return false;
       }
-
-      console.log('SessionLock: Checking PIN against', staffMembers.length, 'staff members');
 
       // Check PIN against all authorized staff members
       for (const staff of staffMembers) {
         if (!staff.pin) {
-          console.log('SessionLock: Staff member has no PIN:', staff.email);
           continue;
         }
 
@@ -124,9 +114,7 @@ export function useSessionLock() {
         if (staff.pin.startsWith('$2b$') || staff.pin.startsWith('$2a$')) {
           // Hashed PIN
           const matches = await bcrypt.compare(String(pin), staff.pin);
-          console.log('SessionLock: Hashed PIN check for', staff.email, ':', matches);
           if (matches) {
-            console.log('SessionLock: PIN match found for:', staff.email);
             await logAction({ 
               action: 'session_unlock_success', 
               context: 'useSessionLock', 
@@ -141,9 +129,7 @@ export function useSessionLock() {
         } else {
           // Plain text PIN (for legacy compatibility)
           const matches = String(staff.pin) === String(pin);
-          console.log('SessionLock: Plain text PIN check for', staff.email, ':', matches);
           if (matches) {
-            console.log('SessionLock: PIN match found for:', staff.email);
             await logAction({ 
               action: 'session_unlock_success', 
               context: 'useSessionLock', 
@@ -157,8 +143,6 @@ export function useSessionLock() {
           }
         }
       }
-
-      console.log('SessionLock: No PIN match found');
       await logAction({ 
         action: 'session_unlock_failed', 
         context: 'useSessionLock', 
@@ -181,7 +165,6 @@ export function useSessionLock() {
     if (!bizId || !pin) return false;
 
     try {
-      console.log('SessionLock: Validating manager override PIN');
 
       const { data, error } = await supabase
         .from('user_roles')
@@ -191,7 +174,6 @@ export function useSessionLock() {
         .eq('active', true);
 
       if (error || !data || data.length === 0) {
-        console.log('SessionLock: No managers/owners/admins found');
         return false;
       }
 
@@ -215,7 +197,6 @@ export function useSessionLock() {
           // Hashed PIN
           const matches = await bcrypt.compare(String(pin), manager.pin);
           if (matches) {
-            console.log('SessionLock: Manager override successful for:', manager.email);
             await logAction({ 
               action: 'manager_override_success', 
               context: 'useSessionLock', 
@@ -230,7 +211,6 @@ export function useSessionLock() {
           // Plain text PIN
           const matches = String(manager.pin) === String(pin);
           if (matches) {
-            console.log('SessionLock: Manager override successful for:', manager.email);
             await logAction({ 
               action: 'manager_override_success', 
               context: 'useSessionLock', 
@@ -244,7 +224,6 @@ export function useSessionLock() {
         }
       }
 
-      console.log('SessionLock: Manager override failed - no PIN match');
       await logAction({ 
         action: 'manager_override_failed', 
         context: 'useSessionLock', 
@@ -273,6 +252,13 @@ export function useSessionLock() {
       setPinAttempts(0);
       setLockedUntil(null);
       setWarningSeconds(null);
+      
+      // Clear lock flag
+      localStorage.removeItem('tavari_session_locked');
+      
+      // Dispatch custom event for unlock
+      window.dispatchEvent(new CustomEvent('tavari:session-unlocked'));
+      
       startInactivityTimer();
       return { ok: true };
     } else {

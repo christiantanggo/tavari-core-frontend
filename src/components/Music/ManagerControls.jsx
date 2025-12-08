@@ -1,25 +1,39 @@
-// src/components/Music/ManagerControls.jsx - Enhanced with Track Position
+// src/components/Music/ManagerControls.jsx - UPDATED WITH NEW PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { FiPlay, FiPause, FiSkipForward, FiVolume2, FiShuffle, FiList, FiLock } from 'react-icons/fi';
 import { globalMusicService } from '../../services/GlobalMusicService';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import { useUserProfile } from '../../hooks/useUserProfile';
+import { usePermissions } from '../../hooks/usePermissions';
+import toast from 'react-hot-toast';
 
 const ManagerControls = () => {
   const [musicState, setMusicState] = useState(globalMusicService.getState());
-  const [userPermissions, setUserPermissions] = useState({
-    canControlMusic: false,
-    canChangeVolume: false,
-    canSkipTracks: false,
-    canSelectPlaylists: false,
-  });
-  const [userRole, setUserRole] = useState(null);
   const [playlists, setPlaylists] = useState([]);
   const [showPlaylistSelector, setShowPlaylistSelector] = useState(false);
 
   const { business } = useBusiness();
   const { profile } = useUserProfile();
+  
+  // NEW: Use centralized permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    userRole,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // NEW: Compute permissions using permissionRegistry.js keys
+  const userPermissions = {
+    canControlMusic: hasPermission('music.control.play_pause'),
+    canChangeVolume: hasPermission('music.control.volume'),
+    canSkipTracks: hasPermission('music.control.skip'),
+    canSelectPlaylists: hasAnyPermission(['music.playlists.create', 'music.schedules.manage']) || hasElevatedPrivileges(),
+  };
 
   // Listen to music service updates
   useEffect(() => {
@@ -28,47 +42,12 @@ const ManagerControls = () => {
     return unsubscribe;
   }, []);
 
-  // Load user role and permissions
+  // Load playlists
   useEffect(() => {
-    const fetchUserRole = async () => {
-      if (!profile?.id || !business?.id) return;
-
-      try {
-        const { data, error } = await supabase
-          .from('user_roles')
-          .select('role')
-          .eq('user_id', profile.id)
-          .eq('business_id', business.id)
-          .single();
-
-        if (error) throw error;
-
-        const role = data?.role || 'employee';
-        setUserRole(role);
-        updatePermissions(role);
-      } catch (error) {
-        console.error('Error fetching user role:', error);
-        setUserRole('employee');
-        updatePermissions('employee');
-      }
-    };
-
-    fetchUserRole();
-    loadPlaylists();
-  }, [profile?.id, business?.id]);
-
-  const updatePermissions = (role) => {
-    const roleLevel = role?.toLowerCase() || 'employee';
-    
-    const permissions = {
-      canControlMusic: ['employee', 'manager', 'admin', 'owner'].includes(roleLevel),
-      canChangeVolume: ['manager', 'admin', 'owner'].includes(roleLevel),
-      canSkipTracks: ['employee', 'manager', 'admin', 'owner'].includes(roleLevel),
-      canSelectPlaylists: ['manager', 'admin', 'owner'].includes(roleLevel),
-    };
-
-    setUserPermissions(permissions);
-  };
+    if (business?.id && !permissionsLoading) {
+      loadPlaylists();
+    }
+  }, [business?.id, permissionsLoading]);
 
   const loadPlaylists = async () => {
     if (!business?.id) return;
@@ -81,7 +60,6 @@ const ManagerControls = () => {
           name,
           description
         `)
-
         .eq('business_id', business.id)
         .order('name');
 
@@ -109,8 +87,9 @@ const ManagerControls = () => {
   };
 
   const handlePlayPause = async () => {
-    if (!userPermissions.canControlMusic) {
-      alert('You do not have permission to control music playback.');
+    // Check permission
+    if (!hasPermission('music.control.play_pause')) {
+      toast.error('You do not have permission to control music playback');
       return;
     }
 
@@ -119,8 +98,9 @@ const ManagerControls = () => {
   };
 
   const handleSkip = async () => {
-    if (!userPermissions.canSkipTracks) {
-      alert('You do not have permission to skip tracks.');
+    // Check permission
+    if (!hasPermission('music.control.skip')) {
+      toast.error('You do not have permission to skip tracks');
       return;
     }
 
@@ -129,8 +109,9 @@ const ManagerControls = () => {
   };
 
   const handleVolumeChange = async (newVolume) => {
-    if (!userPermissions.canChangeVolume) {
-      alert('You do not have permission to change volume.');
+    // Check permission
+    if (!hasPermission('music.control.volume')) {
+      toast.error('You do not have permission to change volume');
       return;
     }
 
@@ -139,15 +120,16 @@ const ManagerControls = () => {
   };
 
   const handlePlaylistSelect = async (playlist) => {
-    if (!userPermissions.canSelectPlaylists) {
-      alert('You do not have permission to select playlists.');
+    // Check permission
+    if (!hasAnyPermission(['music.playlists.create', 'music.schedules.manage']) && !hasElevatedPrivileges()) {
+      toast.error('You do not have permission to select playlists');
       return;
     }
 
     try {
       await globalMusicService.switchToPlaylist(playlist.id);
 
-      // Immediately reflect the change in UI (don’t wait for service broadcast)
+      // Immediately reflect the change in UI (don't wait for service broadcast)
       setMusicState(prev => ({
         ...prev,
         currentPlaylistId: playlist.id,
@@ -156,7 +138,7 @@ const ManagerControls = () => {
           name: playlist.name,
           description: playlist.description || '',
         },
-        // we’re explicitly entering playlist mode
+        // we're explicitly entering playlist mode
         shuffleMode: false,
         isShuffleAllMode: false,
       }));
@@ -165,12 +147,14 @@ const ManagerControls = () => {
       await logAction('playlist_select', `Selected playlist: ${playlist.name}`);
     } catch (error) {
       console.error('Playlist selection error:', error);
+      toast.error('Failed to select playlist');
     }
   };
 
   const handleShuffleMode = async () => {
-    if (!userPermissions.canSelectPlaylists) {
-      alert('You do not have permission to change music mode.');
+    // Check permission
+    if (!hasAnyPermission(['music.playlists.create', 'music.schedules.manage']) && !hasElevatedPrivileges()) {
+      toast.error('You do not have permission to change music mode');
       return;
     }
 
@@ -189,6 +173,7 @@ const ManagerControls = () => {
       await logAction('shuffle_mode', 'Toggled shuffle mode');
     } catch (error) {
       console.error('Shuffle mode error:', error);
+      toast.error('Failed to toggle shuffle mode');
     }
   };
 
@@ -234,9 +219,10 @@ const ManagerControls = () => {
   };
 
   // Show loading state
-  if (!userRole) {
+  if (permissionsLoading) {
     return (
       <div style={styles.loading}>
+        <div style={styles.loadingSpinner}></div>
         <div style={styles.loadingText}>Loading permissions...</div>
       </div>
     );
@@ -253,6 +239,9 @@ const ManagerControls = () => {
         <small style={styles.roleText}>
           Current role: {getUserRoleDisplay()}
         </small>
+        <div style={styles.permissionsRequired}>
+          <strong>Required Permission:</strong> Music Control (Play/Pause)
+        </div>
       </div>
     );
   }
@@ -326,10 +315,13 @@ const ManagerControls = () => {
       {/* Control Buttons */}
       <div style={styles.controls}>
         <button
-          style={styles.controlButton}
+          style={{
+            ...styles.controlButton,
+            ...(userPermissions.canControlMusic ? styles.controlButtonEnabled : styles.controlButtonDisabled)
+          }}
           onClick={handlePlayPause}
           disabled={!userPermissions.canControlMusic}
-          title={musicState.isPlaying ? 'Pause Music' : 'Play Music'}
+          title={userPermissions.canControlMusic ? (musicState.isPlaying ? 'Pause Music' : 'Play Music') : 'Permission required'}
         >
           {musicState.isPlaying ? <FiPause size={20} /> : <FiPlay size={20} />}
           <span style={styles.buttonLabel}>
@@ -338,20 +330,32 @@ const ManagerControls = () => {
         </button>
 
         <button
-          style={styles.controlButton}
+          style={{
+            ...styles.controlButton,
+            ...(userPermissions.canSkipTracks ? styles.controlButtonEnabled : styles.controlButtonDisabled)
+          }}
           onClick={handleSkip}
           disabled={!userPermissions.canSkipTracks}
-          title="Skip to Next Track"
+          title={userPermissions.canSkipTracks ? 'Skip to Next Track' : 'Permission required'}
         >
           <FiSkipForward size={20} />
           <span style={styles.buttonLabel}>Skip</span>
         </button>
 
         <button
-          style={styles.controlButton}
-          onClick={() => setShowPlaylistSelector(!showPlaylistSelector)}
+          style={{
+            ...styles.controlButton,
+            ...(userPermissions.canSelectPlaylists ? styles.controlButtonEnabled : styles.controlButtonDisabled)
+          }}
+          onClick={() => {
+            if (!userPermissions.canSelectPlaylists) {
+              toast.error('You do not have permission to select playlists');
+              return;
+            }
+            setShowPlaylistSelector(!showPlaylistSelector);
+          }}
           disabled={!userPermissions.canSelectPlaylists}
-          title="Select Playlist"
+          title={userPermissions.canSelectPlaylists ? 'Select Playlist' : 'Permission required'}
         >
           <FiList size={20} />
           <span style={styles.buttonLabel}>Playlist</span>
@@ -359,7 +363,7 @@ const ManagerControls = () => {
       </div>
 
       {/* Volume Control */}
-      {userPermissions.canChangeVolume && (
+      {userPermissions.canChangeVolume ? (
         <div style={styles.volumeSection}>
           <div style={styles.volumeHeader}>
             <FiVolume2 size={18} />
@@ -376,6 +380,13 @@ const ManagerControls = () => {
               onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
             />
             <span style={styles.volumeDisplay}>{Math.round(musicState.volume * 100)}%</span>
+          </div>
+        </div>
+      ) : (
+        <div style={styles.volumeSection}>
+          <div style={styles.permissionDenied}>
+            <FiLock size={16} />
+            <span>Volume control requires additional permissions</span>
           </div>
         </div>
       )}
@@ -457,6 +468,18 @@ const styles = {
     textAlign: 'center',
     backgroundColor: '#f8f9fa',
     borderRadius: '8px',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '15px',
+  },
+  loadingSpinner: {
+    width: '32px',
+    height: '32px',
+    border: '3px solid #f3f3f3',
+    borderTop: '3px solid #14B8A6',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite',
   },
   loadingText: {
     fontSize: '16px',
@@ -466,21 +489,34 @@ const styles = {
     padding: '40px',
     textAlign: 'center',
     backgroundColor: '#fff3cd',
-    border: '1px solid #ffeaa7',
-    borderRadius: '8px',
+    border: '2px solid #ffc107',
+    borderRadius: '12px',
+    maxWidth: '400px',
+    margin: '0 auto',
   },
   lockIcon: {
     color: '#856404',
-    marginBottom: '10px',
+    marginBottom: '15px',
   },
   noAccessText: {
     fontSize: '16px',
     color: '#856404',
     marginBottom: '10px',
+    fontWeight: '500',
   },
   roleText: {
     fontSize: '14px',
     color: '#6c757d',
+    display: 'block',
+    marginBottom: '15px',
+  },
+  permissionsRequired: {
+    fontSize: '12px',
+    color: '#666',
+    backgroundColor: '#fff',
+    padding: '10px',
+    borderRadius: '6px',
+    marginTop: '15px',
   },
   header: {
     display: 'flex',
@@ -586,9 +622,16 @@ const styles = {
     flexDirection: 'column',
     alignItems: 'center',
     gap: '5px',
-    color: '#666',
     fontSize: '12px',
     transition: 'all 0.2s',
+  },
+  controlButtonEnabled: {
+    color: '#666',
+  },
+  controlButtonDisabled: {
+    color: '#ccc',
+    cursor: 'not-allowed',
+    opacity: 0.5,
   },
   buttonLabel: {
     fontSize: '11px',
@@ -625,6 +668,18 @@ const styles = {
     fontSize: '12px',
     color: '#666',
     minWidth: '35px',
+  },
+  permissionDenied: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    padding: '12px',
+    backgroundColor: '#f8f9fa',
+    border: '1px solid #e9ecef',
+    borderRadius: '6px',
+    color: '#999',
+    fontSize: '12px',
   },
   modeSection: {
     marginBottom: '20px',
@@ -708,5 +763,18 @@ const styles = {
     padding: '20px',
   },
 };
+
+// Add CSS animation for loading spinner
+const styleSheet = document.createElement('style');
+styleSheet.textContent = `
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+`;
+if (!document.querySelector('#manager-controls-styles')) {
+  styleSheet.id = 'manager-controls-styles';
+  document.head.appendChild(styleSheet);
+}
 
 export default ManagerControls;

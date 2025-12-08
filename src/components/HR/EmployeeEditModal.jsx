@@ -31,6 +31,8 @@ const EmployeeEditModal = ({
   const [managers, setManagers] = useState([]);
   const [changeReason, setChangeReason] = useState('');
   const [businessPayrollSettings, setBusinessPayrollSettings] = useState(null);
+  const [roleOptions, setRoleOptions] = useState([]);
+  const [selectedRole, setSelectedRole] = useState('employee');
   
   // Lieu Time Modal state
   const [showLieuTimeModal, setShowLieuTimeModal] = useState(false);
@@ -102,6 +104,7 @@ const EmployeeEditModal = ({
       initializeForm();
       loadManagers();
       loadBusinessPayrollSettings();
+      loadRolesAndCurrent();
     }
   }, [isOpen, employee]);
 
@@ -145,6 +148,44 @@ const EmployeeEditModal = ({
     setOriginalData(initialData);
     setErrors({});
     setChangeReason('');
+  };
+
+  const loadRolesAndCurrent = async () => {
+    try {
+      const businessId = userContext?.businessId || selectedBusinessId;
+      if (!businessId) return;
+
+      // Load available roles (distinct role_key for this business)
+      const { data: rolesData, error: rolesError } = await supabase
+        .from('role_permissions')
+        .select('role_key')
+        .eq('business_id', businessId);
+
+      if (!rolesError && Array.isArray(rolesData)) {
+        const unique = Array.from(new Set(rolesData.map(r => r.role_key).filter(Boolean))).sort();
+        setRoleOptions(unique.length ? unique : ['owner','admin','manager','employee']);
+      } else {
+        setRoleOptions(['owner','admin','manager','employee']);
+      }
+
+      // Load employee's current role
+      if (employee?.id) {
+        const { data: currentRoleRow } = await supabase
+          .from('user_roles')
+          .select('role')
+          .eq('user_id', employee.id)
+          .eq('business_id', businessId)
+          .eq('active', true)
+          .maybeSingle();
+
+        setSelectedRole(currentRoleRow?.role || 'employee');
+      } else {
+        setSelectedRole('employee');
+      }
+    } catch (err) {
+      console.warn('Failed to load roles:', err?.message || err);
+      if (!roleOptions.length) setRoleOptions(['owner','admin','manager','employee']);
+    }
   };
 
   const loadManagers = async () => {
@@ -578,7 +619,13 @@ const EmployeeEditModal = ({
     }
 
     if (changedFields.max_paid_hours_per_period !== undefined) {
-      changedFields.max_paid_hours_per_period = changedFields.lieu_time_enabled && changedFields.max_paid_hours_per_period ? 
+      // FIXED: Check formData.lieu_time_enabled instead of changedFields.lieu_time_enabled
+      // If lieu_time_enabled wasn't changed, it won't be in changedFields, causing the value to be set to null
+      const lieuTimeEnabled = changedFields.lieu_time_enabled !== undefined 
+        ? changedFields.lieu_time_enabled 
+        : formData.lieu_time_enabled;
+      
+      changedFields.max_paid_hours_per_period = lieuTimeEnabled && changedFields.max_paid_hours_per_period ? 
         parseFloat(changedFields.max_paid_hours_per_period) : null;
     }
 
@@ -596,6 +643,41 @@ const EmployeeEditModal = ({
 
       if (updateError) {
         throw updateError;
+      }
+
+      // Upsert role assignment for this business
+      try {
+        const businessId = userContext?.businessId || selectedBusinessId;
+        if (businessId && selectedRole) {
+          // Ensure user_roles row exists and is active with the selected role
+          const { data: existing } = await supabase
+            .from('user_roles')
+            .select('user_id')
+            .eq('user_id', employee.id)
+            .eq('business_id', businessId)
+            .maybeSingle();
+
+          if (existing) {
+            await supabase
+              .from('user_roles')
+              .update({ role: selectedRole, active: true })
+              .eq('user_id', employee.id)
+              .eq('business_id', businessId);
+          } else {
+            await supabase
+              .from('user_roles')
+              .insert({ user_id: employee.id, business_id: businessId, role: selectedRole, active: true, custom_permissions: {} });
+          }
+
+          // Keep business_users role in sync if present
+          await supabase
+            .from('business_users')
+            .update({ role: selectedRole })
+            .eq('user_id', employee.id)
+            .eq('business_id', businessId);
+        }
+      } catch (roleErr) {
+        console.warn('Role update warning:', roleErr?.message || roleErr);
       }
 
       try {
@@ -1011,6 +1093,20 @@ const EmployeeEditModal = ({
                 <div style={styles.section}>
                   <h3 style={styles.sectionTitle}>Employment Information</h3>
                   <div style={styles.formGrid}>
+                    <div style={styles.formGroup}>
+                      <label style={styles.label}>Role</label>
+                      <select
+                        value={selectedRole || 'employee'}
+                        onChange={(e) => setSelectedRole(e.target.value)}
+                        style={styles.select}
+                        disabled={saving}
+                      >
+                        {(roleOptions.length ? roleOptions : ['owner','admin','manager','employee']).map((rk) => (
+                          <option key={rk} value={rk}>{rk}</option>
+                        ))}
+                      </select>
+                      <p style={styles.helpText}>Controls access across the app for this business.</p>
+                    </div>
                     <div style={styles.formGroup}>
                       <label style={styles.label}>Employee Number</label>
                       <input

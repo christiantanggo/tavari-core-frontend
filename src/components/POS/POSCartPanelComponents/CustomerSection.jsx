@@ -76,12 +76,17 @@ const CustomerSection = ({
       const today = getTodayInBusinessTimezone();
       
       // Get today's usage
-      const { data: todayUsage } = await supabase
+      const { data: todayUsage, error: usageError } = await supabase
         .from('pos_loyalty_daily_usage')
         .select('amount_used')
         .eq('loyalty_account_id', loyaltyCustomer.id)
         .eq('usage_date', today)
-        .single();
+        .maybeSingle();
+
+      if (usageError && usageError.code && usageError.code !== 'PGRST116') {
+        console.error('Error loading loyalty usage:', usageError);
+        return;
+      }
 
       let usedTodayDollars = todayUsage?.amount_used || 0;
       

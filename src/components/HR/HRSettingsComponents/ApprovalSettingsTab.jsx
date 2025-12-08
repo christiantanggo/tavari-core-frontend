@@ -91,7 +91,7 @@ const ApprovalSettingsTab = ({
         fontSize: TavariStyles.typography.fontSize.sm,
         backgroundColor: TavariStyles.colors.white
       },
-      width: '100%'
+      width: '90%'
     },
     select: {
       ...TavariStyles.components.form?.select || {
@@ -102,7 +102,7 @@ const ApprovalSettingsTab = ({
         backgroundColor: TavariStyles.colors.white,
         cursor: 'pointer'
       },
-      width: '100%'
+      width: '90%'
     },
     description: {
       fontSize: TavariStyles.typography.fontSize.xs,

@@ -1,16 +1,20 @@
-// screens/HR/HRPayrollScreens/HRPayrollDashboard.jsx - Complete HR Payroll Dashboard
+// screens/HR/HRPayrollScreens/HRPayrollDashboard.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { SecurityWrapper } from '../../../Security';
 import { useSecurityContext } from '../../../Security';
 import { usePOSAuth } from '../../../hooks/usePOSAuth';
 import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
 import { useCanadianTaxCalculations } from '../../../hooks/useCanadianTaxCalculations';
+import { usePermissions } from '../../../hooks/usePermissions';
+import PermissionGate from '../../../components/Auth/PermissionGate';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../../utils/TavariStyles';
 import { supabase } from '../../../supabaseClient';
+import toast from 'react-hot-toast';
 
-// Tab Components - Updated to include PayrollImportTab and YTD Management
+// Tab Components
+import WageManagementTab from '../../../components/HR/HRPayrollComponents/WageManagementTab';
 import PayrollEntryTab from '../../../components/HR/HRPayrollComponents/PayrollEntryTab';
 import PayStatementsTab from '../../../components/HR/HRPayrollComponents/PayStatementsTab';
 import EditPayrollTab from '../../../components/HR/HRPayrollComponents/EditPayrollTab';
@@ -33,14 +37,14 @@ const HRPayrollDashboard = () => {
   });
   const [statsLoading, setStatsLoading] = useState(true);
 
-  // Security context for dashboard access - DISABLED RATE LIMITING
+  // Security context for dashboard access
   const {
     logSecurityEvent,
     recordAction
   } = useSecurityContext({
     componentName: 'HRPayrollDashboard',
     sensitiveComponent: true,
-    enableRateLimiting: false, // DISABLED - was causing freezing
+    enableRateLimiting: false,
     enableAuditLogging: true,
     securityLevel: 'critical'
   });
@@ -52,6 +56,16 @@ const HRPayrollDashboard = () => {
     componentName: 'HR Payroll Dashboard'
   });
 
+  // NEW: Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   // Payroll calculations and data
   const payroll = usePayrollCalculations(auth.selectedBusinessId);
 
@@ -61,8 +75,31 @@ const HRPayrollDashboard = () => {
   // Tax calculations for formatting
   const { formatTaxAmount } = useTaxCalculations(auth.selectedBusinessId);
 
+  // Permission checks for payroll dashboard access
+  const canAccessPayroll = hasAnyPermission([
+    'hr.payroll.view',
+    'hr.payroll.process',
+    'hr.wages.view'
+  ]) || hasElevatedPrivileges();
+
+  const canProcessPayroll = hasPermission('hr.payroll.process');
+  const canEditPayroll = hasPermission('hr.payroll.edit');
+  const canViewWages = hasPermission('hr.wages.view');
+  const canEditWages = hasPermission('hr.wages.edit');
+  const canViewTaxReports = hasPermission('hr.payroll.view_tax_reports');
+  const canEditSettings = hasPermission('hr.payroll.edit_settings') || isOwner();
+  const canImportPayroll = hasPermission('hr.payroll.import') || hasElevatedPrivileges();
+
+  // Check permissions on mount
   useEffect(() => {
-    if (auth.selectedBusinessId && auth.isReady) {
+    if (!permissionsLoading && !canAccessPayroll) {
+      toast.error('You do not have permission to access payroll management');
+      // Don't navigate away - let POSAuthWrapper handle it
+    }
+  }, [permissionsLoading, canAccessPayroll]);
+
+  useEffect(() => {
+    if (auth.selectedBusinessId && auth.isReady && canAccessPayroll) {
       // Log dashboard access asynchronously
       setTimeout(() => {
         logSecurityEvent('payroll_dashboard_accessed', {
@@ -74,11 +111,11 @@ const HRPayrollDashboard = () => {
 
       loadDashboardStats();
     }
-  }, [auth.selectedBusinessId, auth.isReady]);
+  }, [auth.selectedBusinessId, auth.isReady, canAccessPayroll]);
 
   useEffect(() => {
     // Log tab changes for audit asynchronously
-    if (auth.isReady) {
+    if (auth.isReady && canAccessPayroll) {
       setTimeout(() => {
         logSecurityEvent('payroll_tab_changed', {
           new_tab: activeTab,
@@ -86,14 +123,13 @@ const HRPayrollDashboard = () => {
         }, 'low').catch(err => console.error('Failed to log tab change:', err));
       }, 0);
     }
-  }, [activeTab, auth.isReady]);
+  }, [activeTab, auth.isReady, canAccessPayroll]);
 
   const loadDashboardStats = async () => {
     if (!auth.selectedBusinessId) return;
 
     setStatsLoading(true);
     try {
-      console.log('Loading dashboard stats for business:', auth.selectedBusinessId);
 
       // 1. Get total active employees for this business
       const { data: employeeRoles, error: employeeError } = await supabase
@@ -108,7 +144,6 @@ const HRPayrollDashboard = () => {
       }
 
       const totalEmployees = employeeRoles?.length || 0;
-      console.log('Total active employees:', totalEmployees);
 
       // 2. Get active (draft) payroll runs
       const { data: activeRuns, error: activeRunsError } = await supabase
@@ -123,7 +158,6 @@ const HRPayrollDashboard = () => {
       }
 
       const activePayrollRuns = activeRuns?.length || 0;
-      console.log('Active payroll runs:', activePayrollRuns);
 
       // 3. Calculate monthly payroll from current month's finalized runs
       const currentDate = new Date();
@@ -132,7 +166,6 @@ const HRPayrollDashboard = () => {
       const monthStart = new Date(currentYear, currentMonth, 1).toISOString().split('T')[0];
       const monthEnd = new Date(currentYear, currentMonth + 1, 0).toISOString().split('T')[0];
 
-      console.log('Calculating monthly payroll from', monthStart, 'to', monthEnd);
 
       // Get all finalized payroll runs for current month
       const { data: monthlyRuns, error: monthlyRunsError } = await supabase
@@ -148,7 +181,6 @@ const HRPayrollDashboard = () => {
         throw monthlyRunsError;
       }
 
-      console.log('Monthly payroll runs found:', monthlyRuns?.length || 0);
 
       let monthlyPayroll = 0;
       if (monthlyRuns && monthlyRuns.length > 0) {
@@ -170,7 +202,6 @@ const HRPayrollDashboard = () => {
         }, 0) || 0;
       }
 
-      console.log('Monthly payroll total:', monthlyPayroll);
 
       // 4. Get pending pay statements (finalized runs without generated statements)
       const { data: finalizedRuns, error: finalizedError } = await supabase
@@ -184,8 +215,6 @@ const HRPayrollDashboard = () => {
         throw finalizedError;
       }
 
-      // For simplicity, assume pending statements = number of finalized runs
-      // In a real implementation, you'd check if statements were already generated
       const pendingStatements = finalizedRuns?.length || 0;
 
       setDashboardStats({
@@ -195,12 +224,6 @@ const HRPayrollDashboard = () => {
         pendingStatements
       });
 
-      console.log('Dashboard stats updated:', {
-        totalEmployees,
-        activePayrollRuns,
-        monthlyPayroll,
-        pendingStatements
-      });
 
     } catch (error) {
       console.error('Error loading dashboard stats:', error);
@@ -209,72 +232,115 @@ const HRPayrollDashboard = () => {
     }
   };
 
-  // Tab configuration with role-based filtering
+  // Tab configuration with permission-based filtering
   const tabs = [
     { 
       id: 'entry', 
       label: 'Payroll Entry', 
       icon: '📊', 
       description: 'Create and process payroll runs',
-      requiresRole: ['owner', 'manager', 'hr_admin']
+      requiredPermissions: ['hr.payroll.process'],
+      requiresElevated: false
     },
     { 
       id: 'statements', 
       label: 'Pay Statements', 
       icon: '📄', 
       description: 'Generate employee pay statements',
-      requiresRole: ['owner', 'manager', 'hr_admin']
+      requiredPermissions: ['hr.payroll.view'],
+      requiresElevated: false
     },
     { 
       id: 'edit', 
       label: 'Edit Payroll', 
       icon: '✏️', 
       description: 'Edit existing finalized payroll entries',
-      requiresRole: ['owner', 'manager']
-    },
-    { 
-      id: 'ytd', 
-      label: 'YTD Management', 
-      icon: '📋', 
-      description: 'Year-to-date employee data and reports',
-      requiresRole: ['owner', 'manager', 'hr_admin']
+      requiredPermissions: ['hr.payroll.edit'],
+      requiresElevated: true
     },
     { 
       id: 'reports', 
       label: 'Tax Reports', 
       icon: '📈', 
       description: 'Government remittance and tax reports',
-      requiresRole: ['owner', 'manager', 'hr_admin']
+      requiredPermissions: ['hr.payroll.view_tax_reports'],
+      requiresElevated: false
+    },
+    { 
+      id: 'ytd', 
+      label: 'YTD Management', 
+      icon: '📋', 
+      description: 'Year-to-date employee data and reports',
+      requiredPermissions: ['hr.payroll.view'],
+      requiresElevated: false
+    },
+    { 
+      id: 'wage_management', 
+      label: 'Wage Management', 
+      icon: '💰', 
+      description: 'Manage employee wages and bulk updates',
+      requiredPermissions: ['hr.wages.edit'],
+      requiresElevated: true
     },
     { 
       id: 'employee_tax_reports', 
       label: 'Employee Tax Reports', 
       icon: '🇨🇦', 
       description: 'ROE, T4, and comprehensive employee reports',
-      requiresRole: ['owner', 'manager', 'hr_admin']
+      requiredPermissions: ['hr.payroll.view_tax_reports'],
+      requiresElevated: false
     },
     { 
       id: 'settings', 
       label: 'Settings', 
       icon: '⚙️', 
       description: 'Payroll configuration and tax rates',
-      requiresRole: ['owner', 'manager']
+      requiredPermissions: ['hr.payroll.edit_settings'],
+      requiresElevated: true
     },
     { 
       id: 'import', 
       label: 'Excel Import', 
       icon: '📥', 
       description: 'Import existing payroll data from Excel files',
-      requiresRole: ['owner', 'manager']
+      requiredPermissions: ['hr.payroll.import'],
+      requiresElevated: true
     }
   ];
 
-  // Filter tabs based on user role
-  const availableTabs = tabs.filter(tab => 
-    tab.requiresRole.includes(auth.userRole)
-  );
+  // Filter tabs based on user permissions
+  const availableTabs = tabs.filter(tab => {
+    // Check if user has elevated privileges if required
+    if (tab.requiresElevated && !hasElevatedPrivileges()) {
+      return false;
+    }
+    
+    // Check if user has any of the required permissions
+    if (tab.requiredPermissions && tab.requiredPermissions.length > 0) {
+      return hasAnyPermission(tab.requiredPermissions);
+    }
+    
+    return true;
+  });
 
   const handleTabChange = (tabId) => {
+    // Check if user has permission to access this tab
+    const tab = tabs.find(t => t.id === tabId);
+    if (!tab) return;
+
+    // Verify permissions before switching
+    if (tab.requiredPermissions && tab.requiredPermissions.length > 0) {
+      if (!hasAnyPermission(tab.requiredPermissions)) {
+        toast.error('You do not have permission to access this tab');
+        return;
+      }
+    }
+
+    if (tab.requiresElevated && !hasElevatedPrivileges()) {
+      toast.error('This feature requires elevated privileges (manager or owner)');
+      return;
+    }
+
     // Record action for audit asynchronously
     setTimeout(() => {
       recordAction('payroll_tab_navigation', true).catch(err => 
@@ -295,7 +361,6 @@ const HRPayrollDashboard = () => {
       };
     }
 
-    // Return a summary of CRA compliance status
     return {
       is_cra_compliant: true,
       compliance_checks: [
@@ -313,85 +378,183 @@ const HRPayrollDashboard = () => {
     switch (activeTab) {
       case 'entry':
         return (
-          <PayrollEntryTab 
-            selectedBusinessId={auth.selectedBusinessId}
-            businessData={auth.businessData}
-            employees={payroll.employees}
-            settings={payroll.settings}
-            calculateEmployeePay={payroll.calculateEmployeePay}
-          />
+          <PermissionGate 
+            permissions={['hr.payroll.process']} 
+            requireAny
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to process payroll</p>
+              </div>
+            }
+          >
+            <PayrollEntryTab 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+              employees={payroll.employees}
+              settings={payroll.settings}
+              calculateEmployeePay={payroll.calculateEmployeePay}
+            />
+          </PermissionGate>
         );
         
       case 'statements':
         return (
-          <PayStatementsTab 
-            selectedBusinessId={auth.selectedBusinessId}
-            businessData={auth.businessData}
-            formatTaxAmount={formatTaxAmount}
-          />
+          <PermissionGate 
+            permissions={['hr.payroll.view']} 
+            requireAny
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to view pay statements</p>
+              </div>
+            }
+          >
+            <PayStatementsTab 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+              formatTaxAmount={formatTaxAmount}
+            />
+          </PermissionGate>
         );
         
       case 'edit':
         return (
-          <EditPayrollTab 
-            selectedBusinessId={auth.selectedBusinessId}
-            businessData={auth.businessData}
-            employees={payroll.employees}
-            settings={payroll.settings}
-            formatTaxAmount={formatTaxAmount}
-          />
+          <PermissionGate 
+            permissions={['hr.payroll.edit']} 
+            requireElevated
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to edit payroll (requires manager/owner)</p>
+              </div>
+            }
+          >
+            <EditPayrollTab 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+              employees={payroll.employees}
+              settings={payroll.settings}
+              formatTaxAmount={formatTaxAmount}
+            />
+          </PermissionGate>
         );
         
       case 'ytd':
         return (
-          <YTDPayrollEntry 
-            selectedBusinessId={auth.selectedBusinessId}
-            businessData={auth.businessData}
-            employees={payroll.employees}
-            formatTaxAmount={formatTaxAmount}
-          />
+          <PermissionGate 
+            permissions={['hr.payroll.view']} 
+            requireAny
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to view YTD reports</p>
+              </div>
+            }
+          >
+            <YTDPayrollEntry 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+              employees={payroll.employees}
+              formatTaxAmount={formatTaxAmount}
+            />
+          </PermissionGate>
+        );
+        
+      case 'wage_management':
+        return (
+          <PermissionGate 
+            permissions={['hr.wages.edit']} 
+            requireElevated
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to manage wages (requires manager/owner)</p>
+              </div>
+            }
+          >
+            <WageManagementTab 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+            />
+          </PermissionGate>
         );
         
       case 'reports':
         return (
-          <DeductionReportsTab 
-            selectedBusinessId={auth.selectedBusinessId}
-            businessData={auth.businessData}
-            settings={payroll.settings}
-            formatTaxAmount={formatTaxAmount}
-          />
+          <PermissionGate 
+            permissions={['hr.payroll.view_tax_reports']} 
+            requireAny
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to view tax reports</p>
+              </div>
+            }
+          >
+            <DeductionReportsTab 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+              settings={payroll.settings}
+              formatTaxAmount={formatTaxAmount}
+            />
+          </PermissionGate>
         );
         
       case 'employee_tax_reports':
         return (
-          <EnhancedEmployeeTaxReportTab 
-            selectedBusinessId={auth.selectedBusinessId}
-            businessData={auth.businessData}
-            employees={payroll.employees}
-            formatTaxAmount={formatTaxAmount}
-          />
+          <PermissionGate 
+            permissions={['hr.payroll.view_tax_reports']} 
+            requireAny
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to view employee tax reports</p>
+              </div>
+            }
+          >
+            <EnhancedEmployeeTaxReportTab 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+              employees={payroll.employees}
+              formatTaxAmount={formatTaxAmount}
+            />
+          </PermissionGate>
         );
         
       case 'settings':
         return (
-          <PayrollSettingsTab 
-            selectedBusinessId={auth.selectedBusinessId}
-            businessData={auth.businessData}
-            settings={payroll.settings}
-            updateSettings={payroll.updateSettings}
-            canadianTax={canadianTax}
-            getCRAComplianceSummary={getCRAComplianceSummary}
-            formatTaxAmount={formatTaxAmount}
-          />
+          <PermissionGate 
+            permissions={['hr.payroll.edit_settings']} 
+            requireElevated
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to edit payroll settings (requires manager/owner)</p>
+              </div>
+            }
+          >
+            <PayrollSettingsTab 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+              settings={payroll.settings}
+              updateSettings={payroll.updateSettings}
+              canadianTax={canadianTax}
+              getCRAComplianceSummary={getCRAComplianceSummary}
+              formatTaxAmount={formatTaxAmount}
+            />
+          </PermissionGate>
         );
         
       case 'import':
         return (
-          <PayrollImportTab 
-            selectedBusinessId={auth.selectedBusinessId}
-            businessData={auth.businessData}
-            formatTaxAmount={formatTaxAmount}
-          />
+          <PermissionGate 
+            permissions={['hr.payroll.import']} 
+            requireElevated
+            fallback={
+              <div style={styles.noAccessContainer}>
+                <p style={styles.noAccessText}>⚠️ You do not have permission to import payroll data (requires manager/owner)</p>
+              </div>
+            }
+          >
+            <PayrollImportTab 
+              selectedBusinessId={auth.selectedBusinessId}
+              businessData={auth.businessData}
+              formatTaxAmount={formatTaxAmount}
+            />
+          </PermissionGate>
         );
         
       default:
@@ -409,7 +572,7 @@ const HRPayrollDashboard = () => {
     container: {
       minHeight: '100vh',
       backgroundColor: TavariStyles.colors.gray50,
-      paddingTop: '40px' // Add padding to account for fixed header
+      paddingTop: '20px'
     },
     dashboard: {
       display: 'flex',
@@ -419,7 +582,7 @@ const HRPayrollDashboard = () => {
     header: {
       backgroundColor: TavariStyles.colors.white,
       borderBottom: `1px solid ${TavariStyles.colors.gray200}`,
-      padding: TavariStyles.spacing.lg
+      padding: '12px 20px'
     },
     headerContent: {
       display: 'flex',
@@ -578,8 +741,43 @@ const HRPayrollDashboard = () => {
       textAlign: 'center',
       padding: `${TavariStyles.spacing['3xl']} 0`,
       color: TavariStyles.colors.gray600
+    },
+    noAccessContainer: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: `${TavariStyles.spacing['3xl']} 0`,
+      minHeight: '400px'
+    },
+    noAccessText: {
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600,
+      fontWeight: TavariStyles.typography.fontWeight.medium,
+      textAlign: 'center'
     }
   };
+
+  // Show loading state while permissions are being checked
+  if (permissionsLoading || auth.authLoading) {
+    return (
+      <div style={styles.loadingContainer}>
+        <div style={styles.loadingSpinner}></div>
+        <div style={styles.loadingText}>Loading payroll dashboard...</div>
+      </div>
+    );
+  }
+
+  // Show access denied if user doesn't have permission
+  if (!canAccessPayroll) {
+    return (
+      <div style={styles.errorContainer}>
+        <h3 style={styles.errorTitle}>⚠️ Access Denied</h3>
+        <p>You do not have permission to access the payroll management system.</p>
+        <p>Please contact your administrator if you believe this is an error.</p>
+      </div>
+    );
+  }
 
   return (
     <POSAuthWrapper
@@ -644,25 +842,42 @@ const HRPayrollDashboard = () => {
 
             <div style={styles.mainContent}>
               {/* Tabs navigation */}
-              <div style={styles.tabsContainer}>
-                <div style={styles.tabsList}>
-                  {availableTabs.map(tab => (
-                    <button
-                      key={tab.id}
-                      style={{
-                        ...styles.tab,
-                        ...(activeTab === tab.id ? styles.activeTab : styles.inactiveTab)
-                      }}
-                      onClick={() => handleTabChange(tab.id)}
-                    >
-                      <span style={styles.tabIcon}>{tab.icon}</span>
-                      <div>
-                        <div style={styles.tabLabel}>{tab.label}</div>
-                        <div style={styles.tabDescription}>{tab.description}</div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
+              <div style={{
+                display: 'flex',
+                gap: '2px',
+                marginBottom: '30px',
+                backgroundColor: '#e5e7eb',
+                borderRadius: '8px',
+                padding: '4px',
+                overflowX: 'auto'
+              }}>
+                {availableTabs.map(tab => (
+                  <button
+                    key={tab.id}
+                    style={{
+                      flex: 1,
+                      padding: '12px 20px',
+                      backgroundColor: activeTab === tab.id ? 'white' : 'transparent',
+                      color: activeTab === tab.id ? '#008080' : '#6b7280',
+                      border: 'none',
+                      borderRadius: '6px',
+                      fontSize: '14px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                      boxShadow: activeTab === tab.id ? '0 2px 4px rgba(0,0,0,0.1)' : 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      whiteSpace: 'nowrap',
+                      minWidth: 'fit-content'
+                    }}
+                    onClick={() => handleTabChange(tab.id)}
+                  >
+                    <span>{tab.icon}</span>
+                    <span>{tab.label}</span>
+                  </button>
+                ))}
               </div>
 
               {/* Tab content */}

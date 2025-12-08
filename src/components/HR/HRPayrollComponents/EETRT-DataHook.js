@@ -1,14 +1,10 @@
-// components/HR/HRPayrollComponents/EETRT-DataHook.js - Enhanced with YTD Integration
+// components/HR/HRPayrollComponents/EETRT-DataHook.js
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../../../supabaseClient';
-import { SecurityWrapper } from '../../../Security';
 import { useSecurityContext } from '../../../Security';
 import { usePOSAuth } from '../../../hooks/usePOSAuth';
 import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
 import { useYTDCalculations } from '../../../hooks/useYTDCalculations';
-import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
-import TavariCheckbox from '../../../components/UI/TavariCheckbox';
-import { TavariStyles } from '../../../utils/TavariStyles';
 import { EETRT_calculateROEData, EETRT_calculateT4Data, EETRT_processPayrollForROE, EETRT_detectPaymentFrequency } from './EETRT-Calculations';
 import { EETRT_generateReportHTML } from './EETRT-ReportGenerator';
 
@@ -28,14 +24,13 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
     detectedFrequency: null,
     frequencyConfidence: 0,
     isT4Report: false,
-    useYTDOptimization: true // New: Option to use YTD data for faster calculations
+    useYTDOptimization: true
   });
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [calculatedData, setCalculatedData] = useState(null);
   const [error, setError] = useState(null);
 
-  // Security context for sensitive tax report operations
   const {
     validateInput,
     checkRateLimit,
@@ -49,7 +44,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
     securityLevel: 'critical'
   });
 
-  // Authentication context
   const {
     selectedBusinessId: authBusinessId,
     authUser,
@@ -61,24 +55,18 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
     componentName: 'useEETRTData'
   });
 
-  // Tax calculations for formatting
   const { formatTaxAmount } = useTaxCalculations(selectedBusinessId);
-
-  // YTD calculations hook for optimized T4 data
   const ytd = useYTDCalculations(selectedBusinessId);
 
-  // Use effective business ID
   const effectiveBusinessId = selectedBusinessId || authBusinessId;
   const effectiveBusinessData = businessData || authBusinessData;
 
-  // Load employees on mount
   useEffect(() => {
     if (effectiveBusinessId) {
       loadEmployees();
     }
   }, [effectiveBusinessId]);
 
-  // Detect payment frequency when payroll history loads
   useEffect(() => {
     if (payrollHistory.length > 0 && !reportConfig.paymentFrequencyOverride) {
       const detection = EETRT_detectPaymentFrequency(payrollHistory);
@@ -91,7 +79,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
     }
   }, [payrollHistory, reportConfig.paymentFrequencyOverride]);
 
-  // Calculate data when dependencies change
   useEffect(() => {
     if (selectedEmployee && (payrollHistory.length > 0 || reportConfig.useYTDOptimization)) {
       calculateComprehensiveData();
@@ -119,7 +106,7 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
         .from('user_roles')
         .select(`
           *,
-          users!inner (
+          users:user_id (
             id, first_name, last_name, email, hire_date, wage,
             employment_status, phone, employee_number, claim_code
           )
@@ -138,7 +125,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
       }, 'low');
 
     } catch (error) {
-      console.error('Error loading employees:', error);
       setError(error.message);
       await logSecurityEvent('eetrt_employee_load_error', {
         business_id: effectiveBusinessId,
@@ -158,15 +144,16 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
     try {
       await recordAction('eetrt_payroll_history_access', employeeId);
 
-      // Load 15 months of payroll history for comprehensive ROE calculations
       const fifteenMonthsAgo = new Date();
       fifteenMonthsAgo.setMonth(fifteenMonthsAgo.getMonth() - 15);
+      const currentYear = new Date().getFullYear();
 
-      const { data: entries, error } = await supabase
+      // Load actual payroll entries
+      const { data: entries, error: entriesError } = await supabase
         .from('hrpayroll_entries')
         .select(`
           *, 
-          hrpayroll_runs!inner (
+          hrpayroll_runs!hrpayroll_entries_payroll_run_id_fkey (
             pay_date, 
             pay_period_start, 
             pay_period_end, 
@@ -177,9 +164,27 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
         .eq('hrpayroll_runs.business_id', effectiveBusinessId)
         .gte('hrpayroll_runs.pay_date', fifteenMonthsAgo.toISOString().split('T')[0]);
 
-      if (error) throw error;
+      if (entriesError) throw entriesError;
 
-      const sortedEntries = (entries || []).sort((a, b) => 
+      // Load YTD migrated data
+      const { data: ytdData, error: ytdError } = await supabase
+        .from('hrpayroll_ytd_data')
+        .select('*')
+        .eq('user_id', employeeId)
+        .eq('business_id', effectiveBusinessId)
+        .eq('tax_year', currentYear)
+        .single();
+
+      let allEntries = entries || [];
+
+      // If we have YTD data and fewer than 53 entries, create synthetic periods
+      if (ytdData && allEntries.length < 53) {
+        const periodsNeeded = 53 - allEntries.length;
+        const syntheticEntries = createSyntheticPayPeriods(ytdData, periodsNeeded, allEntries, employeeId);
+        allEntries = [...syntheticEntries, ...allEntries];
+      }
+
+      const sortedEntries = allEntries.sort((a, b) => 
         new Date(b.hrpayroll_runs.pay_date) - new Date(a.hrpayroll_runs.pay_date)
       );
       
@@ -189,14 +194,12 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
         business_id: effectiveBusinessId,
         employee_id: employeeId,
         entries_count: sortedEntries.length,
-        date_range: {
-          from: fifteenMonthsAgo.toISOString().split('T')[0],
-          to: new Date().toISOString().split('T')[0]
-        }
+        real_entries: entries?.length || 0,
+        synthetic_entries: sortedEntries.length - (entries?.length || 0),
+        ytd_data_used: !!ytdData
       }, 'medium');
 
     } catch (error) {
-      console.error('Error loading payroll history:', error);
       setError(`Error loading payroll data: ${error.message}`);
       await logSecurityEvent('eetrt_payroll_history_error', {
         business_id: effectiveBusinessId,
@@ -206,6 +209,82 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
     } finally {
       setGenerating(false);
     }
+  };
+
+  const createSyntheticPayPeriods = (ytdData, periodsNeeded, existingEntries, employeeId) => {
+    const syntheticEntries = [];
+    const currentYear = new Date().getFullYear();
+    
+    // Determine payment frequency (default to bi-weekly)
+    const frequency = reportConfig.detectedFrequency || 'bi_weekly';
+    const daysPerPeriod = frequency === 'weekly' ? 7 : frequency === 'bi_weekly' ? 14 : frequency === 'semi_monthly' ? 15 : 30;
+    
+    // Find the earliest date to work backwards from
+    let startDate;
+    if (existingEntries.length > 0) {
+      const oldestEntry = existingEntries.reduce((oldest, entry) => {
+        const entryDate = new Date(entry.hrpayroll_runs.pay_date);
+        return entryDate < oldest ? entryDate : oldest;
+      }, new Date(existingEntries[0].hrpayroll_runs.pay_date));
+      startDate = new Date(oldestEntry);
+    } else {
+      startDate = new Date();
+    }
+
+    // Calculate per-period averages from YTD totals
+    const avgHoursPerPeriod = parseFloat(ytdData.hours_worked || 0) / periodsNeeded;
+    const avgRegularIncomePerPeriod = parseFloat(ytdData.regular_income || 0) / periodsNeeded;
+    const avgOvertimeIncomePerPeriod = parseFloat(ytdData.overtime_income || 0) / periodsNeeded;
+    const avgVacationPayPerPeriod = parseFloat(ytdData.vacation_pay || 0) / periodsNeeded;
+    const avgPremiumPayPerPeriod = parseFloat(ytdData.shift_premiums || 0) / periodsNeeded;
+    const avgGrossPayPerPeriod = parseFloat(ytdData.gross_pay || 0) / periodsNeeded;
+    const avgFederalTaxPerPeriod = parseFloat(ytdData.federal_tax || 0) / periodsNeeded;
+    const avgProvincialTaxPerPeriod = parseFloat(ytdData.provincial_tax || 0) / periodsNeeded;
+    const avgCPPPerPeriod = parseFloat(ytdData.cpp_deduction || 0) / periodsNeeded;
+    const avgEIPerPeriod = parseFloat(ytdData.ei_deduction || 0) / periodsNeeded;
+
+    // Create synthetic entries working backwards from startDate
+    for (let i = 0; i < periodsNeeded; i++) {
+      const payDate = new Date(startDate);
+      payDate.setDate(payDate.getDate() - (daysPerPeriod * (i + 1)));
+      
+      const periodEnd = new Date(payDate);
+      const periodStart = new Date(payDate);
+      periodStart.setDate(periodStart.getDate() - (daysPerPeriod - 1));
+
+      // Create synthetic entry matching hrpayroll_entries structure
+      syntheticEntries.push({
+        id: `synthetic_${i}_${employeeId}`,
+        user_id: employeeId,
+        payroll_run_id: null,
+        regular_hours: avgHoursPerPeriod.toFixed(2),
+        overtime_hours: (parseFloat(ytdData.overtime_hours || 0) / periodsNeeded).toFixed(2),
+        lieu_hours: (parseFloat(ytdData.lieu_hours || 0) / periodsNeeded).toFixed(2),
+        gross_pay: avgGrossPayPerPeriod.toFixed(2),
+        vacation_pay: avgVacationPayPerPeriod.toFixed(2),
+        federal_tax: avgFederalTaxPerPeriod.toFixed(2),
+        provincial_tax: avgProvincialTaxPerPeriod.toFixed(2),
+        cpp_deduction: avgCPPPerPeriod.toFixed(2),
+        ei_deduction: avgEIPerPeriod.toFixed(2),
+        net_pay: (avgGrossPayPerPeriod - avgFederalTaxPerPeriod - avgProvincialTaxPerPeriod - avgCPPPerPeriod - avgEIPerPeriod).toFixed(2),
+        premiums: JSON.stringify({
+          shift_premium: {
+            hours: 0,
+            rate: 0,
+            total_pay: avgPremiumPayPerPeriod.toFixed(2)
+          }
+        }),
+        is_synthetic: true, // Mark as synthetic for identification
+        hrpayroll_runs: {
+          pay_date: payDate.toISOString().split('T')[0],
+          pay_period_start: periodStart.toISOString().split('T')[0],
+          pay_period_end: periodEnd.toISOString().split('T')[0],
+          business_id: effectiveBusinessId
+        }
+      });
+    }
+
+    return syntheticEntries;
   };
 
   const handleEmployeeChange = async (employeeId) => {
@@ -229,7 +308,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
         await loadEmployeePayrollHistory(employeeId);
       }
     } catch (error) {
-      console.error('Error changing employee:', error);
       setError(`Error selecting employee: ${error.message}`);
     }
   };
@@ -255,7 +333,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
 
       const { startDate, endDate } = getCalculationDateRange();
       
-      // Filter payroll entries for the calculation period
       const periodEntries = payrollHistory.filter(entry => {
         const payDate = new Date(entry.hrpayroll_runs.pay_date);
         return payDate >= startDate && payDate <= endDate;
@@ -265,33 +342,28 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
       let t4Data = null;
       let dataSource = 'payroll_entries';
 
-      // ROE Calculation (always uses detailed payroll history for accuracy)
       if (!reportConfig.isT4Report || periodEntries.length > 0) {
         roeData = EETRT_calculateROEData(periodEntries);
       }
 
-      // T4 Calculation - Enhanced with YTD optimization
       if (reportConfig.isT4Report && reportConfig.useYTDOptimization && ytd && !ytd.loading) {
         try {
-          // Attempt to use YTD data for faster T4 calculation
           const employeeYTD = await ytd.calculateEmployeeYTD(
             employee.id,
             endDate.toISOString().split('T')[0]
           );
 
           if (employeeYTD && employeeYTD.is_current) {
-            // Use YTD data for T4 calculation (much faster)
             t4Data = {
               box14_employmentIncome: employeeYTD.gross_pay + employeeYTD.vacation_pay,
               box16_cppContributions: employeeYTD.cpp_deduction,
               box18_eiPremiums: employeeYTD.ei_deduction,
               box22_incomeTax: employeeYTD.federal_tax + employeeYTD.provincial_tax,
-              box24_eiInsurableEarnings: Math.min(employeeYTD.gross_pay, 65700), // 2025 EI max
-              box26_cppPensionableEarnings: Math.min(employeeYTD.gross_pay, 71300), // 2025 CPP max
-              box52_pensionAdjustment: 0, // Placeholder for future pension integration
-              box56_cppQppExemption: 0, // Placeholder for future exemption integration
+              box24_eiInsurableEarnings: Math.min(employeeYTD.gross_pay, 65700),
+              box26_cppPensionableEarnings: Math.min(employeeYTD.gross_pay, 71300),
+              box52_pensionAdjustment: 0,
+              box56_cppQppExemption: 0,
               
-              // Enhanced breakdown from YTD
               ytd_regular_income: employeeYTD.regular_income,
               ytd_overtime_income: employeeYTD.overtime_income,
               ytd_lieu_income: employeeYTD.lieu_income,
@@ -301,7 +373,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
               ytd_federal_tax: employeeYTD.federal_tax,
               ytd_provincial_tax: employeeYTD.provincial_tax,
               
-              // Calculation metadata
               calculation_method: 'ytd_optimized',
               calculation_date: employeeYTD.calculation_date,
               last_ytd_update: employeeYTD.last_stored_update,
@@ -318,7 +389,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
             }, 'low');
 
           } else {
-            // Fall back to traditional calculation if YTD data is not current
             t4Data = EETRT_calculateT4Data(periodEntries);
             dataSource = 'payroll_entries_fallback';
             
@@ -330,7 +400,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
           }
 
         } catch (ytdError) {
-          console.warn('YTD calculation failed, falling back to traditional method:', ytdError);
           t4Data = EETRT_calculateT4Data(periodEntries);
           dataSource = 'payroll_entries_ytd_error';
           
@@ -341,15 +410,12 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
           }, 'medium');
         }
       } else {
-        // Traditional T4 calculation or YTD optimization disabled
         t4Data = EETRT_calculateT4Data(periodEntries);
         dataSource = reportConfig.useYTDOptimization ? 'ytd_not_available' : 'ytd_disabled';
       }
 
-      // Process payroll for ROE breakdown (always needed for ROE reports)
       const payPeriodBreakdown = EETRT_processPayrollForROE(periodEntries);
       
-      // Prepare employee contact information
       const contactInfo = {
         fullName: `${employee.first_name} ${employee.last_name}`,
         email: employee.email,
@@ -381,6 +447,7 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
         metadata: {
           dataSource,
           payrollEntriesUsed: periodEntries.length,
+          syntheticEntriesUsed: periodEntries.filter(e => e.is_synthetic).length,
           calculationTimestamp: new Date().toISOString(),
           ytdOptimizationEnabled: reportConfig.useYTDOptimization,
           ytdDataAvailable: !!ytd && !ytd.loading && !!ytd.ytdData[employee.id]
@@ -402,7 +469,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
       }, 'medium');
 
     } catch (error) {
-      console.error('Error calculating comprehensive data:', error);
       setError(`Calculation error: ${error.message}`);
       
       await logSecurityEvent('eetrt_calculation_error', {
@@ -509,7 +575,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
       }, 'medium');
 
     } catch (error) {
-      console.error('Error generating comprehensive report:', error);
       setError(`Report generation error: ${error.message}`);
       
       await recordAction('generate_comprehensive_tax_report', selectedEmployee.users.id, false);
@@ -523,7 +588,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
     }
   };
 
-  // Toggle YTD optimization
   const toggleYTDOptimization = (enabled) => {
     setReportConfig(prev => ({
       ...prev,
@@ -531,7 +595,6 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
     }));
   };
 
-  // Get YTD status for UI
   const getYTDStatus = () => {
     if (!ytd || ytd.loading) return { status: 'loading', message: 'Loading YTD data...' };
     if (ytd.error) return { status: 'error', message: `YTD Error: ${ytd.error}` };
@@ -549,40 +612,33 @@ export const useEETRTData = (selectedBusinessId, businessData) => {
   };
 
   return {
-    // Employee and payroll data
     employees,
     selectedEmployee,
     payrollHistory,
     reportConfig,
     calculatedData,
     
-    // State management
     loading,
     generating,
     error,
     
-    // Core functions
     handleEmployeeChange,
     setReportConfig,
     generateComprehensiveReport,
     
-    // Utility functions
     getEffectivePaymentFrequency,
     getPayPeriodsPerYear,
     getCalculationDateRange,
     
-    // YTD integration functions
     toggleYTDOptimization,
     getYTDStatus,
     ytdData: ytd?.ytdData,
     ytdLoading: ytd?.loading,
     
-    // Refresh functions
     refreshEmployees: loadEmployees,
     refreshPayrollHistory: () => selectedEmployee && loadEmployeePayrollHistory(selectedEmployee.users.id),
     refreshCalculation: calculateComprehensiveData,
     
-    // Validation functions
     canGenerate: !!(selectedEmployee && calculatedData && !generating),
     hasPayrollData: payrollHistory.length > 0,
     hasYTDData: !!(ytd && !ytd.loading && selectedEmployee && ytd.ytdData[selectedEmployee.users.id])

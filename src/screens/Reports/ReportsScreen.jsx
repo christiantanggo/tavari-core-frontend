@@ -1,19 +1,104 @@
-// screens/Reports/ReportsScreen.jsx
-import React, { useState } from 'react';
+// screens/Reports/ReportsScreen.jsx - WITH PERMISSION SYSTEM + NO CONSOLE LOGGING
+import React, { useState, useEffect } from 'react';
+import toast from 'react-hot-toast';
+
+// Security & Authentication
+import { SecurityWrapper, useSecurityContext } from '../../Security';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+
+// Foundation Components
 import POSReportsScreen from '../POS/POSReportsScreen';
 import { TavariStyles } from '../../utils/TavariStyles';
 
 const ReportsScreen = () => {
+  // Security context for sensitive reports access
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'ReportsScreen',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
+  // Authentication using standardized hook
+  const auth = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'employee'],
+    requireBusiness: true,
+    componentName: 'ReportsScreen'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewReports = hasPermission('pos.reports.view') || hasElevatedPrivileges();
+  const canExportReports = hasPermission('pos.reports.export') || hasElevatedPrivileges();
+  const canViewPOSReports = hasPermission('pos.reports.view') || hasElevatedPrivileges();
+
   const [activeTab, setActiveTab] = useState('pos');
 
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewReports) {
+      toast.error('You do not have permission to view reports');
+    }
+  }, [permissionsLoading, canViewReports]);
+
+  // Log initial access
+  useEffect(() => {
+    if (auth.selectedBusinessId && !permissionsLoading && canViewReports) {
+      logSecurityEvent('reports_screen_accessed', {
+        action: 'reports_screen_loaded',
+        business_id: auth.selectedBusinessId,
+        user_id: auth.authUser?.id,
+        initial_tab: activeTab
+      }, 'low');
+    }
+  }, [auth.selectedBusinessId, permissionsLoading, canViewReports]);
+
   const tabs = [
-    { id: 'pos', name: 'POS Reports', icon: '🏪' },
+    { id: 'pos', name: 'POS Reports', icon: '🪙', permission: 'pos.reports.view' },
     { id: 'music', name: 'Music Reports', icon: '🎵', disabled: true },
     { id: 'mail', name: 'Mail Reports', icon: '📧', disabled: true },
     { id: 'hr', name: 'HR Reports', icon: '👥', disabled: true },
     { id: 'overview', name: 'Business Overview', icon: '📊', disabled: true }
   ];
+
+  const handleTabChange = async (tabId) => {
+    const tab = tabs.find(t => t.id === tabId);
+    
+    // Check permission if tab requires one
+    if (tab.permission && !hasPermission(tab.permission) && !hasElevatedPrivileges()) {
+      toast.error(`You do not have permission to view ${tab.name}`);
+      return;
+    }
+
+    await logSecurityEvent('reports_tab_changed', {
+      action: 'change_tab',
+      business_id: auth.selectedBusinessId,
+      from_tab: activeTab,
+      to_tab: tabId
+    }, 'low');
+
+    await recordAction('reports_tab_changed', auth.selectedBusinessId, true);
+
+    setActiveTab(tabId);
+  };
 
   const styles = {
     container: {
@@ -100,16 +185,34 @@ const ReportsScreen = () => {
       lineHeight: TavariStyles.typography.lineHeight.relaxed,
       maxWidth: '500px',
       margin: '0 auto'
+    },
+
+    noPermission: {
+      padding: TavariStyles.spacing['4xl'],
+      textAlign: 'center',
+      color: TavariStyles.colors.danger
     }
   };
 
   const renderTabContent = () => {
+    // Check permission for active tab
+    const currentTab = tabs.find(t => t.id === activeTab);
+    if (currentTab?.permission && !hasPermission(currentTab.permission) && !hasElevatedPrivileges()) {
+      return (
+        <div style={styles.noPermission}>
+          <h3>Access Denied</h3>
+          <p>You do not have permission to view {currentTab.name}</p>
+        </div>
+      );
+    }
+
     switch (activeTab) {
       case 'pos':
         return (
           <div style={styles.tabContent}>
-            {/* Remove the wrapper here since POSReportsScreen will handle its own auth */}
-            <POSReportsContentWrapper />
+            <PermissionGate permission="pos.reports.view">
+              <POSReportsContentWrapper />
+            </PermissionGate>
           </div>
         );
       
@@ -159,40 +262,66 @@ const ReportsScreen = () => {
   };
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1 style={styles.title}>Business Reports & Analytics</h1>
-        <p style={styles.subtitle}>Comprehensive reporting across all Tavari modules</p>
-      </div>
-
-      <div style={styles.tabContainer}>
-        <div style={styles.tabList}>
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => !tab.disabled && setActiveTab(tab.id)}
-              style={{
-                ...styles.tab,
-                ...(activeTab === tab.id ? styles.tabActive : {}),
-                ...(tab.disabled ? styles.tabDisabled : {})
-              }}
-              disabled={tab.disabled}
-            >
-              <span>{tab.icon}</span>
-              <span>{tab.name}</span>
-              {tab.disabled && <span style={{ fontSize: '10px' }}>(Soon)</span>}
-            </button>
-          ))}
+    <SecurityWrapper
+      componentName="ReportsScreen"
+      sensitiveComponent={true}
+      requireSecureConnection={false}
+      securityLevel="high"
+    >
+      <div style={styles.container}>
+        <div style={styles.header}>
+          <h1 style={styles.title}>Business Reports & Analytics</h1>
+          <p style={styles.subtitle}>Comprehensive reporting across all Tavari modules</p>
         </div>
 
-        {renderTabContent()}
+        <div style={styles.tabContainer}>
+          <div style={styles.tabList}>
+            {tabs.map((tab) => {
+              // Check if user has permission for this tab
+              const hasTabPermission = !tab.permission || hasPermission(tab.permission) || hasElevatedPrivileges();
+              const isDisabled = tab.disabled || (!hasTabPermission && tab.permission);
+
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => !isDisabled && handleTabChange(tab.id)}
+                  style={{
+                    ...styles.tab,
+                    ...(activeTab === tab.id ? styles.tabActive : {}),
+                    ...(isDisabled ? styles.tabDisabled : {})
+                  }}
+                  disabled={isDisabled}
+                  title={!hasTabPermission && tab.permission ? 'You do not have permission to view this report' : ''}
+                >
+                  <span>{tab.icon}</span>
+                  <span>{tab.name}</span>
+                  {tab.disabled && <span style={{ fontSize: '10px' }}>(Soon)</span>}
+                  {!hasTabPermission && tab.permission && <span style={{ fontSize: '10px' }}>🔒</span>}
+                </button>
+              );
+            })}
+          </div>
+
+          {renderTabContent()}
+        </div>
       </div>
-    </div>
+    </SecurityWrapper>
   );
 };
 
 // Create a wrapper component that handles authentication for POSReportsScreen
 const POSReportsContentWrapper = () => {
+  // Security context for POS reports
+  const {
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSReportsContentWrapper',
+    sensitiveComponent: true,
+    enableRateLimiting: false,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
   return (
     <POSAuthWrapper
       requiredRoles={['owner', 'manager', 'employee']}
@@ -208,21 +337,46 @@ const POSReportsContentWrapper = () => {
 const POSReportsScreenContent = () => {
   const [authData, setAuthData] = useState(null);
 
+  // Security context for POS reports screen
+  const {
+    logSecurityEvent,
+    recordAction
+  } = useSecurityContext({
+    componentName: 'POSReportsScreenContent',
+    sensitiveComponent: true,
+    enableRateLimiting: false,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
+  const handleAuthReady = async (auth) => {
+    await logSecurityEvent('pos_reports_loaded', {
+      action: 'pos_reports_screen_loaded',
+      business_id: auth.selectedBusinessId,
+      user_id: auth.authUser?.id
+    }, 'low');
+
+    await recordAction('pos_reports_accessed', auth.selectedBusinessId, true);
+
+    setAuthData(auth);
+  };
+
   return (
     <POSAuthWrapper
       requiredRoles={['owner', 'manager', 'employee']}
       requireBusiness={true}
       componentName="POSReportsWrapper"
-      onAuthReady={(auth) => {
-        console.log('POSReports: Auth ready with data:', auth);
-        setAuthData(auth);
-      }}
+      onAuthReady={handleAuthReady}
     >
       {authData ? (
         <POSReportsScreen authData={authData} />
       ) : (
         <div style={{ padding: '40px', textAlign: 'center' }}>
-          Loading POS reports...
+          <div style={TavariStyles.components.loading.container}>
+            <div style={TavariStyles.components.loading.spinner}></div>
+            <div>Loading POS reports...</div>
+            <style>{TavariStyles.keyframes.spin}</style>
+          </div>
         </div>
       )}
     </POSAuthWrapper>

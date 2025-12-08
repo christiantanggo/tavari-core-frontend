@@ -32,9 +32,10 @@ const POSCartPanel = ({
   onCustomerAttach = null,
   onCustomerDetach = null,
   
-  // NEW: Save and Exit Tab functionality
+  // Save and Exit Tab functionality
   onSaveAndExit = null
 }) => {
+	
   // LOYALTY STATE
   const [loyaltySettings, setLoyaltySettings] = useState(null);
   const [availableLoyaltyCredit, setAvailableLoyaltyCredit] = useState(0);
@@ -76,9 +77,9 @@ const POSCartPanel = ({
           .from('pos_loyalty_settings')
           .select('*')
           .eq('business_id', businessId)
-          .single();
+          .maybeSingle();
 
-        if (error && error.code !== 'PGRST116') {
+        if (error && error.code && error.code !== 'PGRST116') {
           console.error('Error loading loyalty settings:', error);
           return;
         }
@@ -146,7 +147,7 @@ const POSCartPanel = ({
         .select('amount_used')
         .eq('loyalty_account_id', loyaltyCustomer.id)
         .eq('usage_date', today)
-        .single();
+        .maybeSingle();
 
       // FIXED: Convert points to dollars if loyalty mode is points
       let usedTodayDollars = todayUsage?.amount_used || 0;

@@ -13,7 +13,7 @@ import {
   FiUserCheck, FiUserX, FiMail, FiPhone, FiDownload, FiGitMerge, 
   FiRefreshCw, FiAlertTriangle, FiCheck, FiX, FiCopy, FiTag,
   FiTrendingUp, FiEye, FiMousePointer, FiClock, FiShield, FiHeart,
-  FiHome, FiStar, FiSettings, FiMapPin, FiGlobe, FiCalendar
+  FiHome, FiStar, FiSettings, FiMapPin, FiGlobe, FiCalendar, FiInfo
 } from 'react-icons/fi';
 
 const ContactsList = () => {
@@ -21,7 +21,9 @@ const ContactsList = () => {
   const { business } = useBusiness();
   const [contacts, setContacts] = useState([]);
   const [allContacts, setAllContacts] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [contactsLoaded, setContactsLoaded] = useState(false);
+  const [summaryLoading, setSummaryLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [filter, setFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
@@ -31,7 +33,7 @@ const ContactsList = () => {
   const [sortOrder, setSortOrder] = useState('desc');
   const [selectedContacts, setSelectedContacts] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  const [pageSize, setPageSize] = useState(10000);
   const [totalContacts, setTotalContacts] = useState(0);
   const [stats, setStats] = useState({ 
     total: 0, 
@@ -54,6 +56,45 @@ const ContactsList = () => {
 
   const businessId = business?.id;
 
+  const loadContactSummary = useCallback(async () => {
+    if (!businessId) return;
+
+    try {
+      setSummaryLoading(true);
+
+      const totalResult = await supabase
+        .from('mail_contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('business_id', businessId);
+
+      if (totalResult.error) throw totalResult.error;
+
+      const subscribedResult = await supabase
+        .from('mail_contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('business_id', businessId)
+        .eq('subscribed', true);
+
+      if (subscribedResult.error) throw subscribedResult.error;
+
+      const totalCount = totalResult.count || 0;
+      const subscribedCount = subscribedResult.count || 0;
+
+      setStats(prev => ({
+        ...prev,
+        total: totalCount,
+        subscribed: subscribedCount,
+        unsubscribed: totalCount - subscribedCount
+      }));
+
+      setTotalContacts(totalCount);
+    } catch (error) {
+      console.error('Error loading contact summary:', error);
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, [businessId]);
+
   // Load all contacts with enhanced data
   const loadAllContacts = useCallback(async () => {
     if (!businessId) {
@@ -65,23 +106,37 @@ const ContactsList = () => {
       setLoading(true);
       console.log('Loading enhanced contacts for business:', businessId);
       
-      // Fetch contacts with all new columns and related data
-      const { data, error } = await supabase
-        .from('mail_contacts')
-        .select(`
-          *,
-          household:mail_households(id, household_name, primary_contact_id),
-          segments:mail_contact_segment_memberships(
-            segment:mail_contact_segments(id, name, color)
-          )
-        `)
-        .eq('business_id', businessId)
-        .order(sortField, { ascending: sortOrder === 'asc' });
+      const batchSize = 1000;
+      let offset = 0;
+      let more = true;
+      const aggregated = [];
 
-      if (error) throw error;
+      while (more) {
+        const { data, error } = await supabase
+          .from('mail_contacts')
+          .select(`
+            *,
+            household:mail_households(id, household_name, primary_contact_id),
+            segments:mail_contact_segment_memberships(
+              segment:mail_contact_segments(id, name, color)
+            )
+          `)
+          .eq('business_id', businessId)
+          .order(sortField, { ascending: sortOrder === 'asc' })
+          .range(offset, offset + batchSize - 1);
 
-      // Process contacts to include calculated fields
-      const processedContacts = (data || []).map(contact => ({
+        if (error) throw error;
+
+        aggregated.push(...(data || []));
+
+        if (!data || data.length < batchSize) {
+          more = false;
+        } else {
+          offset += batchSize;
+        }
+      }
+
+      const processedContacts = aggregated.map(contact => ({
         ...contact,
         engagement_level: getEngagementLevel(contact.engagement_score || 0),
         last_activity: getLastActivity(contact),
@@ -92,10 +147,75 @@ const ContactsList = () => {
         communication_health: getCommunicationHealth(contact)
       }));
 
-      setAllContacts(processedContacts);
-      setTotalContacts(processedContacts.length);
+      const uniqueContactsMap = new Map();
+      processedContacts.forEach(contact => {
+        if (!uniqueContactsMap.has(contact.id)) {
+          uniqueContactsMap.set(contact.id, contact);
+        }
+      });
+      const uniqueContacts = Array.from(uniqueContactsMap.values());
+
+      const totalCount = uniqueContacts.length;
+      const subscribedCount = uniqueContacts.filter(c => c.subscribed).length;
+      const highEngagementCount = uniqueContacts.filter(c => c.engagement_level === 'high').length;
+      const withoutConsentCount = uniqueContacts.filter(c => getConsentStatus(c) === 'missing').length;
+      const householdCount = uniqueContacts.filter(c => c.household_id).length;
+
+      const duplicateGroups = (() => {
+        const groups = [];
+        const emailMap = new Map();
+        const namePhoneMap = new Map();
+
+        uniqueContacts.forEach(contact => {
+          if (contact.email) {
+            const emailKey = contact.email.toLowerCase();
+            if (emailMap.has(emailKey)) {
+              emailMap.get(emailKey).push(contact);
+            } else {
+              emailMap.set(emailKey, [contact]);
+            }
+          }
+
+          if (contact.first_name && contact.last_name && contact.phone) {
+            const key = `${contact.first_name.toLowerCase()}_${contact.last_name.toLowerCase()}_${contact.phone.replace(/\D/g, '')}`;
+            if (namePhoneMap.has(key)) {
+              namePhoneMap.get(key).push(contact);
+            } else {
+              namePhoneMap.set(key, [contact]);
+            }
+          }
+        });
+
+        emailMap.forEach(value => {
+          if (value.length > 1) {
+            groups.push({ type: 'email', contacts: value });
+          }
+        });
+
+        namePhoneMap.forEach(value => {
+          if (value.length > 1) {
+            groups.push({ type: 'name_phone', contacts: value });
+          }
+        });
+
+        return groups;
+      })();
+
+      setAllContacts(uniqueContacts);
+      setTotalContacts(totalCount);
+      setStats({
+        total: totalCount,
+        subscribed: subscribedCount,
+        unsubscribed: totalCount - subscribedCount,
+        highEngagement: highEngagementCount,
+        withoutConsent: withoutConsentCount,
+        householdMembers: householdCount
+      });
+      setDuplicates(duplicateGroups);
+      setContactsLoaded(true);
     } catch (error) {
       console.error('Error loading contacts:', error);
+      setContactsLoaded(false);
     } finally {
       setLoading(false);
     }
@@ -204,47 +324,38 @@ const ContactsList = () => {
 
   // Update contacts state when filtered results change
   useEffect(() => {
-    setContacts(paginatedContacts);
-    setTotalContacts(filteredContacts.length);
-  }, [filteredContacts, paginatedContacts]);
-
-  // Enhanced stats calculation
-  const loadStats = useCallback(async () => {
-    if (!businessId) return;
-    
-    try {
-      const total = allContacts.length;
-      const subscribed = allContacts.filter(c => c.subscribed).length;
-      const unsubscribed = total - subscribed;
-      const highEngagement = allContacts.filter(c => c.engagement_level === 'high').length;
-      const withoutConsent = allContacts.filter(c => c.consent_status === 'missing').length;
-      const householdMembers = allContacts.filter(c => c.household_id).length;
-      
-      setStats({ 
-        total, 
-        subscribed, 
-        unsubscribed, 
-        highEngagement, 
-        withoutConsent, 
-        householdMembers 
-      });
-    } catch (error) {
-      console.error('Error loading stats:', error);
+    if (contactsLoaded) {
+      setContacts(paginatedContacts);
+      setTotalContacts(filteredContacts.length);
     }
-  }, [allContacts, businessId]);
+  }, [filteredContacts, paginatedContacts, contactsLoaded]);
+
+  useEffect(() => {
+    if (!contactsLoaded) return;
+
+    const total = allContacts.length;
+    const subscribed = allContacts.filter(c => c.subscribed).length;
+    const highEngagement = allContacts.filter(c => c.engagement_level === 'high').length;
+    const withoutConsent = allContacts.filter(c => !c.consent_method || !c.consent_timestamp).length;
+    const householdMembers = allContacts.filter(c => c.household_id).length;
+
+    setStats({
+      total,
+      subscribed,
+      unsubscribed: total - subscribed,
+      highEngagement,
+      withoutConsent,
+      householdMembers
+    });
+  }, [allContacts, contactsLoaded]);
 
   // Load data when business changes
   useEffect(() => {
     if (businessId) {
-      loadAllContacts();
+      loadContactSummary();
       loadSegments();
     }
-  }, [businessId, loadAllContacts, loadSegments]);
-
-  // Update stats when contacts change
-  useEffect(() => {
-    loadStats();
-  }, [loadStats]);
+  }, [businessId, loadContactSummary, loadSegments]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -252,53 +363,57 @@ const ContactsList = () => {
   }, [searchTerm, filter, sourceFilter, engagementFilter, segmentFilter]);
 
   // Enhanced duplicate detection
-  const findDuplicates = async () => {
-    if (!businessId) return;
-    
-    try {
-      const duplicateGroups = [];
-      const emailMap = new Map();
-      const namePhoneMap = new Map();
-
-      // Find email duplicates
-      allContacts.forEach(contact => {
-        if (emailMap.has(contact.email)) {
-          emailMap.get(contact.email).push(contact);
-        } else {
-          emailMap.set(contact.email, [contact]);
-        }
-      });
-
-      // Find name+phone duplicates
-      allContacts.forEach(contact => {
-        if (contact.first_name && contact.last_name && contact.phone) {
-          const key = `${contact.first_name.toLowerCase()}_${contact.last_name.toLowerCase()}_${contact.phone}`;
-          if (namePhoneMap.has(key)) {
-            namePhoneMap.get(key).push(contact);
-          } else {
-            namePhoneMap.set(key, [contact]);
-          }
-        }
-      });
-
-      // Collect all duplicate groups
-      emailMap.forEach(contacts => {
-        if (contacts.length > 1) {
-          duplicateGroups.push({ type: 'email', contacts });
-        }
-      });
-
-      namePhoneMap.forEach(contacts => {
-        if (contacts.length > 1) {
-          duplicateGroups.push({ type: 'name_phone', contacts });
-        }
-      });
-
-      setDuplicates(duplicateGroups);
-    } catch (error) {
-      console.error('Error finding duplicates:', error);
+  const findDuplicates = useCallback((contactsSource = allContacts) => {
+    if (!contactsLoaded) {
+      setDuplicates([]);
+      return;
     }
-  };
+
+    const source = contactsSource || allContacts;
+    if (!source || source.length === 0) {
+      setDuplicates([]);
+      return;
+    }
+
+    const duplicateGroups = [];
+    const emailMap = new Map();
+    const namePhoneMap = new Map();
+
+    source.forEach(contact => {
+      if (contact.email) {
+        const emailKey = contact.email.toLowerCase();
+        if (emailMap.has(emailKey)) {
+          emailMap.get(emailKey).push(contact);
+        } else {
+          emailMap.set(emailKey, [contact]);
+        }
+      }
+
+      if (contact.first_name && contact.last_name && contact.phone) {
+        const key = `${contact.first_name.toLowerCase()}_${contact.last_name.toLowerCase()}_${contact.phone.replace(/\D/g, '')}`;
+        if (namePhoneMap.has(key)) {
+          namePhoneMap.get(key).push(contact);
+        } else {
+          namePhoneMap.set(key, [contact]);
+        }
+      }
+    });
+
+    emailMap.forEach(group => {
+      if (group.length > 1) {
+        duplicateGroups.push({ type: 'email', contacts: group });
+      }
+    });
+
+    namePhoneMap.forEach(group => {
+      if (group.length > 1) {
+        duplicateGroups.push({ type: 'name_phone', contacts: group });
+      }
+    });
+
+    setDuplicates(duplicateGroups);
+    return duplicateGroups;
+  }, [allContacts, contactsLoaded]);
 
   const handleSort = (field) => {
     if (sortField === field) {
@@ -424,6 +539,10 @@ const ContactsList = () => {
   };
 
   const handleExportSelected = async () => {
+    if (!contactsLoaded) {
+      alert('Load the contact list before exporting.');
+      return;
+    }
     try {
       console.log('Starting enhanced export...');
       
@@ -508,6 +627,10 @@ const ContactsList = () => {
   };
 
   const handleMergeContacts = async (keepId, mergeIds) => {
+    if (!contactsLoaded) {
+      alert('Load the contact list before merging contacts.');
+      return;
+    }
     try {
       // Use the enhanced merge logic with new fields
       const { data: keepContact, error: keepError } = await supabase
@@ -571,6 +694,10 @@ const ContactsList = () => {
   };
 
   const handleDataCleanup = async () => {
+    if (!contactsLoaded) {
+      alert('Load the contact list before running data cleanup.');
+      return;
+    }
     if (!window.confirm('This will clean up invalid email addresses, standardize data formats, and update engagement scores. Continue?')) return;
 
     try {
@@ -708,21 +835,19 @@ const ContactsList = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  if (loading) {
-    return (
-      <div style={styles.container}>
-        <div style={styles.loading}>
-          <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
-          <div>Loading enhanced contact data...</div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div style={styles.container}>
       {/* Email Pause Banner */}
       <EmailPauseBanner />
+
+      {loading && (
+        <div style={styles.loadingOverlay}>
+          <div style={styles.loadingOverlayCard}>
+            <FiRefreshCw style={{ ...styles.loadingOverlayIcon, animation: 'spin 1s linear infinite' }} />
+            <div style={styles.loadingOverlayText}>Loading enhanced contact data...</div>
+          </div>
+        </div>
+      )}
 
       {/* Header */}
       <div style={styles.header}>
@@ -734,6 +859,18 @@ const ContactsList = () => {
         </div>
         <div style={styles.headerActions}>
           <button 
+            style={contactsLoaded ? styles.secondaryButton : styles.primaryButton}
+            onClick={loadAllContacts}
+            disabled={loading}
+          >
+            {contactsLoaded ? (
+              <FiRefreshCw style={styles.buttonIcon} />
+            ) : (
+              <FiUsers style={styles.buttonIcon} />
+            )}
+            {loading ? (contactsLoaded ? 'Refreshing...' : 'Loading...') : (contactsLoaded ? 'Refresh Contacts' : 'Load Contact List')}
+          </button>
+          <button 
             style={styles.secondaryButton}
             onClick={() => setCsvImportModal(true)}
           >
@@ -743,6 +880,7 @@ const ContactsList = () => {
           <button 
             style={styles.secondaryButton}
             onClick={handleExportSelected}
+            disabled={!contactsLoaded || loading}
           >
             <FiDownload style={styles.buttonIcon} />
             Export Enhanced
@@ -762,66 +900,91 @@ const ContactsList = () => {
         <div style={styles.statCard}>
           <FiUsers style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{stats.total.toLocaleString()}</div>
+            <div style={styles.statNumber}>{summaryLoading ? '—' : stats.total.toLocaleString()}</div>
             <div style={styles.statLabel}>Total Contacts</div>
           </div>
         </div>
         <div style={styles.statCard}>
           <FiUserCheck style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{stats.subscribed.toLocaleString()}</div>
+            <div style={styles.statNumber}>{summaryLoading ? '—' : stats.subscribed.toLocaleString()}</div>
             <div style={styles.statLabel}>Subscribed</div>
           </div>
         </div>
         <div style={styles.statCard}>
           <FiTrendingUp style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{stats.highEngagement.toLocaleString()}</div>
+            <div style={styles.statNumber}>{contactsLoaded ? stats.highEngagement.toLocaleString() : '—'}</div>
             <div style={styles.statLabel}>High Engagement</div>
           </div>
         </div>
         <div style={styles.statCard}>
           <FiShield style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{stats.withoutConsent.toLocaleString()}</div>
+            <div style={styles.statNumber}>{contactsLoaded ? stats.withoutConsent.toLocaleString() : '—'}</div>
             <div style={styles.statLabel}>Missing Consent</div>
           </div>
         </div>
         <div style={styles.statCard}>
           <FiHome style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{stats.householdMembers.toLocaleString()}</div>
+            <div style={styles.statNumber}>{contactsLoaded ? stats.householdMembers.toLocaleString() : '—'}</div>
             <div style={styles.statLabel}>Household Members</div>
           </div>
         </div>
         <div style={styles.statCard}>
           <FiAlertTriangle style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{duplicates.length}</div>
+            <div style={styles.statNumber}>{contactsLoaded ? duplicates.length : '—'}</div>
             <div style={styles.statLabel}>Duplicate Groups</div>
           </div>
         </div>
       </div>
 
+      {!contactsLoaded && (
+        <div style={styles.loadNotice}>
+          <FiInfo style={styles.loadNoticeIcon} />
+          <div>
+            <strong>The full contact list is not loaded.</strong>
+            <div>Use the “Load Contact List” button above to fetch detailed contact records before running exports, cleanup, or duplicate checks.</div>
+          </div>
+        </div>
+      )}
+
       {/* Enhanced Tools Bar */}
       <div style={styles.toolsBar}>
         <button 
-          style={styles.toolButton}
+          style={{
+            ...styles.toolButton,
+            opacity: (!contactsLoaded || loading) ? 0.5 : 1,
+            cursor: (!contactsLoaded || loading) ? 'not-allowed' : 'pointer'
+          }}
           onClick={handleDataCleanup}
+          disabled={!contactsLoaded || loading}
         >
           <FiRefreshCw style={styles.buttonIcon} />
           Enhanced Cleanup
         </button>
         <button 
-          style={styles.toolButton}
+          style={{
+            ...styles.toolButton,
+            opacity: (!contactsLoaded || loading) ? 0.5 : 1,
+            cursor: (!contactsLoaded || loading) ? 'not-allowed' : 'pointer'
+          }}
           onClick={() => setShowDuplicates(!showDuplicates)}
+          disabled={!contactsLoaded || loading}
         >
           <FiGitMerge style={styles.buttonIcon} />
           {showDuplicates ? 'Hide' : 'Show'} Duplicates
         </button>
         <button 
-          style={styles.toolButton}
-          onClick={findDuplicates}
+          style={{
+            ...styles.toolButton,
+            opacity: (!contactsLoaded || loading) ? 0.5 : 1,
+            cursor: (!contactsLoaded || loading) ? 'not-allowed' : 'pointer'
+          }}
+          onClick={() => findDuplicates()}
+          disabled={!contactsLoaded || loading}
         >
           <FiSearch style={styles.buttonIcon} />
           Find Duplicates

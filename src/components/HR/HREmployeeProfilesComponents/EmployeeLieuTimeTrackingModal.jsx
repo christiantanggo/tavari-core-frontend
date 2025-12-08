@@ -30,6 +30,8 @@ const EmployeeLieuTimeTrackingModal = ({
     transaction_date: new Date().toISOString().split('T')[0]
   });
   const [validationErrors, setValidationErrors] = useState({});
+  const [deletingTransactionId, setDeletingTransactionId] = useState(null);
+  const [printing, setPrinting] = useState(false);
 
   // Security context for sensitive lieu time operations
   const {
@@ -126,23 +128,547 @@ const EmployeeLieuTimeTrackingModal = ({
     if (!employee?.id || !effectiveBusinessId) return;
 
     try {
-      const { data: transactionData, error: transactionError } = await supabase
-        .from('hrpayroll_lieu_time_transactions')
-        .select('*')
-        .eq('user_id', employee.id)
-        .eq('business_id', effectiveBusinessId)
-        .order('transaction_date', { ascending: false })
-        .order('created_at', { ascending: false });
+      const [{ data: manualTransactions, error: transactionError }, { data: payrollEntries, error: payrollError }] = await Promise.all([
+        supabase
+          .from('hrpayroll_lieu_time_transactions')
+          .select('*')
+          .eq('user_id', employee.id)
+          .eq('business_id', effectiveBusinessId),
+        supabase
+          .from('hrpayroll_entries')
+          .select(`
+            id,
+            user_id,
+            created_at,
+            lieu_earned,
+            lieu_hours,
+            lieu_balance_after,
+            payroll_run_id,
+            hrpayroll_runs!inner(
+              id,
+              business_id,
+              pay_period_start,
+              pay_period_end,
+              pay_date
+            )
+          `)
+          .eq('user_id', employee.id)
+          .eq('hrpayroll_runs.business_id', effectiveBusinessId)
+      ]);
 
       if (transactionError) throw transactionError;
+      if (payrollError) throw payrollError;
 
-      setTransactions(transactionData || []);
+      const payrollTransactions = [];
+
+      (payrollEntries || []).forEach(entry => {
+        const payDate = entry?.hrpayroll_runs?.pay_date || entry.created_at;
+        const payPeriodStart = entry?.hrpayroll_runs?.pay_period_start;
+        const payPeriodEnd = entry?.hrpayroll_runs?.pay_period_end;
+        const periodLabel = payPeriodStart && payPeriodEnd
+          ? `${payPeriodStart} to ${payPeriodEnd}`
+          : 'Payroll Run';
+
+        if (entry.lieu_earned && entry.lieu_earned > 0) {
+          payrollTransactions.push({
+            id: `payroll-${entry.id}-earned`,
+            business_id: effectiveBusinessId,
+            user_id: employee.id,
+            transaction_type: 'earned',
+            hours_amount: Number(entry.lieu_earned),
+            premium_rate: 0,
+            premium_name: null,
+            premium_type: null,
+            regular_wage_rate: null,
+            effective_wage_rate: null,
+            transaction_date: payDate,
+            created_at: entry.created_at,
+            balance_after: entry.lieu_balance_after || null,
+            source: 'payroll',
+            description: `Lieu time earned during payroll period ${periodLabel}`,
+            payroll_run_id: entry.payroll_run_id
+          });
+        }
+
+        if (entry.lieu_hours && entry.lieu_hours > 0) {
+          payrollTransactions.push({
+            id: `payroll-${entry.id}-used`,
+            business_id: effectiveBusinessId,
+            user_id: employee.id,
+            transaction_type: 'used',
+            hours_amount: -Math.abs(Number(entry.lieu_hours)),
+            premium_rate: 0,
+            premium_name: null,
+            premium_type: null,
+            regular_wage_rate: null,
+            effective_wage_rate: null,
+            transaction_date: payDate,
+            created_at: entry.created_at,
+            balance_after: entry.lieu_balance_after || null,
+            source: 'payroll',
+            description: `Lieu time used/payout during payroll period ${periodLabel}`,
+            payroll_run_id: entry.payroll_run_id
+          });
+        }
+      });
+
+      const combined = [
+        ...(manualTransactions || []).map(tx => ({ ...tx, source: tx.source || 'manual' })),
+        ...payrollTransactions
+      ];
+
+      combined.sort((a, b) => {
+        const dateA = new Date(a.transaction_date || a.created_at).getTime();
+        const dateB = new Date(b.transaction_date || b.created_at).getTime();
+        if (dateA === dateB) {
+          return new Date(b.created_at || b.transaction_date).getTime() - new Date(a.created_at || a.transaction_date).getTime();
+        }
+        return dateB - dateA;
+      });
+
+      setTransactions(combined);
 
     } catch (error) {
       console.error('Error loading lieu time transactions:', error);
       throw new Error('Failed to load lieu time transactions: ' + error.message);
     }
   };
+
+  const handlePrintTransactions = useCallback(async () => {
+    if (!transactions || transactions.length === 0) {
+      alert('No lieu time transactions are available to print.');
+      return;
+    }
+
+    try {
+      if (checkRateLimit && typeof checkRateLimit === 'function') {
+        const rateLimitCheck = await checkRateLimit('lieu_time_print', employee?.id, 3, 60000);
+        if (!rateLimitCheck.allowed) {
+          alert('Too many print attempts. Please wait before trying again.');
+          return;
+        }
+      }
+    } catch (rateLimitError) {
+      console.warn('Rate limit check failed for lieu_time_print:', rateLimitError);
+    }
+
+    setPrinting(true);
+
+    try {
+      const timezone = businessData?.timezone || 'America/Toronto';
+      const generatedAt = new Date();
+      const formattedGeneratedAt = generatedAt.toLocaleString('en-CA', { timeZone: timezone });
+
+      await logSecurityEvent('lieu_time_transactions_print', {
+        business_id: effectiveBusinessId,
+        employee_id: employee?.id,
+        transaction_count: transactions.length,
+        generated_at: formattedGeneratedAt
+      }, 'medium');
+
+      try {
+        if (recordAction && typeof recordAction === 'function') {
+          await recordAction('lieu_time_transactions_print', true);
+        }
+      } catch (actionError) {
+        console.warn('Failed to record lieu_time_transactions_print action:', actionError);
+      }
+
+      const formatHours = (value) => {
+        const number = parseFloat(value) || 0;
+        return `${number >= 0 ? '+' : '-'}${formatTaxAmount(Math.abs(number))} hrs`;
+      };
+
+      const formatDate = (value) => {
+        if (!value) return '—';
+        try {
+          return new Date(value).toLocaleString('en-CA', {
+            timeZone: timezone,
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          });
+        } catch (error) {
+          return value;
+        }
+      };
+
+      const htmlRows = transactions.map((transaction, index) => `
+        <tr>
+          <td>${index + 1}</td>
+          <td>${formatDate(transaction.transaction_date || transaction.created_at)}</td>
+          <td>${formatTransactionType(transaction.transaction_type)}</td>
+          <td>${formatHours(transaction.hours_amount)}</td>
+          <td>${formatHours(transaction.balance_after)}</td>
+          <td>${transaction.source === 'payroll' ? 'Payroll' : 'Manual'}</td>
+          <td>${transaction.description ? transaction.description.replace(/</g, '&lt;').replace(/>/g, '&gt;') : ''}</td>
+        </tr>
+      `).join('');
+
+      const reportWindow = window.open('', '_blank', 'width=900,height=700');
+
+      const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <title>Lieu Time Record - ${employee?.first_name || ''} ${employee?.last_name || ''}</title>
+            <style>
+              body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                margin: 16px;
+                color: #1f2937;
+                font-size: 6px;
+              }
+              h1, h2, h3 {
+                margin: 0;
+                padding: 0;
+              }
+              .header {
+                text-align: center;
+                margin-bottom: 12px;
+              }
+              .company-name {
+                font-size: 12px;
+                font-weight: 700;
+                color: ${TavariStyles.colors.primary};
+              }
+              .subtitle {
+                font-size: 6px;
+                color: #4b5563;
+                margin-top: 2px;
+              }
+              .info-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                gap: 6px;
+                margin-bottom: 12px;
+                padding: 8px;
+                border: 1px solid #e5e7eb;
+                border-radius: 6px;
+                background-color: ${TavariStyles.colors.gray50};
+              }
+              .info-grid div {
+                line-height: 1.3;
+                font-size: 6px;
+              }
+              .info-grid strong {
+                color: #111827;
+              }
+              table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-bottom: 12px;
+              }
+              th, td {
+                border: 1px solid #e5e7eb;
+                padding: 5px;
+                text-align: left;
+                font-size: 6px;
+              }
+              th {
+                background-color: #f3f4f6;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.3px;
+                font-size: 5px;
+              }
+              tr:nth-child(even) {
+                background-color: #f9fafb;
+              }
+              .footer {
+                font-size: 6px;
+                color: #6b7280;
+                text-align: center;
+                border-top: 1px solid #e5e7eb;
+                padding-top: 6px;
+              }
+              .note {
+                font-style: italic;
+                color: #6b7280;
+                margin-bottom: 8px;
+                font-size: 6px;
+              }
+              @media print {
+                body {
+                  margin: 10mm;
+                }
+                .note {
+                  color: #4b5563;
+                }
+              }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <div class="company-name">${businessData?.name || 'Business'}</div>
+              <h2>Lieu Time Summary</h2>
+              <div class="subtitle">Generated on ${formattedGeneratedAt}</div>
+            </div>
+
+            <div class="info-grid">
+              <div>
+                <strong>Employee:</strong><br/>
+                ${employee?.first_name || ''} ${employee?.last_name || ''}<br/>
+                ${employee?.email || ''}
+              </div>
+              <div>
+                <strong>Current Balance:</strong><br/>
+                ${formatTaxAmount(employeeSettings?.lieu_time_balance ?? employee?.lieu_time_balance ?? 0)} hrs
+              </div>
+              <div>
+                <strong>Total Transactions:</strong><br/>
+                ${transactions.length}
+              </div>
+              <div>
+                <strong>Business ID:</strong><br/>
+                ${effectiveBusinessId || 'N/A'}
+              </div>
+            </div>
+
+            <p class="note">Payroll generated transactions are read-only and included for audit purposes.</p>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Date</th>
+                  <th>Type</th>
+                  <th>Hours Change</th>
+                  <th>Balance After</th>
+                  <th>Source</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${htmlRows}
+              </tbody>
+            </table>
+
+            <div class="footer">
+              Tavari HR Payroll · Lieu Time Tracking Report · Generated by ${authUser?.email || 'System'}
+            </div>
+          </body>
+        </html>
+      `;
+
+      reportWindow.document.write(htmlContent);
+      reportWindow.document.close();
+
+      let hasTriggeredPrint = false;
+
+      const safelyTriggerPrint = () => {
+        if (hasTriggeredPrint || reportWindow.closed) {
+          return;
+        }
+
+        hasTriggeredPrint = true;
+
+        try {
+          reportWindow.focus();
+          reportWindow.print();
+        } catch (printError) {
+          console.error('Failed to trigger print dialog:', printError);
+        }
+
+        setTimeout(() => {
+          if (!reportWindow.closed) {
+            reportWindow.close();
+          }
+        }, 1500);
+      };
+
+      reportWindow.onload = () => {
+        setTimeout(safelyTriggerPrint, 800);
+      };
+
+      setTimeout(safelyTriggerPrint, 2500);
+
+    } catch (error) {
+      console.error('Error printing lieu time transactions:', error);
+      setError('Failed to generate lieu time PDF: ' + error.message);
+
+      try {
+        if (recordAction && typeof recordAction === 'function') {
+          await recordAction('lieu_time_transactions_print', false);
+        }
+      } catch (actionError) {
+        console.warn('Failed to record lieu_time_transactions_print failure action:', actionError);
+      }
+
+      try {
+        await logSecurityEvent('lieu_time_transactions_print_failed', {
+          business_id: effectiveBusinessId,
+          employee_id: employee?.id,
+          error: error.message
+        }, 'high');
+      } catch (logError) {
+        console.warn('Failed to log lieu_time_transactions_print_failed:', logError);
+      }
+
+    } finally {
+      setPrinting(false);
+    }
+  }, [
+    transactions,
+    checkRateLimit,
+    employee?.id,
+    businessData?.timezone,
+    logSecurityEvent,
+    effectiveBusinessId,
+    recordAction,
+    employee?.first_name,
+    employee?.last_name,
+    employee?.email,
+    employeeSettings?.lieu_time_balance,
+    formatTaxAmount,
+    authUser?.email,
+    businessData?.name
+  ]);
+
+  const handleDeleteTransaction = useCallback(async (transaction) => {
+    if (!transaction || !transaction.id) {
+      return;
+    }
+
+    if (typeof transaction.id === 'string' && transaction.id.startsWith('payroll-')) {
+      alert('Payroll-generated entries can only be removed by editing the original payroll run.');
+      return;
+    }
+
+    try {
+      if (checkRateLimit && typeof checkRateLimit === 'function') {
+        const rateLimitCheck = await checkRateLimit('lieu_time_transaction_delete', 3, 60000);
+        if (!rateLimitCheck.allowed) {
+          setError('Too many deletion attempts. Please wait before trying again.');
+          return;
+        }
+      }
+    } catch (rateLimitError) {
+      console.warn('Rate limit check failed for lieu_time_transaction_delete:', rateLimitError);
+    }
+
+    const confirmed = window.confirm(
+      'This will permanently remove the selected lieu time entry and adjust the employee balance. Continue?'
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingTransactionId(transaction.id);
+    setError(null);
+
+    try {
+      await logSecurityEvent('lieu_time_transaction_delete_attempt', {
+        business_id: effectiveBusinessId,
+        employee_id: employee.id,
+        transaction_id: transaction.id,
+        transaction_type: transaction.transaction_type,
+        hours_amount: transaction.hours_amount
+      }, 'high');
+
+      const hoursAmount = parseFloat(transaction.hours_amount) || 0;
+      const currentBalance = parseFloat(
+        employeeSettings?.lieu_time_balance ??
+        employee?.lieu_time_balance ??
+        0
+      );
+      const newBalance = currentBalance - hoursAmount;
+      const nowIso = new Date().toISOString();
+
+      const { error: deleteError } = await supabase
+        .from('hrpayroll_lieu_time_transactions')
+        .delete()
+        .eq('id', transaction.id)
+        .eq('business_id', effectiveBusinessId);
+
+      if (deleteError) {
+        throw deleteError;
+      }
+
+      const { data: updatedUser, error: balanceError } = await supabase
+        .from('users')
+        .update({
+          lieu_time_balance: newBalance,
+          updated_at: nowIso
+        })
+        .eq('id', employee.id)
+        .select('lieu_time_balance')
+        .single();
+
+      if (balanceError) {
+        throw balanceError;
+      }
+
+      await logSecurityEvent('lieu_time_transaction_deleted', {
+        business_id: effectiveBusinessId,
+        employee_id: employee.id,
+        transaction_id: transaction.id,
+        hours_amount: transaction.hours_amount,
+        new_balance: updatedUser?.lieu_time_balance ?? newBalance,
+        deleted_by: authUser?.id
+      }, 'critical');
+
+      try {
+        if (recordAction && typeof recordAction === 'function') {
+          await recordAction('lieu_time_transaction_delete', true);
+        }
+      } catch (actionError) {
+        console.warn('Failed to record lieu_time_transaction_delete success action:', actionError);
+      }
+
+      const latestBalance = updatedUser?.lieu_time_balance ?? newBalance;
+      setEmployeeSettings(prev => prev ? { ...prev, lieu_time_balance: latestBalance } : prev);
+      if (onBalanceUpdate) {
+        onBalanceUpdate(latestBalance);
+      }
+
+      await Promise.all([
+        loadLieuTimeTransactions(),
+        loadEmployeeSettings()
+      ]);
+
+    } catch (error) {
+      console.error('Error deleting lieu time transaction:', error);
+      setError('Failed to delete lieu time transaction: ' + error.message);
+
+      try {
+        if (recordAction && typeof recordAction === 'function') {
+          await recordAction('lieu_time_transaction_delete', false);
+        }
+      } catch (actionError) {
+        console.warn('Failed to record lieu_time_transaction_delete failure action:', actionError);
+      }
+
+      try {
+        await logSecurityEvent('lieu_time_transaction_delete_failed', {
+          business_id: effectiveBusinessId,
+          employee_id: employee.id,
+          transaction_id: transaction.id,
+          error: error.message
+        }, 'high');
+      } catch (logError) {
+        console.warn('Failed to log lieu_time_transaction_delete_failed:', logError);
+      }
+
+    } finally {
+      setDeletingTransactionId(null);
+    }
+  }, [
+    authUser?.id,
+    checkRateLimit,
+    effectiveBusinessId,
+    employee,
+    employeeSettings?.lieu_time_balance,
+    loadEmployeeSettings,
+    loadLieuTimeTransactions,
+    logSecurityEvent,
+    onBalanceUpdate,
+    recordAction
+  ]);
 
   const validateManualEntry = async () => {
     const errors = {};
@@ -493,6 +1019,15 @@ const EmployeeLieuTimeTrackingModal = ({
       backgroundColor: TavariStyles.colors.primary,
       color: TavariStyles.colors.white
     },
+    secondaryButton: {
+      backgroundColor: TavariStyles.colors.gray700,
+      color: TavariStyles.colors.white
+    },
+    disabledButton: {
+      backgroundColor: TavariStyles.colors.gray300,
+      color: TavariStyles.colors.gray600,
+      cursor: 'not-allowed'
+    },
     transactionsList: {
       maxHeight: '300px',
       overflow: 'auto',
@@ -501,7 +1036,7 @@ const EmployeeLieuTimeTrackingModal = ({
     },
     transactionItem: {
       display: 'grid',
-      gridTemplateColumns: '120px 120px 100px 100px 1fr',
+      gridTemplateColumns: '120px 120px 100px 100px 1fr 110px',
       gap: TavariStyles.spacing.sm,
       padding: TavariStyles.spacing.md,
       borderBottom: `1px solid ${TavariStyles.colors.gray100}`,
@@ -510,7 +1045,7 @@ const EmployeeLieuTimeTrackingModal = ({
     },
     transactionHeader: {
       display: 'grid',
-      gridTemplateColumns: '120px 120px 100px 100px 1fr',
+      gridTemplateColumns: '120px 120px 100px 100px 1fr 110px',
       gap: TavariStyles.spacing.sm,
       padding: TavariStyles.spacing.md,
       backgroundColor: TavariStyles.colors.gray100,
@@ -526,6 +1061,34 @@ const EmployeeLieuTimeTrackingModal = ({
       fontSize: TavariStyles.typography.fontSize.xs,
       fontWeight: TavariStyles.typography.fontWeight.bold,
       textAlign: 'center'
+    },
+    transactionActions: {
+      display: 'flex',
+      justifyContent: 'flex-end'
+    },
+    transactionActionButton: {
+      backgroundColor: TavariStyles.colors.danger,
+      color: TavariStyles.colors.white,
+      border: 'none',
+      borderRadius: TavariStyles.borderRadius?.sm || '4px',
+      padding: '6px 12px',
+      fontSize: TavariStyles.typography.fontSize.xs,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      cursor: 'pointer',
+      transition: 'opacity 0.2s ease'
+    },
+    transactionActionButtonDisabled: {
+      backgroundColor: TavariStyles.colors.gray300,
+      color: TavariStyles.colors.gray600,
+      cursor: 'not-allowed',
+      opacity: 0.7
+    },
+    sectionHeader: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: TavariStyles.spacing.md,
+      gap: TavariStyles.spacing.md
     },
     errorText: {
       color: TavariStyles.colors.errorText,
@@ -723,7 +1286,21 @@ const EmployeeLieuTimeTrackingModal = ({
 
                   {/* Transaction History */}
                   <div style={styles.section}>
-                    <h3 style={styles.sectionTitle}>Transaction History</h3>
+                    <div style={styles.sectionHeader}>
+                      <h3 style={styles.sectionTitle}>Transaction History</h3>
+                      <button
+                        style={{
+                          ...styles.button,
+                          ...styles.secondaryButton,
+                          ...(transactions.length === 0 ? styles.disabledButton : {}),
+                          minWidth: '180px'
+                        }}
+                        onClick={handlePrintTransactions}
+                        disabled={transactions.length === 0 || printing}
+                      >
+                        {printing ? 'Preparing PDF…' : 'Download PDF'}
+                      </button>
+                    </div>
                     
                     {transactions.length === 0 ? (
                       <div style={{textAlign: 'center', padding: TavariStyles.spacing.xl, color: TavariStyles.colors.gray500}}>
@@ -737,10 +1314,11 @@ const EmployeeLieuTimeTrackingModal = ({
                           <span>Hours</span>
                           <span>Balance</span>
                           <span>Description</span>
+                          <span>Actions</span>
                         </div>
                         {transactions.map((transaction, index) => (
                           <div key={transaction.id || index} style={styles.transactionItem}>
-                            <span>{new Date(transaction.transaction_date).toLocaleDateString()}</span>
+                            <span>{transaction.transaction_date ? new Date(transaction.transaction_date).toLocaleDateString() : '—'}</span>
                             <span 
                               style={{
                                 ...styles.transactionType,
@@ -770,6 +1348,28 @@ const EmployeeLieuTimeTrackingModal = ({
                                   Premium: {transaction.premium_name}
                                 </div>
                               )}
+                            </span>
+                            <span style={styles.transactionActions}>
+                              <button
+                                style={{
+                                  ...styles.transactionActionButton,
+                                  ...(typeof transaction.id === 'string' && transaction.id.startsWith('payroll-')
+                                    ? styles.transactionActionButtonDisabled
+                                    : {})
+                                }}
+                                onClick={() => handleDeleteTransaction(transaction)}
+                                disabled={
+                                  (typeof transaction.id === 'string' && transaction.id.startsWith('payroll-')) ||
+                                  deletingTransactionId === transaction.id
+                                }
+                                title={
+                                  typeof transaction.id === 'string' && transaction.id.startsWith('payroll-')
+                                    ? 'Payroll-generated entries can only be removed by editing the payroll run.'
+                                    : 'Delete this transaction'
+                                }
+                              >
+                                {deletingTransactionId === transaction.id ? 'Deleting…' : 'Delete'}
+                              </button>
                             </span>
                           </div>
                         ))}

@@ -1,18 +1,40 @@
-// src/screens/Music/MusicSystemMonitor.jsx
+// src/screens/Music/MusicSystemMonitor.jsx - WITH PERMISSION SYSTEM INTEGRATION
 import React, { useState, useEffect } from 'react';
-import { FiHardDrive, FiRefreshCw, FiTrash2, FiCheckCircle, FiAlertCircle, FiMusic, FiDownload } from 'react-icons/fi';
+import { useNavigate } from 'react-router-dom';
+import { FiHardDrive, FiRefreshCw, FiTrash2, FiCheckCircle, FiAlertCircle, FiMusic, FiDownload, FiLock } from 'react-icons/fi';
 import { TavariStyles } from '../../utils/TavariStyles';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper } from '../../Security';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { useSecurityContext } from '../../Security/useSecurityContext';
 
+// Permission system integration
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
+
+/**
+ * Music System Monitor - View and manage cache, service worker status
+ * Integrates with Tavari permission system for access control
+ */
 const MusicSystemMonitor = () => {
+  const navigate = useNavigate();
+
   const auth = usePOSAuth({
     requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'MusicSystemMonitor'
   });
+
+  // Permission system integration
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
 
   const security = useSecurityContext({
     enableRateLimiting: true,
@@ -34,6 +56,19 @@ const MusicSystemMonitor = () => {
   });
   const [loading, setLoading] = useState(true);
   const [clearing, setClearing] = useState(false);
+
+  // Permission checks based on permissionRegistry.js
+  const canViewMonitor = true; // Anyone with access can view
+  const canClearCache = hasPermission('music.settings.edit') || hasElevatedPrivileges();
+  const canManageSystem = hasPermission('music.settings.edit') || hasElevatedPrivileges();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewMonitor) {
+      toast.error('You do not have permission to view the system monitor');
+      navigate('/dashboard/music/dashboard');
+    }
+  }, [permissionsLoading, canViewMonitor, navigate]);
 
   // Check service worker status
   const checkServiceWorker = async () => {
@@ -69,7 +104,6 @@ const MusicSystemMonitor = () => {
           }
         };
 
-        // Timeout after 5 seconds
         setTimeout(() => reject(new Error('Timeout')), 5000);
       });
 
@@ -87,8 +121,14 @@ const MusicSystemMonitor = () => {
     }
   };
 
-  // Clear cache
+  // Clear cache with permission check
   const handleClearCache = async () => {
+    // Permission check
+    if (!canClearCache) {
+      toast.error('You do not have permission to clear the cache');
+      return;
+    }
+
     if (!window.confirm('Are you sure you want to clear all cached music files? This will free up storage but music will need to download again.')) {
       return;
     }
@@ -97,7 +137,8 @@ const MusicSystemMonitor = () => {
     try {
       await security.recordAction('cache_cleared', {
         tracks_count: cacheStatus.tracksCount,
-        size_mb: cacheStatus.totalSizeMB
+        size_mb: cacheStatus.totalSizeMB,
+        user_id: auth.authUser?.id
       });
 
       const channel = new MessageChannel();
@@ -122,10 +163,11 @@ const MusicSystemMonitor = () => {
       
       // Refresh cache status
       await getCacheStatus();
+      toast.success('Cache cleared successfully');
       
     } catch (error) {
       console.error('Error clearing cache:', error);
-      alert('Failed to clear cache: ' + error.message);
+      toast.error('Failed to clear cache: ' + error.message);
     } finally {
       setClearing(false);
     }
@@ -140,11 +182,11 @@ const MusicSystemMonitor = () => {
 
   // Load on mount
   useEffect(() => {
-    if (auth.isReady) {
+    if (auth.isReady && !permissionsLoading) {
       checkServiceWorker();
       getCacheStatus();
     }
-  }, [auth.isReady]);
+  }, [auth.isReady, permissionsLoading]);
 
   const styles = {
     container: {
@@ -167,6 +209,19 @@ const MusicSystemMonitor = () => {
     subtitle: {
       fontSize: TavariStyles.typography.fontSize.lg,
       color: TavariStyles.colors.gray600
+    },
+    limitedAccessBadge: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.md}`,
+      backgroundColor: TavariStyles.colors.infoBg,
+      border: `2px solid ${TavariStyles.colors.info}`,
+      borderRadius: TavariStyles.borderRadius.md,
+      color: TavariStyles.colors.infoText,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      fontWeight: TavariStyles.typography.fontWeight.medium,
+      marginTop: TavariStyles.spacing.md
     },
     grid: {
       display: 'grid',
@@ -259,10 +314,19 @@ const MusicSystemMonitor = () => {
       gap: TavariStyles.spacing.sm,
       flex: 1,
       cursor: 'pointer',
+      border: 'none'
+    },
+    disabledButton: {
+      ...TavariStyles.components.button.base,
+      backgroundColor: TavariStyles.colors.gray300,
+      color: TavariStyles.colors.gray500,
+      display: 'flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      flex: 1,
+      cursor: 'not-allowed',
       border: 'none',
-      ':hover': {
-        backgroundColor: TavariStyles.colors.errorDark
-      }
+      opacity: 0.6
     },
     emptyState: {
       textAlign: 'center',
@@ -274,17 +338,55 @@ const MusicSystemMonitor = () => {
       minHeight: '400px',
       fontSize: TavariStyles.typography.fontSize.lg,
       color: TavariStyles.colors.gray600
+    },
+    accessDenied: {
+      textAlign: 'center',
+      padding: '60px 20px',
+      backgroundColor: 'white',
+      borderRadius: '8px',
+      border: '1px solid #ddd',
+      marginTop: '40px'
     }
   };
 
-  if (!auth.isReady || loading) {
+  // Show loading while permissions are being checked
+  if (!auth.isReady || permissionsLoading || loading) {
     return (
       <POSAuthWrapper
         requiredRoles={['employee', 'manager', 'owner']}
         requireBusiness={true}
         componentName="MusicSystemMonitor"
       >
-        <div style={styles.loading}>Loading system monitor...</div>
+        <div style={styles.loading}>
+          {permissionsLoading ? 'Loading permissions...' : 'Loading system monitor...'}
+        </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canViewMonitor) {
+    return (
+      <POSAuthWrapper
+        requiredRoles={['employee', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="MusicSystemMonitor"
+      >
+        <div style={styles.container}>
+          <div style={styles.accessDenied}>
+            <FiLock size={64} style={{ color: '#f44336', marginBottom: '20px' }} />
+            <h2 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>Access Denied</h2>
+            <p style={{ fontSize: '16px', color: '#666', marginBottom: '20px' }}>
+              You do not have permission to view the system monitor.
+            </p>
+            <button 
+              onClick={() => navigate('/dashboard/music/dashboard')}
+              style={styles.button}
+            >
+              Back to Music Dashboard
+            </button>
+          </div>
+        </div>
       </POSAuthWrapper>
     );
   }
@@ -308,6 +410,12 @@ const MusicSystemMonitor = () => {
             <p style={styles.subtitle}>
               Cache status, offline playback, and system health
             </p>
+            {!canClearCache && (
+              <div style={styles.limitedAccessBadge}>
+                <FiAlertCircle />
+                <span>View Only - Contact admin to manage cache</span>
+              </div>
+            )}
           </div>
 
           {/* Status Cards Grid */}
@@ -436,23 +544,46 @@ const MusicSystemMonitor = () => {
             </div>
           )}
 
-          {/* Action Buttons */}
+          {/* Action Buttons - Protected by permission */}
           <div style={styles.buttonGroup}>
             <button style={styles.button} onClick={handleRefresh} disabled={loading}>
               <FiRefreshCw />
               Refresh Status
             </button>
 
-            <button
-              style={styles.dangerButton}
-              onClick={handleClearCache}
-              disabled={clearing || cacheStatus.tracksCount === 0}
-              onMouseOver={(e) => e.target.style.backgroundColor = TavariStyles.colors.errorDark}
-              onMouseOut={(e) => e.target.style.backgroundColor = TavariStyles.colors.error}
+            {/* Clear Cache Button - Protected */}
+            <PermissionGate
+              permission="music.settings.edit"
+              fallback={
+                <button
+                  style={styles.disabledButton}
+                  disabled
+                  title="You need settings permission to clear cache"
+                >
+                  <FiLock />
+                  Clear Cache Locked
+                </button>
+              }
             >
-              <FiTrash2 />
-              {clearing ? 'Clearing...' : 'Clear Cache'}
-            </button>
+              <button
+                style={clearing || cacheStatus.tracksCount === 0 ? styles.disabledButton : styles.dangerButton}
+                onClick={handleClearCache}
+                disabled={clearing || cacheStatus.tracksCount === 0}
+                onMouseOver={(e) => {
+                  if (!clearing && cacheStatus.tracksCount > 0) {
+                    e.target.style.backgroundColor = TavariStyles.colors.errorDark;
+                  }
+                }}
+                onMouseOut={(e) => {
+                  if (!clearing && cacheStatus.tracksCount > 0) {
+                    e.target.style.backgroundColor = TavariStyles.colors.error;
+                  }
+                }}
+              >
+                <FiTrash2 />
+                {clearing ? 'Clearing...' : 'Clear Cache'}
+              </button>
+            </PermissionGate>
           </div>
 
           {/* Info Section */}
@@ -467,6 +598,11 @@ const MusicSystemMonitor = () => {
               <li>Cached tracks work even without internet connection</li>
               <li>Cache limit is {cacheStatus.limit} tracks - oldest tracks are removed when full</li>
               <li>Clearing cache frees up storage but requires re-downloading tracks</li>
+              {!canClearCache && (
+                <li style={{ color: TavariStyles.colors.info, fontWeight: 'bold', marginTop: TavariStyles.spacing.sm }}>
+                  🔒 Only managers and owners can clear the cache
+                </li>
+              )}
             </ul>
           </div>
         </div>

@@ -14,19 +14,24 @@ const { selectedBusinessId } = useBusinessContext();
   const fetchRole = async () => {
     if (!user) return;
 
-    const { data, error } = await supabase
-      .from('user_roles')
-      .select('*')
-      .eq('user_id', user.id)
-	  .eq('business_id', selectedBusinessId)
-      .eq('active', true)
-      .maybeSingle();
+    try {
+      const { data, error } = await supabase
+        .from('user_roles')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('business_id', selectedBusinessId)
+        .eq('active', true)
+        .maybeSingle();
 
-    if (error) {
-      console.error('Error fetching role info:', error);
+      if (error) {
+        console.error('Error fetching role info:', error);
+        setRoleInfo(null);
+      } else {
+        setRoleInfo(data);
+      }
+    } catch (err) {
+      console.error('Unexpected error fetching role info:', err);
       setRoleInfo(null);
-    } else {
-      setRoleInfo(data);
     }
 
     setLoading(false);

@@ -58,7 +58,11 @@ const POSAuthWrapper = ({
       justifyContent: 'center',
       alignItems: 'center',
       minHeight: '60vh',
-      padding: TavariStyles.spacing.xl
+      padding: TavariStyles.spacing.xl,
+      borderTop: '1px solid transparent',
+      borderRight: '1px solid transparent',
+      borderBottom: '1px solid transparent',
+      borderLeft: '1px solid transparent'
     },
     
     loadingCard: {
@@ -108,8 +112,10 @@ const POSAuthWrapper = ({
     spinner: {
       width: '40px',
       height: '40px',
-      border: '4px solid #f3f4f6',
-      borderTop: '4px solid #008080',
+      borderWidth: '4px',
+      borderStyle: 'solid',
+      borderColor: '#f3f4f6',
+      borderTopColor: '#008080',
       borderRadius: '50%',
       animation: 'spin 1s linear infinite',
       margin: '0 auto 20px auto'
@@ -135,7 +141,7 @@ const POSAuthWrapper = ({
     },
     
     authInfo: {
-      fontSize: TavariStyles.typography.fontSize.sm,
+      fontSize: TavariStyles.typography.fontSize.xs,
       color: TavariStyles.colors.gray500,
       marginTop: TavariStyles.spacing.lg,
       padding: TavariStyles.spacing.md,
@@ -145,8 +151,7 @@ const POSAuthWrapper = ({
       position: 'fixed',
       bottom: TavariStyles.spacing.md,
       right: TavariStyles.spacing.md,
-      maxWidth: '300px',
-      fontSize: TavariStyles.typography.fontSize.xs
+      maxWidth: '300px'
     },
     
     authInfoRow: {

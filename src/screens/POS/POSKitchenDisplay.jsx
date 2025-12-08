@@ -4,7 +4,11 @@ import { supabase } from '../../supabaseClient';
 import { logAction } from '../../helpers/posAudit';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import { TavariStyles } from '../../utils/TavariStyles';
+import { SecurityWrapper } from '../../Security';
+import { useSecurityContext } from '../../Security';
 
 const POSKitchenDisplay = () => {
   const auth = usePOSAuth({
@@ -12,6 +16,38 @@ const POSKitchenDisplay = () => {
     requireBusiness: true,
     componentName: 'POSKitchenDisplay'
   });
+
+  // Security context for kitchen operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSKitchenDisplay',
+    sensitiveComponent: false,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks
+  const canViewKitchen = hasAnyPermission([
+    'pos.kitchen.view',
+    'pos.kitchen.manage'
+  ]) || hasElevatedPrivileges();
+
+  const canManageOrders = hasPermission('pos.kitchen.manage') || hasElevatedPrivileges();
+  const canCompleteOrders = hasPermission('pos.kitchen.complete') || hasElevatedPrivileges();
+  const canChangeSettings = hasPermission('pos.kitchen.settings') || hasElevatedPrivileges();
 
   // Display state
   const [displayMode, setDisplayMode] = useState('single');
@@ -41,7 +77,7 @@ const POSKitchenDisplay = () => {
 
   // Load initial data
   useEffect(() => {
-    if (auth.selectedBusinessId && auth.authUser) {
+    if (auth.selectedBusinessId && auth.authUser && canViewKitchen) {
       fetchStations();
       fetchAllOrders();
       setupRealtimeSubscription();
@@ -53,11 +89,11 @@ const POSKitchenDisplay = () => {
       }
       Object.values(orderTimers.current).forEach(timer => clearInterval(timer));
     };
-  }, [auth.selectedBusinessId, auth.authUser]);
+  }, [auth.selectedBusinessId, auth.authUser, canViewKitchen]);
 
   // Auto-refresh setup - modified to not show loading screen
   useEffect(() => {
-    if (autoRefresh && auth.selectedBusinessId) {
+    if (autoRefresh && auth.selectedBusinessId && canViewKitchen) {
       refreshTimer.current = setInterval(() => {
         fetchAllOrdersQuiet(); // Use quiet version for auto-refresh
       }, refreshInterval);
@@ -70,7 +106,7 @@ const POSKitchenDisplay = () => {
         clearInterval(refreshTimer.current);
       }
     };
-  }, [autoRefresh, refreshInterval, auth.selectedBusinessId]);
+  }, [autoRefresh, refreshInterval, auth.selectedBusinessId, canViewKitchen]);
 
   // Setup realtime subscription for all order updates
   const setupRealtimeSubscription = () => {
@@ -158,6 +194,11 @@ const POSKitchenDisplay = () => {
     if (!auth.selectedBusinessId) return;
 
     try {
+      await logSecurityEvent('kitchen_stations_accessed', {
+        action: 'fetch_stations',
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       const { data, error } = await supabase
         .from('pos_stations')
         .select('*')
@@ -179,7 +220,11 @@ const POSKitchenDisplay = () => {
         }
       }
     } catch (err) {
-      console.error('Error fetching stations:', err);
+      await logSecurityEvent('kitchen_stations_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'low');
+      
       setError('Error loading stations');
     }
   };
@@ -277,7 +322,7 @@ const POSKitchenDisplay = () => {
         `)
         .eq('business_id', auth.selectedBusinessId)
         .gte('created_at', twoHoursAgo)
-        .neq('kitchen_status', 'completed')  // Don't show completed orders
+        .neq('kitchen_status', 'completed')
         .order('created_at', { ascending: false });
 
       if (saleError) throw saleError;
@@ -326,7 +371,10 @@ const POSKitchenDisplay = () => {
       });
 
     } catch (err) {
-      console.error('Error fetching orders:', err);
+      await logSecurityEvent('kitchen_orders_fetch_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'low');
       // Don't show error for quiet refresh
     }
   };
@@ -338,6 +386,11 @@ const POSKitchenDisplay = () => {
     setError(null);
     
     try {
+      await logSecurityEvent('kitchen_orders_accessed', {
+        action: 'fetch_orders',
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       await fetchAllOrdersQuiet();
 
       await logAction({
@@ -349,7 +402,11 @@ const POSKitchenDisplay = () => {
       });
 
     } catch (err) {
-      console.error('Error fetching orders:', err);
+      await logSecurityEvent('kitchen_orders_load_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Error loading orders: ' + err.message);
     } finally {
       setLoading(false);
@@ -400,6 +457,18 @@ const POSKitchenDisplay = () => {
 
   // Optimistic UI update for item status changes
   const updateItemStatusOptimistic = async (order, itemId, newStatus) => {
+    if (!canManageOrders) {
+      setError('You do not have permission to manage kitchen orders');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('kitchen_status_update', 30, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many status updates. Please wait a moment.');
+      return;
+    }
+
     // Update UI immediately
     setOrders(prevOrders => 
       prevOrders.map(prevOrder => {
@@ -452,6 +521,15 @@ const POSKitchenDisplay = () => {
         }
       }
 
+      await logSecurityEvent('kitchen_item_status_updated', {
+        order_type: order.order_type,
+        order_id: order.order_id,
+        item_id: itemId,
+        new_status: newStatus,
+        business_id: auth.selectedBusinessId,
+        updated_by: auth.authUser?.id
+      }, 'low');
+
       await logAction({
         action: 'kitchen_item_status_updated',
         context: 'POSKitchenDisplay',
@@ -463,16 +541,36 @@ const POSKitchenDisplay = () => {
         }
       });
 
+      await recordAction('kitchen_item_updated', { item_id: itemId, status: newStatus }, true);
+
     } catch (err) {
-      console.error('Error updating item status:', err);
+      await logSecurityEvent('kitchen_item_update_error', {
+        error: err.message,
+        order_id: order.order_id,
+        item_id: itemId,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Error updating item: ' + err.message);
       // Revert optimistic update on error
       fetchAllOrdersQuiet();
     }
   };
 
-  // Complete entire order function - FIXED to work with actual database schema
+  // Complete entire order function
   const completeOrder = async (order) => {
+    if (!canCompleteOrders) {
+      setError('You do not have permission to complete orders');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('kitchen_complete_order', 20, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many completion attempts. Please wait a moment.');
+      return;
+    }
+
     setError(null);
     try {
       if (order.order_type === 'tab') {
@@ -488,7 +586,7 @@ const POSKitchenDisplay = () => {
 
         if (itemsError) throw itemsError;
 
-        // Mark tab as kitchen completed - only update kitchen_status (no kitchen_completed_at column)
+        // Mark tab as kitchen completed
         const { error: tabError } = await supabase
           .from('pos_tabs')
           .update({ 
@@ -499,7 +597,7 @@ const POSKitchenDisplay = () => {
 
         if (tabError) throw tabError;
       } else {
-        // Mark sale as kitchen completed - pos_sales DOES have kitchen_completed_at
+        // Mark sale as kitchen completed
         const { error } = await supabase
           .from('pos_sales')
           .update({ 
@@ -535,6 +633,13 @@ const POSKitchenDisplay = () => {
         oscillator2.stop(audioContext.currentTime + 0.2);
       }
 
+      await logSecurityEvent('kitchen_order_completed', {
+        order_type: order.order_type,
+        order_id: order.order_id,
+        business_id: auth.selectedBusinessId,
+        completed_by: auth.authUser?.id
+      }, 'low');
+
       await logAction({
         action: 'kitchen_order_completed',
         context: 'POSKitchenDisplay',
@@ -543,6 +648,8 @@ const POSKitchenDisplay = () => {
           order_id: order.order_id
         }
       });
+
+      await recordAction('kitchen_order_completed', { order_id: order.order_id }, true);
 
       // Clear timer if order is completed
       if (orderTimers.current[order.order_id]) {
@@ -554,7 +661,12 @@ const POSKitchenDisplay = () => {
       fetchAllOrdersQuiet();
 
     } catch (err) {
-      console.error('Error completing order:', err);
+      await logSecurityEvent('kitchen_order_complete_error', {
+        error: err.message,
+        order_id: order.order_id,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Error completing order: ' + err.message);
     }
   };
@@ -688,7 +800,7 @@ const POSKitchenDisplay = () => {
                     Note: {item.notes}
                   </div>
                 )}
-                {isTab && (
+                {isTab && canManageOrders && (
                   <div style={styles.itemActions}>
                     {(!item.kitchen_status || item.kitchen_status === 'new') && (
                       <button
@@ -714,14 +826,16 @@ const POSKitchenDisplay = () => {
           ))}
         </div>
 
-        <div style={styles.orderActions}>
-          <button
-            onClick={() => completeOrder(order)}
-            style={styles.completeOrderButton}
-          >
-            Complete Order
-          </button>
-        </div>
+        {canCompleteOrders && (
+          <div style={styles.orderActions}>
+            <button
+              onClick={() => completeOrder(order)}
+              style={styles.completeOrderButton}
+            >
+              Complete Order
+            </button>
+          </div>
+        )}
       </div>
     );
   };
@@ -1039,6 +1153,20 @@ const POSKitchenDisplay = () => {
     loading: {
       ...TavariStyles.components.loading.container,
       color: TavariStyles.colors.white
+    },
+
+    noAccessContainer: {
+      padding: TavariStyles.spacing['3xl'],
+      textAlign: 'center',
+      backgroundColor: TavariStyles.colors.white,
+      borderRadius: TavariStyles.borderRadius.lg,
+      margin: TavariStyles.spacing.xl
+    },
+
+    noAccessText: {
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600,
+      margin: 0
     }
   };
 
@@ -1048,166 +1176,194 @@ const POSKitchenDisplay = () => {
     </div>
   );
 
-  if (loading) return loadingContent;
+  if (loading || permissionsLoading) return loadingContent;
+
+  // Check overall access permission
+  if (!canViewKitchen) {
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['employee', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="POSKitchenDisplay"
+        >
+          <div style={styles.container}>
+            <div style={styles.noAccessContainer}>
+              <h3 style={styles.errorBanner}>Access Denied</h3>
+              <p style={styles.noAccessText}>
+                You do not have permission to view the kitchen display.
+              </p>
+            </div>
+          </div>
+        </POSAuthWrapper>
+      </SecurityWrapper>
+    );
+  }
 
   return (
-    <POSAuthWrapper
-      requiredRoles={['employee', 'manager', 'owner']}
-      requireBusiness={true}
-      componentName="POSKitchenDisplay"
-      loadingContent={loadingContent}
-    >
-      <div style={styles.container}>
-        <div style={styles.header}>
-          <h1 style={styles.title}>Kitchen Display System</h1>
-          
-          <div style={styles.controls}>
-            <div style={styles.controlGroup}>
-              <label>Display:</label>
-              <select
-                value={displayMode}
-                onChange={(e) => setDisplayMode(e.target.value)}
-                style={styles.select}
-              >
-                <option value="single">Single Station</option>
-                <option value="split">Split Screen</option>
-                <option value="quad">Quad View</option>
-              </select>
-            </div>
-
-            {displayMode === 'single' && (
+    <SecurityWrapper>
+      <POSAuthWrapper
+        requiredRoles={['employee', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="POSKitchenDisplay"
+        loadingContent={loadingContent}
+      >
+        <div style={styles.container}>
+          <div style={styles.header}>
+            <h1 style={styles.title}>Kitchen Display System</h1>
+            
+            <div style={styles.controls}>
               <div style={styles.controlGroup}>
-                <label>Station:</label>
+                <label>Display:</label>
                 <select
-                  value={selectedStations[0] || ''}
-                  onChange={(e) => setSelectedStations([e.target.value])}
+                  value={displayMode}
+                  onChange={(e) => setDisplayMode(e.target.value)}
                   style={styles.select}
                 >
-                  <option value="">All Stations</option>
-                  {availableStations.map(station => (
-                    <option key={station.id} value={station.id}>
-                      {station.name}
-                    </option>
-                  ))}
+                  <option value="single">Single Station</option>
+                  <option value="split">Split Screen</option>
+                  <option value="quad">Quad View</option>
                 </select>
               </div>
+
+              {displayMode === 'single' && (
+                <div style={styles.controlGroup}>
+                  <label>Station:</label>
+                  <select
+                    value={selectedStations[0] || ''}
+                    onChange={(e) => setSelectedStations([e.target.value])}
+                    style={styles.select}
+                  >
+                    <option value="">All Stations</option>
+                    {availableStations.map(station => (
+                      <option key={station.id} value={station.id}>
+                        {station.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div style={styles.controlGroup}>
+                <label>Orders:</label>
+                <select
+                  value={orderType}
+                  onChange={(e) => setOrderType(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="all">All Orders</option>
+                  <option value="tabs">Tabs Only</option>
+                  <option value="sales">Paid Orders</option>
+                </select>
+              </div>
+
+              <div style={styles.controlGroup}>
+                <label>Filter:</label>
+                <select
+                  value={filterStatus}
+                  onChange={(e) => setFilterStatus(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="new">New</option>
+                  <option value="in_progress">In Progress</option>
+                  <option value="ready">Ready</option>
+                </select>
+              </div>
+
+              <div style={styles.controlGroup}>
+                <label>Sort:</label>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="time">Time</option>
+                  <option value="urgency">Urgency</option>
+                  <option value="station">Station</option>
+                </select>
+              </div>
+
+              {canChangeSettings && (
+                <>
+                  <button
+                    onClick={() => setSoundEnabled(!soundEnabled)}
+                    style={soundEnabled ? styles.activeButton : styles.button}
+                    title={soundEnabled ? 'Sound On' : 'Sound Off'}
+                  >
+                    {soundEnabled ? '🔊' : '🔇'}
+                  </button>
+
+                  <button
+                    onClick={() => setAutoRefresh(!autoRefresh)}
+                    style={autoRefresh ? styles.activeButton : styles.button}
+                    title={autoRefresh ? 'Auto-refresh On' : 'Auto-refresh Off'}
+                  >
+                    {autoRefresh ? '🔄' : '⸏'}
+                  </button>
+                </>
+              )}
+
+              <button
+                onClick={fetchAllOrders}
+                style={styles.button}
+                title="Refresh Now"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          {error && <div style={styles.errorBanner}>{error}</div>}
+
+          <div style={{
+            ...styles.displayContainer,
+            ...(displayMode === 'single' ? styles.singleDisplay :
+                displayMode === 'split' ? styles.splitDisplay :
+                styles.quadDisplay)
+          }}>
+            {displayMode === 'single' && (
+              selectedStations.length > 0 && selectedStations[0] ? 
+                renderStationView(selectedStations[0]) :
+                <div style={styles.stationView}>
+                  <div style={styles.stationHeader}>
+                    <h3 style={styles.stationTitle}>All Stations</h3>
+                    <span style={styles.orderCount}>{sortedOrders.length} orders</span>
+                  </div>
+                  <div style={styles.ordersGrid}>
+                    {sortedOrders.length === 0 ? (
+                      <div style={styles.emptyState}>
+                        <div style={styles.emptyIcon}>✓</div>
+                        <div style={styles.emptyText}>No pending orders</div>
+                      </div>
+                    ) : (
+                      sortedOrders.map(order => renderOrderCard(order))
+                    )}
+                  </div>
+                </div>
             )}
 
-            <div style={styles.controlGroup}>
-              <label>Orders:</label>
-              <select
-                value={orderType}
-                onChange={(e) => setOrderType(e.target.value)}
-                style={styles.select}
-              >
-                <option value="all">All Orders</option>
-                <option value="tabs">Tabs Only</option>
-                <option value="sales">Paid Orders</option>
-              </select>
-            </div>
+            {displayMode === 'split' && availableStations.slice(0, 2).map(station => 
+              renderStationView(station.id)
+            )}
 
-            <div style={styles.controlGroup}>
-              <label>Filter:</label>
-              <select
-                value={filterStatus}
-                onChange={(e) => setFilterStatus(e.target.value)}
-                style={styles.select}
-              >
-                <option value="all">All Statuses</option>
-                <option value="new">New</option>
-                <option value="in_progress">In Progress</option>
-                <option value="ready">Ready</option>
-              </select>
-            </div>
-
-            <div style={styles.controlGroup}>
-              <label>Sort:</label>
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value)}
-                style={styles.select}
-              >
-                <option value="time">Time</option>
-                <option value="urgency">Urgency</option>
-                <option value="station">Station</option>
-              </select>
-            </div>
-
-            <button
-              onClick={() => setSoundEnabled(!soundEnabled)}
-              style={soundEnabled ? styles.activeButton : styles.button}
-              title={soundEnabled ? 'Sound On' : 'Sound Off'}
-            >
-              {soundEnabled ? '🔊' : '🔇'}
-            </button>
-
-            <button
-              onClick={() => setAutoRefresh(!autoRefresh)}
-              style={autoRefresh ? styles.activeButton : styles.button}
-              title={autoRefresh ? 'Auto-refresh On' : 'Auto-refresh Off'}
-            >
-              {autoRefresh ? '🔄' : '⏸️'}
-            </button>
-
-            <button
-              onClick={fetchAllOrders}
-              style={styles.button}
-              title="Refresh Now"
-            >
-              Refresh
-            </button>
+            {displayMode === 'quad' && availableStations.slice(0, 4).map(station => 
+              renderStationView(station.id)
+            )}
           </div>
         </div>
 
-        {error && <div style={styles.errorBanner}>{error}</div>}
-
-        <div style={{
-          ...styles.displayContainer,
-          ...(displayMode === 'single' ? styles.singleDisplay :
-              displayMode === 'split' ? styles.splitDisplay :
-              styles.quadDisplay)
-        }}>
-          {displayMode === 'single' && (
-            selectedStations.length > 0 && selectedStations[0] ? 
-              renderStationView(selectedStations[0]) :
-              <div style={styles.stationView}>
-                <div style={styles.stationHeader}>
-                  <h3 style={styles.stationTitle}>All Stations</h3>
-                  <span style={styles.orderCount}>{sortedOrders.length} orders</span>
-                </div>
-                <div style={styles.ordersGrid}>
-                  {sortedOrders.length === 0 ? (
-                    <div style={styles.emptyState}>
-                      <div style={styles.emptyIcon}>✓</div>
-                      <div style={styles.emptyText}>No pending orders</div>
-                    </div>
-                  ) : (
-                    sortedOrders.map(order => renderOrderCard(order))
-                  )}
-                </div>
-              </div>
-          )}
-
-          {displayMode === 'split' && availableStations.slice(0, 2).map(station => 
-            renderStationView(station.id)
-          )}
-
-          {displayMode === 'quad' && availableStations.slice(0, 4).map(station => 
-            renderStationView(station.id)
-          )}
-        </div>
-      </div>
-
-      <style>
-        {`
-          @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.7; }
-            100% { opacity: 1; }
-          }
-        `}
-      </style>
-    </POSAuthWrapper>
+        <style>
+          {`
+            @keyframes pulse {
+              0% { opacity: 1; }
+              50% { opacity: 0.7; }
+              100% { opacity: 1; }
+            }
+          `}
+        </style>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

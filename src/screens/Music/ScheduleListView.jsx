@@ -1,9 +1,29 @@
 import React, { useState } from 'react';
 import { supabase } from '../../supabaseClient';
-import { FiPlus, FiEdit, FiTrash, FiClock, FiCalendar, FiAlertTriangle, FiX, FiMusic } from 'react-icons/fi';
+import { FiPlus, FiEdit, FiTrash, FiClock, FiCalendar, FiAlertTriangle, FiX, FiMusic, FiLock } from 'react-icons/fi';
 import styles from './PlaylistManager.module.css';
+import TavariCheckbox from '../../components/UI/TavariCheckbox';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
 
 const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) => {
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewSchedules = hasPermission('music.schedules.manage') || hasElevatedPrivileges();
+  const canCreateSchedules = hasPermission('music.schedules.manage') || hasElevatedPrivileges();
+  const canEditSchedules = hasPermission('music.schedules.manage') || hasElevatedPrivileges();
+  const canDeleteSchedules = hasPermission('music.schedules.manage') || hasElevatedPrivileges();
+
   const [showCreateSchedule, setShowCreateSchedule] = useState(false);
   const [showEditSchedule, setShowEditSchedule] = useState(null);
 
@@ -21,6 +41,40 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
     repeat_type: 'once',
     repeat_until: null
   });
+
+  // Handle loop playlist change
+  const handleLoopPlaylistChange = (checked) => {
+    if (checked) {
+      // If enabling loop, disable stop_when_complete
+      setScheduleForm(prev => ({ 
+        ...prev, 
+        loop_playlist: true,
+        stop_when_complete: false
+      }));
+    } else {
+      setScheduleForm(prev => ({ 
+        ...prev, 
+        loop_playlist: false
+      }));
+    }
+  };
+
+  // Handle stop when complete change
+  const handleStopWhenCompleteChange = (checked) => {
+    if (checked) {
+      // If enabling stop_when_complete, disable loop_playlist
+      setScheduleForm(prev => ({ 
+        ...prev, 
+        stop_when_complete: true,
+        loop_playlist: false
+      }));
+    } else {
+      setScheduleForm(prev => ({ 
+        ...prev, 
+        stop_when_complete: false
+      }));
+    }
+  };
 
   // Check schedule conflicts
   const checkScheduleConflicts = (newSchedule, excludeId = null) => {
@@ -53,6 +107,13 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
   // Create schedule
   const createSchedule = async (e) => {
     e.preventDefault();
+
+    // Permission check
+    if (!canCreateSchedules) {
+      toast.error('You do not have permission to create schedules');
+      return;
+    }
+
     if (!business?.id || !scheduleForm.playlist_id || !scheduleForm.schedule_date) return;
 
     try {
@@ -104,15 +165,24 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
         repeat_type: 'once',
         repeat_until: null
       });
+
+      toast.success('Schedule created successfully');
     } catch (error) {
       console.error('Error creating schedule:', error);
-      alert('Error creating schedule: ' + error.message);
+      toast.error('Error creating schedule: ' + error.message);
     }
   };
 
   // Edit schedule
   const editSchedule = async (e) => {
     e.preventDefault();
+
+    // Permission check
+    if (!canEditSchedules) {
+      toast.error('You do not have permission to edit schedules');
+      return;
+    }
+
     if (!business?.id || !scheduleForm.playlist_id || !scheduleForm.schedule_date) return;
 
     try {
@@ -133,6 +203,9 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
           end_time: scheduleForm.end_time,
           priority: scheduleForm.priority,
           active: scheduleForm.active,
+          immediate_switch: scheduleForm.immediate_switch,
+          loop_playlist: scheduleForm.loop_playlist,
+          stop_when_complete: scheduleForm.stop_when_complete,
           repeat_type: scheduleForm.repeat_type,
           repeat_until: scheduleForm.repeat_until
         })
@@ -155,14 +228,22 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
         repeat_type: 'once',
         repeat_until: null
       });
+
+      toast.success('Schedule updated successfully');
     } catch (error) {
       console.error('Error updating schedule:', error);
-      alert('Error updating schedule: ' + error.message);
+      toast.error('Error updating schedule: ' + error.message);
     }
   };
 
   // Open edit modal with schedule data
   const openEditSchedule = (schedule) => {
+    // Permission check
+    if (!canEditSchedules) {
+      toast.error('You do not have permission to edit schedules');
+      return;
+    }
+
     setScheduleForm({
       playlist_id: schedule.playlist_id,
       schedule_date: schedule.schedule_date,
@@ -170,10 +251,10 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
       end_time: schedule.end_time,
       priority: schedule.priority,
       active: schedule.active,
-      immediate_switch: schedule.immediate_switch || false,
-      loop_playlist: schedule.loop_playlist || true,
-      stop_when_complete: schedule.stop_when_complete || false,
-      repeat_type: schedule.repeat_type || 'once',
+      immediate_switch: schedule.immediate_switch ?? false,
+      loop_playlist: schedule.loop_playlist ?? true,
+      stop_when_complete: schedule.stop_when_complete ?? false,
+      repeat_type: schedule.repeat_type ?? 'once',
       repeat_until: schedule.repeat_until
     });
     setShowEditSchedule(schedule);
@@ -181,6 +262,12 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
 
   // Delete schedule
   const deleteSchedule = async (scheduleId) => {
+    // Permission check
+    if (!canDeleteSchedules) {
+      toast.error('You do not have permission to delete schedules');
+      return;
+    }
+
     if (!confirm('Are you sure you want to delete this schedule?')) return;
 
     try {
@@ -191,9 +278,10 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
 
       if (error) throw error;
       await onScheduleUpdate();
+      toast.success('Schedule deleted successfully');
     } catch (error) {
       console.error('Error deleting schedule:', error);
-      alert('Error deleting schedule: ' + error.message);
+      toast.error('Error deleting schedule: ' + error.message);
     }
   };
 
@@ -250,21 +338,67 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
     return a.start_time.localeCompare(b.start_time);
   });
 
+  // Show loading while permissions are being checked
+  if (permissionsLoading) {
+    return (
+      <div style={{ textAlign: 'center', padding: '40px' }}>
+        Loading permissions...
+      </div>
+    );
+  }
+
+  // Show access denied if no permission to view schedules
+  if (!canViewSchedules) {
+    return (
+      <div style={{
+        textAlign: 'center',
+        padding: '60px 20px',
+        backgroundColor: 'white',
+        borderRadius: '8px',
+        border: '1px solid #ddd',
+        marginTop: '40px'
+      }}>
+        <FiLock size={64} style={{ color: '#f44336', marginBottom: '20px' }} />
+        <h2 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>Access Denied</h2>
+        <p style={{ fontSize: '16px', color: '#666', marginBottom: '20px' }}>
+          You do not have permission to view playlist schedules.
+        </p>
+        <p style={{ fontSize: '14px', color: '#999' }}>
+          Contact your manager or administrator for access.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div>
       {/* Action Buttons - Tavari 3x Grid Standard */}
       <div className={styles.actionGrid}>
-        <button
-          onClick={() => setShowCreateSchedule(true)}
-          className={styles.actionButton}
+        <PermissionGate permission="music.schedules.manage">
+          <button
+            onClick={() => setShowCreateSchedule(true)}
+            className={styles.actionButton}
+          >
+            <FiPlus className={styles.actionIcon} />
+            Create Schedule
+          </button>
+        </PermissionGate>
+        
+        <PermissionGate 
+          permission="music.schedules.manage"
+          fallback={
+            <button disabled className={styles.actionButton}>
+              <FiPlus className={styles.actionIcon} />
+              Create Schedule
+            </button>
+          }
         >
-          <FiPlus className={styles.actionIcon} />
-          Create Schedule
-        </button>
-        <button disabled className={styles.actionButton}>
-          <FiClock className={styles.actionIcon} />
-          Bulk Edit
-        </button>
+          <button disabled className={styles.actionButton}>
+            <FiClock className={styles.actionIcon} />
+            Bulk Edit
+          </button>
+        </PermissionGate>
+
         <button disabled className={styles.actionButton}>
           <FiCalendar className={styles.actionIcon} />
           Import Schedule
@@ -295,20 +429,25 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
                   </div>
                 </div>
                 <div className={styles.playlistActions}>
-                  <button
-                    onClick={() => openEditSchedule(schedule)}
-                    className={`${styles.iconButton} ${styles.primary}`}
-                    title="Edit Schedule"
-                  >
-                    <FiEdit />
-                  </button>
-                  <button
-                    onClick={() => deleteSchedule(schedule.id)}
-                    className={`${styles.iconButton} ${styles.danger}`}
-                    title="Delete Schedule"
-                  >
-                    <FiTrash />
-                  </button>
+                  <PermissionGate permission="music.schedules.manage">
+                    <button
+                      onClick={() => openEditSchedule(schedule)}
+                      className={`${styles.iconButton} ${styles.primary}`}
+                      title="Edit Schedule"
+                    >
+                      <FiEdit />
+                    </button>
+                  </PermissionGate>
+                  
+                  <PermissionGate permission="music.schedules.manage">
+                    <button
+                      onClick={() => deleteSchedule(schedule.id)}
+                      className={`${styles.iconButton} ${styles.danger}`}
+                      title="Delete Schedule"
+                    >
+                      <FiTrash />
+                    </button>
+                  </PermissionGate>
                 </div>
               </div>
               
@@ -338,14 +477,24 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
           <FiCalendar className={styles.emptyIcon} />
           <h3 className={styles.emptyTitle}>No schedules yet</h3>
           <p className={styles.emptyDescription}>Create your first schedule to automate playlist playback for specific dates</p>
-          <button onClick={() => setShowCreateSchedule(true)} className={styles.primaryButton}>
-            Create Schedule
-          </button>
+          
+          <PermissionGate 
+            permission="music.schedules.manage"
+            fallback={
+              <p style={{ color: '#999', fontSize: '14px', marginTop: '20px' }}>
+                You need permission to create schedules. Contact your manager.
+              </p>
+            }
+          >
+            <button onClick={() => setShowCreateSchedule(true)} className={styles.primaryButton}>
+              Create Schedule
+            </button>
+          </PermissionGate>
         </div>
       )}
 
       {/* Create Schedule Modal */}
-      {showCreateSchedule && (
+      {showCreateSchedule && canCreateSchedules && (
         <div className={styles.modalOverlay}>
           <div className={styles.modal}>
             <div className={styles.modalHeader}>
@@ -440,33 +589,24 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
               <div className={styles.formGroup}>
                 <label className={styles.label}>Playback Options</label>
                 <div style={{ display: 'grid', gap: '10px' }}>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.loop_playlist}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, loop_playlist: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Loop playlist (restart when finished)
-                  </label>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.stop_when_complete}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, stop_when_complete: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Stop when playlist completes (don't loop)
-                  </label>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.immediate_switch}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, immediate_switch: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Switch immediately when schedule starts (interrupt current track)
-                  </label>
+                  <TavariCheckbox
+                    checked={scheduleForm.loop_playlist}
+                    onChange={handleLoopPlaylistChange}
+                    label="Loop playlist (restart when finished)"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={scheduleForm.stop_when_complete}
+                    onChange={handleStopWhenCompleteChange}
+                    label="Stop when playlist completes (switch to shuffle)"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={scheduleForm.immediate_switch}
+                    onChange={(checked) => setScheduleForm(prev => ({ ...prev, immediate_switch: checked }))}
+                    label="Switch immediately when schedule starts (interrupt current track)"
+                    size="md"
+                  />
                 </div>
               </div>
 
@@ -555,7 +695,7 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
       )}
 
       {/* Edit Schedule Modal */}
-      {showEditSchedule && (
+      {showEditSchedule && canEditSchedules && (
         <div className={styles.modalOverlay}>
           <div className={styles.modal}>
             <div className={styles.modalHeader}>
@@ -663,33 +803,24 @@ const ScheduleListView = ({ schedules, playlists, business, onScheduleUpdate }) 
               <div className={styles.formGroup}>
                 <label className={styles.label}>Playback Options</label>
                 <div style={{ display: 'grid', gap: '10px' }}>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.loop_playlist}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, loop_playlist: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Loop playlist (restart when finished)
-                  </label>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.stop_when_complete}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, stop_when_complete: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Stop when playlist completes (don't loop)
-                  </label>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.immediate_switch}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, immediate_switch: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Switch immediately when schedule starts (interrupt current track)
-                  </label>
+                  <TavariCheckbox
+                    checked={scheduleForm.loop_playlist}
+                    onChange={handleLoopPlaylistChange}
+                    label="Loop playlist (restart when finished)"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={scheduleForm.stop_when_complete}
+                    onChange={handleStopWhenCompleteChange}
+                    label="Stop when playlist completes (switch to shuffle)"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={scheduleForm.immediate_switch}
+                    onChange={(checked) => setScheduleForm(prev => ({ ...prev, immediate_switch: checked }))}
+                    label="Switch immediately when schedule starts (interrupt current track)"
+                    size="md"
+                  />
                 </div>
               </div>
 

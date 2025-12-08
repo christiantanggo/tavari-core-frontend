@@ -1,4 +1,4 @@
-// components/HR/HRSettings.jsx - Updated Tabbed HR Settings with Build Standards
+// components/HR/HRSettings.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { useNavigate } from 'react-router-dom';
@@ -9,6 +9,9 @@ import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import POSAuthWrapper from "../../components/Auth/POSAuthWrapper";
 import TavariCheckbox from "../../components/UI/TavariCheckbox";
 import { TavariStyles } from '../../utils/TavariStyles';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
 
 // Import tab components
 import EmployeeManagementTab from '../../components/HR/HRSettingsComponents/EmployeeManagementTab';
@@ -46,15 +49,38 @@ const HRSettings = () => {
     selectedBusinessId,
     authUser,
     userRole,
-    businessData
+    businessData,
+    authLoading,
+    authError,
+    isOwner
   } = usePOSAuth({
-    requiredRoles: ['owner'],
+    requiredRoles: ['owner', 'admin'],
     requireBusiness: true,
     componentName: 'HRSettings'
   });
 
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   // Tax calculations for any needed tax logic
   const { formatTaxAmount } = useTaxCalculations(selectedBusinessId);
+
+  // Permission checks
+  const canManageHRSettings = hasPermission('hr.settings.manage') || isOwner();
+  const canViewHRSettings = hasPermission('hr.settings.view') || canManageHRSettings;
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewHRSettings) {
+      toast.error('You do not have permission to access HR Settings');
+      navigate('/dashboard/hr/dashboard');
+    }
+  }, [permissionsLoading, canViewHRSettings]);
 
   const defaultSettings = {
     probation_period_days: 90,
@@ -65,6 +91,7 @@ const HRSettings = () => {
     require_manager_approval_writeups: true,
     require_manager_approval_policy_changes: true,
     notification_email: '',
+    notification_display_name: '',
     contract_expiry_warning_days: 30,
     policy_acknowledgment_deadline_days: 14,
     onboarding_completion_required: true,
@@ -78,45 +105,57 @@ const HRSettings = () => {
       id: 'employee-management',
       label: 'Employee Management',
       icon: '👥',
-      component: EmployeeManagementTab
+      component: EmployeeManagementTab,
+      permission: 'hr.settings.manage'
     },
     {
       id: 'leave-benefits',
       label: 'Leave & Benefits',
-      icon: '🏖️',
-      component: LeaveAndBenefitsTab
+      icon: '🖊️',
+      component: LeaveAndBenefitsTab,
+      permission: 'hr.settings.manage'
     },
     {
       id: 'shift-premiums',
       label: 'Shift Premiums',
       icon: '💰',
-      component: ShiftPremiumsTab
+      component: ShiftPremiumsTab,
+      permission: 'hr.premiums.manage'
     },
     {
       id: 'approval-settings',
       label: 'Approvals',
       icon: '✅',
-      component: ApprovalSettingsTab
+      component: ApprovalSettingsTab,
+      permission: 'hr.settings.manage'
     },
     {
       id: 'notifications',
       label: 'Notifications',
       icon: '🔔',
-      component: NotificationSettingsTab
+      component: NotificationSettingsTab,
+      permission: 'hr.settings.manage'
     },
     {
       id: 'document-management',
       label: 'Documents',
       icon: '📄',
-      component: DocumentManagementTab
+      component: DocumentManagementTab,
+      permission: 'hr.documents.manage'
     }
   ];
 
+  // Filter tabs based on permissions
+  const visibleTabs = tabs.filter(tab => {
+    if (!tab.permission) return true;
+    return hasPermission(tab.permission) || isOwner();
+  });
+
   useEffect(() => {
-    if (selectedBusinessId) {
+    if (selectedBusinessId && !authLoading && !permissionsLoading && canViewHRSettings) {
       loadSettings();
     }
-  }, [selectedBusinessId]);
+  }, [selectedBusinessId, authLoading, permissionsLoading, canViewHRSettings]);
 
   const loadSettings = async () => {
     try {
@@ -157,17 +196,29 @@ const HRSettings = () => {
           setSettings(createdSettings);
         }
       }
+
+      recordAction('view_hr_settings', selectedBusinessId);
     } catch (error) {
       console.error('Error in loadSettings:', error);
       setError('Failed to load HR settings. Please try again.');
       setSettings({ ...defaultSettings, business_id: selectedBusinessId });
+      
+      await logSecurityEvent('settings_load_failed', {
+        error_message: error.message,
+        business_id: selectedBusinessId
+      }, 'medium');
     } finally {
       setLoading(false);
     }
   };
 
   const handleInputChange = async (field, value) => {
-    // Validate input for security - fix the parameter order
+    if (!canManageHRSettings) {
+      toast.error('You do not have permission to modify HR settings');
+      return;
+    }
+
+    // Validate input for security
     const validation = await validateInput(value, 'text', field);
 
     if (!validation.valid) {
@@ -175,6 +226,7 @@ const HRSettings = () => {
         type: 'error', 
         text: `Invalid input for ${field}: ${validation.error}` 
       });
+      toast.error(`Invalid input for ${field}`);
       return;
     }
 
@@ -188,19 +240,31 @@ const HRSettings = () => {
   };
 
   const handleSave = async () => {
+    if (!canManageHRSettings) {
+      toast.error('You do not have permission to save HR settings');
+      return;
+    }
+
     try {
       setSaving(true);
       setMessage(null);
 
       // Rate limiting check
-      const rateLimitCheck = await checkRateLimit('save_hr_settings');
-      if (!rateLimitCheck.allowed) {
+      const rateLimitCheck = await checkRateLimit('save_hr_settings', 10, 60);
+      if (!rateLimitCheck) {
         setMessage({ 
           type: 'error', 
           text: 'Rate limit exceeded. Please wait before saving again.' 
         });
+        toast.error('Too many save attempts. Please wait a moment.');
         return;
       }
+
+      await logSecurityEvent('settings_modification', {
+        action: 'save_hr_settings',
+        business_id: selectedBusinessId,
+        modified_by: authUser?.id
+      }, 'high');
 
       // Prepare settings data for database
       const { id, created_at, updated_at, ...settingsToSave } = settings;
@@ -223,6 +287,7 @@ const HRSettings = () => {
       });
 
       setMessage({ type: 'success', text: 'HR settings saved successfully.' });
+      toast.success('HR settings saved successfully');
       
       // Clear message after 3 seconds
       setTimeout(() => setMessage(null), 3000);
@@ -232,13 +297,19 @@ const HRSettings = () => {
         type: 'error', 
         text: 'Failed to save settings. Please try again.' 
       });
+      toast.error('Failed to save settings');
+
+      await logSecurityEvent('settings_save_failed', {
+        error_message: error.message,
+        business_id: selectedBusinessId
+      }, 'high');
     } finally {
       setSaving(false);
     }
   };
 
   const handleBackToDashboard = () => {
-    navigate('/dashboard/hr');
+    navigate('/dashboard/hr/dashboard');
   };
 
   const styles = {
@@ -338,7 +409,8 @@ const HRSettings = () => {
       },
       backgroundColor: saving ? TavariStyles.colors.gray400 : TavariStyles.colors.primary,
       color: TavariStyles.colors.white,
-      cursor: saving ? 'not-allowed' : 'pointer'
+      cursor: saving ? 'not-allowed' : 'pointer',
+      opacity: !canManageHRSettings ? 0.5 : 1
     },
     loadingContainer: {
       display: 'flex',
@@ -363,11 +435,27 @@ const HRSettings = () => {
       color: TavariStyles.colors.gray600,
       fontSize: TavariStyles.typography.fontSize.lg,
       fontWeight: TavariStyles.typography.fontWeight.medium
+    },
+    accessDenied: {
+      textAlign: 'center',
+      padding: '60px 20px',
+      color: TavariStyles.colors.gray600
+    },
+    accessDeniedTitle: {
+      fontSize: TavariStyles.typography.fontSize['2xl'],
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray800,
+      marginBottom: TavariStyles.spacing.md
+    },
+    backButton: {
+      ...TavariStyles.components.button?.base,
+      ...TavariStyles.components.button?.variants?.secondary,
+      marginTop: TavariStyles.spacing.xl
     }
   };
 
   const renderActiveTab = () => {
-    const activeTabConfig = tabs.find(tab => tab.id === activeTab);
+    const activeTabConfig = visibleTabs.find(tab => tab.id === activeTab);
     if (!activeTabConfig) return null;
 
     const TabComponent = activeTabConfig.component;
@@ -382,14 +470,53 @@ const HRSettings = () => {
         authUser={authUser}
         saving={saving}
         formatTaxAmount={formatTaxAmount}
+        canEdit={canManageHRSettings}
       />
     );
   };
 
+  // Loading states
+  if (permissionsLoading || authLoading || loading) {
+    return (
+      <div style={styles.container}>
+        <style>
+          {`
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+          `}
+        </style>
+        <div style={styles.loadingContainer}>
+          <div style={styles.loadingContent}>
+            <div style={styles.spinner}></div>
+            <p style={styles.loadingText}>Loading HR Settings...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!canViewHRSettings) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.maxWidthContainer}>
+          <div style={styles.accessDenied}>
+            <h2 style={styles.accessDeniedTitle}>Access Denied</h2>
+            <p>You do not have permission to access HR Settings</p>
+            <button onClick={handleBackToDashboard} style={styles.backButton}>
+              Return to HR Dashboard
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <POSAuthWrapper
       componentName="HRSettings"
-      requiredRoles={['owner']}
+      requiredRoles={['owner', 'admin']}
       requireBusiness={true}
     >
       <SecurityWrapper
@@ -414,7 +541,7 @@ const HRSettings = () => {
             <div style={styles.header}>
               <h1 style={styles.title}>HR Settings</h1>
               <p style={styles.subtitle}>
-                {businessData?.name || 'Configure HR settings for your business'}
+                {businessData?.business_name || businessData?.name || 'Configure HR settings for your business'}
               </p>
             </div>
 
@@ -428,40 +555,32 @@ const HRSettings = () => {
               </div>
             )}
 
-            {/* Loading State */}
-            {loading ? (
-              <div style={styles.loadingContainer}>
-                <div style={styles.loadingContent}>
-                  <div style={styles.spinner}></div>
-                  <p style={styles.loadingText}>Loading HR Settings...</p>
-                </div>
+            {/* Tabs Container */}
+            <div style={styles.tabsContainer}>
+              {/* Tabs Header */}
+              <div style={styles.tabsHeader}>
+                {visibleTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    style={{
+                      ...styles.tab,
+                      ...(activeTab === tab.id ? styles.activeTab : {})
+                    }}
+                  >
+                    <span>{tab.icon}</span>
+                    <span>{tab.label}</span>
+                  </button>
+                ))}
               </div>
-            ) : (
-              /* Tabs Container */
-              <div style={styles.tabsContainer}>
-                {/* Tabs Header */}
-                <div style={styles.tabsHeader}>
-                  {tabs.map((tab) => (
-                    <button
-                      key={tab.id}
-                      onClick={() => setActiveTab(tab.id)}
-                      style={{
-                        ...styles.tab,
-                        ...(activeTab === tab.id ? styles.activeTab : {})
-                      }}
-                    >
-                      <span>{tab.icon}</span>
-                      <span>{tab.label}</span>
-                    </button>
-                  ))}
-                </div>
 
-                {/* Tab Content */}
-                <div style={styles.tabContent}>
-                  {settings && renderActiveTab()}
-                </div>
+              {/* Tab Content */}
+              <div style={styles.tabContent}>
+                {settings && renderActiveTab()}
+              </div>
 
-                {/* Save Button */}
+              {/* Save Button - Only show if user can manage settings */}
+              {canManageHRSettings && (
                 <div style={styles.saveButtonContainer}>
                   <button
                     onClick={handleSave}
@@ -471,8 +590,8 @@ const HRSettings = () => {
                     {saving ? 'Saving...' : 'Save Settings'}
                   </button>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       </SecurityWrapper>

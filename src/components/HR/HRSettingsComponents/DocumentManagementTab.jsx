@@ -80,7 +80,7 @@ const DocumentManagementTab = ({
         fontSize: TavariStyles.typography.fontSize.sm,
         backgroundColor: TavariStyles.colors.white
       },
-      width: '100%'
+      width: '90%'
     },
     select: {
       ...TavariStyles.components.form?.select || {
@@ -91,7 +91,7 @@ const DocumentManagementTab = ({
         backgroundColor: TavariStyles.colors.white,
         cursor: 'pointer'
       },
-      width: '100%'
+      width: '90%'
     },
     toggleGroup: {
       display: 'flex',

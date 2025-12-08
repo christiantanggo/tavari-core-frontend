@@ -62,7 +62,7 @@ const AddEmployeeModal = ({
     department: '',
     hireDate: '',
     wage: '',
-    claimCode: 1, // Default to claim code 1 (basic personal amount)
+    claimCode: 1,
     employmentStatus: 'active',
     password: '',
     confirmPassword: '',
@@ -73,6 +73,11 @@ const AddEmployeeModal = ({
   const [errors, setErrors] = useState({});
   const [showPasswords, setShowPasswords] = useState(false);
   const [businessSettings, setBusinessSettings] = useState(null);
+  const [positions, setPositions] = useState([]);
+  const [showNewPositionInput, setShowNewPositionInput] = useState(false);
+  const [newPositionName, setNewPositionName] = useState('');
+  const [roleOptions, setRoleOptions] = useState([]);
+  const [selectedRole, setSelectedRole] = useState('employee');
 
   // Employment status options
   const employmentStatuses = [
@@ -111,7 +116,7 @@ const AddEmployeeModal = ({
     { value: 10, label: 'CC 10 - Maximum claim amount (minimum tax deduction)' }
   ];
 
-  // Load business payroll settings to get default claim code
+  // Load business payroll settings and positions
   useEffect(() => {
     const loadBusinessSettings = async () => {
       if (!businessId) return;
@@ -125,7 +130,6 @@ const AddEmployeeModal = ({
 
         if (data) {
           setBusinessSettings(data);
-          // Set form default to business default claim code
           setFormData(prev => ({
             ...prev,
             claimCode: data.default_claim_code || 1
@@ -136,8 +140,50 @@ const AddEmployeeModal = ({
       }
     };
 
+    const loadPositions = async () => {
+      if (!businessId) return;
+
+      try {
+        const { data, error } = await supabase
+          .from('positions')
+          .select('position_name, color')
+          .eq('business_id', businessId)
+          .eq('is_active', true)
+          .order('position_name');
+
+        if (error) throw error;
+        setPositions(data || []);
+      } catch (err) {
+        console.error('Error loading positions:', err);
+      }
+    };
+
+    const loadRoles = async () => {
+      if (!businessId) return;
+
+      try {
+        // Load available roles (distinct role_key for this business)
+        const { data: rolesData, error: rolesError } = await supabase
+          .from('role_permissions')
+          .select('role_key')
+          .eq('business_id', businessId);
+
+        if (!rolesError && Array.isArray(rolesData)) {
+          const unique = Array.from(new Set(rolesData.map(r => r.role_key).filter(Boolean))).sort();
+          setRoleOptions(unique.length ? unique : ['owner', 'admin', 'manager', 'employee']);
+        } else {
+          setRoleOptions(['owner', 'admin', 'manager', 'employee']);
+        }
+      } catch (err) {
+        console.warn('Failed to load roles:', err?.message || err);
+        setRoleOptions(['owner', 'admin', 'manager', 'employee']);
+      }
+    };
+
     if (isOpen && businessId) {
       loadBusinessSettings();
+      loadPositions();
+      loadRoles();
       resetForm();
     }
   }, [isOpen, businessId]);
@@ -159,11 +205,11 @@ const AddEmployeeModal = ({
       pin: '',
       confirmPin: ''
     });
+    setSelectedRole('employee');
     setErrors({});
   };
 
   const handleInputChange = async (field, value) => {
-    // Validate input with security context
     if (field === 'email' || field === 'firstName' || field === 'lastName') {
       const validation = await validateInput(value, 'text', field);
       if (!validation.valid) {
@@ -193,7 +239,6 @@ const AddEmployeeModal = ({
       [field]: value
     }));
     
-    // Clear error when user makes valid input
     if (errors[field]) {
       setErrors(prev => ({
         ...prev,
@@ -227,7 +272,6 @@ const AddEmployeeModal = ({
       newErrors.wage = 'Please enter a valid wage amount';
     }
 
-    // Claim code validation
     if (formData.claimCode < 0 || formData.claimCode > 10) {
       newErrors.claimCode = 'Claim code must be between 0 and 10';
     }
@@ -243,7 +287,6 @@ const AddEmployeeModal = ({
       }
     }
 
-    // Password validation (same as Register.jsx)
     if (!formData.password.trim()) {
       newErrors.password = 'Password is required';
     } else {
@@ -257,7 +300,6 @@ const AddEmployeeModal = ({
       newErrors.confirmPassword = 'Passwords do not match';
     }
 
-    // PIN validation (same as Register.jsx)
     if (!formData.pin.trim()) {
       newErrors.pin = 'PIN is required';
     } else if (!/^\d{4}$/.test(formData.pin)) {
@@ -279,7 +321,6 @@ const AddEmployeeModal = ({
       return;
     }
 
-    // Rate limiting check
     const rateLimitCheck = await checkRateLimit('create_employee');
     if (!rateLimitCheck.allowed) {
       setErrors({ submit: 'Rate limit exceeded. Please wait before creating another employee.' });
@@ -289,10 +330,9 @@ const AddEmployeeModal = ({
     setLoading(true);
 
     try {
-      // Record action attempt
       await recordAction('employee_creation_attempt', true);
 
-      // Check if email already exists
+      // Check if email already exists in public.users
       const { data: existingUser, error: checkError } = await supabase
         .from('users')
         .select('id, email')
@@ -310,26 +350,118 @@ const AddEmployeeModal = ({
         return;
       }
 
-      // Create Supabase Auth user (same as Register.jsx)
+      // 🔥 CRITICAL FIX: Set flag to prevent auth state clearing during employee creation
+      sessionStorage.setItem('_creating_employee', 'true');
+
+      // 🔥 CRITICAL FIX: Save current session BEFORE creating new user
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      
+      if (!currentSession) {
+        sessionStorage.removeItem('_creating_employee');
+        throw new Error('You must be logged in to create employees');
+      }
+
+      const originalAccessToken = currentSession.access_token;
+      const originalRefreshToken = currentSession.refresh_token;
+      const originalUserEmail = currentSession.user.email;
+
+      console.log('💾 Saved current session for user:', originalUserEmail);
+
+      // Try to create Supabase Auth user
+      let user = null;
       const { data: authData, error: signupError } = await supabase.auth.signUp({
         email: formData.email.toLowerCase().trim(),
         password: formData.password,
       });
 
       if (signupError) {
-        throw signupError;
+        // If user already exists in Auth, show clear error
+        if (signupError.message?.includes('already registered') || signupError.message?.includes('User already registered')) {
+          sessionStorage.removeItem('_creating_employee');
+          setErrors({ email: 'This email address is already registered in the authentication system. Please use a different email address.' });
+          await recordAction('employee_creation_attempt', false);
+          setLoading(false);
+          return;
+        } else {
+          // Other signup error
+          sessionStorage.removeItem('_creating_employee');
+          setErrors({ email: signupError.message || 'Failed to create authentication account. Please try again.' });
+          await recordAction('employee_creation_attempt', false);
+          setLoading(false);
+          return;
+        }
       }
 
-      const user = authData?.user;
+      // Signup successful
+      user = authData?.user;
       if (!user) {
-        throw new Error('Auth user creation failed');
+        sessionStorage.removeItem('_creating_employee');
+        setErrors({ email: 'Authentication user creation failed. Please try again.' });
+        await recordAction('employee_creation_attempt', false);
+        setLoading(false);
+        return;
+      }
+      
+      console.log('✅ Created auth user:', user.id);
+
+      // 🔥 CRITICAL FIX: Immediately restore original session synchronously
+      console.log('🔄 Restoring original session for:', originalUserEmail);
+      
+      // Use a small delay to ensure signUp completes, then restore immediately
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+      // Retry session restoration up to 3 times
+      let sessionRestored = false;
+      let lastError = null;
+      
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const { error: sessionRestoreError } = await supabase.auth.setSession({
+          access_token: originalAccessToken,
+          refresh_token: originalRefreshToken
+        });
+
+        if (sessionRestoreError) {
+          console.warn(`⚠️ Session restoration attempt ${attempt} failed:`, sessionRestoreError);
+          lastError = sessionRestoreError;
+          // Wait a bit before retrying
+          if (attempt < 3) {
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
+        } else {
+          // Verify the session was actually restored
+          await new Promise(resolve => setTimeout(resolve, 100)); // Give it a moment to propagate
+          const { data: { session: restoredSession } } = await supabase.auth.getSession();
+          
+          if (restoredSession?.user?.email === originalUserEmail) {
+            console.log('✅ Session restored successfully on attempt', attempt);
+            sessionRestored = true;
+            break;
+          } else {
+            console.warn(`⚠️ Session restoration attempt ${attempt} - email mismatch`);
+            if (attempt < 3) {
+              await new Promise(resolve => setTimeout(resolve, 300));
+            }
+          }
+        }
       }
 
-      // Hash password and PIN (same as Register.jsx)
+      if (!sessionRestored) {
+        console.error('❌ Failed to restore session after 3 attempts');
+        sessionStorage.removeItem('_creating_employee');
+        throw new Error('Session restoration failed. Please refresh the page.');
+      }
+      
+      // Keep flag active a bit longer to catch any delayed auth events
+      setTimeout(() => {
+        sessionStorage.removeItem('_creating_employee');
+        console.log('🧹 Cleared employee creation flag');
+      }, 3000);
+
+      // Hash password and PIN
       const hashedPassword = await hashValue(formData.password);
       const hashedPin = await hashValue(String(formData.pin || '').trim());
 
-      // Create users table record with claim code
+      // Create users table record
       const { error: insertError } = await supabase.from('users').insert({
         id: user.id,
         full_name: `${formData.firstName.trim()} ${formData.lastName.trim()}`,
@@ -343,7 +475,7 @@ const AddEmployeeModal = ({
         department: formData.department || null,
         hire_date: formData.hireDate || null,
         wage: formData.wage ? parseFloat(formData.wage) : null,
-        claim_code: parseInt(formData.claimCode), // Add claim code to user record
+        claim_code: parseInt(formData.claimCode),
         employment_status: formData.employmentStatus,
         status: 'active',
         roles: ['employee']
@@ -353,31 +485,36 @@ const AddEmployeeModal = ({
         throw insertError;
       }
 
-      // Link to business (same as Register.jsx)
+      // Link to business
       const { error: businessUserError } = await supabase.from('business_users').insert({
         user_id: user.id,
         business_id: businessId,
-        role: 'employee'
+        role: selectedRole || 'employee'
       });
 
       if (businessUserError) {
         throw businessUserError;
       }
 
-      // Add user role (same as Register.jsx)
-      const { error: roleError } = await supabase.from('user_roles').insert({
-        user_id: user.id,
-        business_id: businessId,
-        role: 'employee',
-        active: true,
-        custom_permissions: {}
-      });
+      // Create user_roles entry
+      const { error: userRoleError } = await supabase
+        .from('user_roles')
+        .upsert(
+          {
+            user_id: user.id,
+            business_id: businessId,
+            role: selectedRole || 'employee',
+            active: true,
+            custom_permissions: {}
+          },
+          { onConflict: 'user_id,business_id' }
+        );
 
-      if (roleError) {
-        throw roleError;
+      if (userRoleError) {
+        console.warn('Failed to create user_roles entry (non-critical):', userRoleError);
+        // Don't throw - this is non-critical, business_users is the primary link
       }
 
-      // Log security event for employee creation with claim code info
       await logSecurityEvent('employee_created_with_claim_code', {
         employee_id: user.id,
         employee_email: formData.email.toLowerCase().trim(),
@@ -388,7 +525,6 @@ const AddEmployeeModal = ({
         timestamp: new Date().toISOString()
       }, 'medium');
 
-      // Add audit log (enhanced with claim code)
       await supabase.from('audit_logs').insert({
         user_id: authUser.id,
         event_type: 'employee_created',
@@ -405,16 +541,17 @@ const AddEmployeeModal = ({
 
       await recordAction('employee_creation_attempt', true);
 
-      console.log('Employee created successfully with claim code:', user.id, 'CC:', formData.claimCode);
+      console.log('✅ Employee created successfully:', user.id, 'CC:', formData.claimCode);
       
-      // Close modal and refresh parent component
       onClose();
       if (onEmployeeCreated) {
         onEmployeeCreated(user.id);
       }
       
     } catch (error) {
-      console.error('Error creating employee:', error);
+      console.error('❌ Error creating employee:', error);
+      // Ensure flag is cleared on error
+      sessionStorage.removeItem('_creating_employee');
       await recordAction('employee_creation_attempt', false);
       await logSecurityEvent('employee_creation_failed', {
         error_message: error.message,
@@ -423,13 +560,14 @@ const AddEmployeeModal = ({
       }, 'high');
       setErrors({ submit: 'Failed to create employee. Please try again.' });
     } finally {
+      // Final cleanup - ensure flag is always cleared
+      sessionStorage.removeItem('_creating_employee');
       setLoading(false);
     }
   };
 
   if (!isOpen) return null;
 
-  // Loading and error states using POSAuthWrapper pattern
   if (authLoading) {
     return (
       <div style={styles.modalOverlay}>
@@ -655,13 +793,105 @@ const AddEmployeeModal = ({
             <div style={styles.fieldGrid}>
               <div style={styles.formGroup}>
                 <label style={styles.formLabel}>Position/Job Title</label>
-                <input
-                  type="text"
-                  style={styles.formInput}
-                  value={formData.position}
-                  onChange={(e) => handleInputChange('position', e.target.value)}
-                  placeholder="Enter job title"
-                />
+                {!showNewPositionInput ? (
+                  <>
+                    <select
+                      style={styles.formSelect}
+                      value={formData.position}
+                      onChange={(e) => {
+                        if (e.target.value === 'NEW_POSITION') {
+                          setShowNewPositionInput(true);
+                        } else {
+                          handleInputChange('position', e.target.value);
+                        }
+                      }}
+                    >
+                      <option value="">Select position</option>
+                      {positions.map(pos => (
+                        <option key={pos.position_name} value={pos.position_name}>
+                          {pos.position_name}
+                        </option>
+                      ))}
+                      <option value="NEW_POSITION">+ Add New Position</option>
+                    </select>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      style={{ ...styles.formInput, width: '90%' }}
+                      value={newPositionName}
+                      onChange={(e) => setNewPositionName(e.target.value)}
+                      placeholder="Enter new position name"
+                      autoFocus
+                    />
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (newPositionName.trim()) {
+                            // Add to positions table
+                            try {
+                              const { error } = await supabase
+                                .from('positions')
+                                .insert({
+                                  business_id: businessId,
+                                  position_name: newPositionName.trim(),
+                                  color: '#4a90e2',
+                                  is_active: true
+                                });
+                              
+                              if (!error) {
+                                handleInputChange('position', newPositionName.trim());
+                                setShowNewPositionInput(false);
+                                setNewPositionName('');
+                                // Reload positions
+                                const { data } = await supabase
+                                  .from('positions')
+                                  .select('position_name, color')
+                                  .eq('business_id', businessId)
+                                  .eq('is_active', true)
+                                  .order('position_name');
+                                setPositions(data || []);
+                              }
+                            } catch (err) {
+                              console.error('Error adding position:', err);
+                            }
+                          }
+                        }}
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor: TavariStyles.colors.primary,
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '12px'
+                        }}
+                      >
+                        Add
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowNewPositionInput(false);
+                          setNewPositionName('');
+                        }}
+                        style={{
+                          padding: '6px 12px',
+                          backgroundColor: 'transparent',
+                          color: TavariStyles.colors.gray600,
+                          border: `1px solid ${TavariStyles.colors.gray300}`,
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '12px'
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
 
               <div style={styles.formGroup}>
@@ -702,6 +932,25 @@ const AddEmployeeModal = ({
               </div>
 
               <div style={styles.formGroup}>
+                <label style={styles.formLabel}>Role</label>
+                <select
+                  value={selectedRole}
+                  onChange={(e) => setSelectedRole(e.target.value)}
+                  style={styles.formSelect}
+                  disabled={loading}
+                >
+                  {(roleOptions.length ? roleOptions : ['owner', 'admin', 'manager', 'employee']).map((roleKey) => (
+                    <option key={roleKey} value={roleKey}>
+                      {roleKey.charAt(0).toUpperCase() + roleKey.slice(1).replace(/_/g, ' ')}
+                    </option>
+                  ))}
+                </select>
+                <div style={styles.fieldNote}>
+                  Permission role for this employee
+                </div>
+              </div>
+
+              <div style={styles.formGroup}>
                 <label style={styles.formLabel}>Employment Status</label>
                 <select
                   style={styles.formSelect}
@@ -717,7 +966,6 @@ const AddEmployeeModal = ({
               </div>
             </div>
 
-            {/* ✅ ENHANCED: Wage and Claim Code in same row */}
             <div style={styles.fieldGrid}>
               <div style={styles.formGroup}>
                 <label style={styles.formLabel}>Hourly Wage ($/hour)</label>

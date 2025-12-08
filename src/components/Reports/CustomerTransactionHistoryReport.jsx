@@ -170,7 +170,6 @@ const CustomerTransactionHistoryReport = () => {
     checkboxGroup: {
       display: 'flex',
       gap: isMobile ? TavariStyles.spacing.md : TavariStyles.spacing.lg,
-      alignItems: 'center',
       marginTop: TavariStyles.spacing.md,
       flexDirection: isMobile ? 'column' : 'row',
       alignItems: isMobile ? 'flex-start' : 'center'

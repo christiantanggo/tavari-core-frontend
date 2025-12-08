@@ -7,19 +7,18 @@ export const UserProvider = ({ children }) => {
   const [session, setSession] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [managerLocked, setManagerLocked] = useState(false);
+  const [lockReason, setLockReason] = useState('');
 
   useEffect(() => {
     const init = async () => {
-      console.log('📡 Checking session...');
       const { data, error } = await supabase.auth.getSession();
       const session = data?.session;
 
-      console.log('📡 Session result:', session);
 
       setSession(session || null);
 
       if (session?.user?.id) {
-        console.log('📡 Fetching user profile for ID:', session.user.id);
         const { data: profile } = await supabase
           .from('users')
           .select('id, email, roles, full_name')
@@ -35,8 +34,26 @@ export const UserProvider = ({ children }) => {
     init();
   }, []);
 
+  const lockApp = (reason = 'Manager has locked the application') => {
+    setManagerLocked(true);
+    setLockReason(reason);
+  };
+
+  const unlockApp = () => {
+    setManagerLocked(false);
+    setLockReason('');
+  };
+
   return (
-    <UserContext.Provider value={{ session, userProfile, loading }}>
+    <UserContext.Provider value={{ 
+      session, 
+      userProfile, 
+      loading, 
+      managerLocked, 
+      lockReason, 
+      lockApp, 
+      unlockApp 
+    }}>
       {children}
     </UserContext.Provider>
   );

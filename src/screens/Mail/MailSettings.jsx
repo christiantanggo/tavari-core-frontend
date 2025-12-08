@@ -1,20 +1,78 @@
-// screens/Mail/MailSettings.jsx
+// screens/Mail/MailSettings.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import { 
-  FiMail, FiUser, FiMapPin, FiGlobe, FiSave, FiRefreshCw, 
+  FiMail, FiUser, FiMapPin, FiSave, FiRefreshCw, 
   FiCheckCircle, FiAlertCircle, FiClock, FiShield, FiSettings,
   FiPause, FiPlay, FiAlertTriangle
 } from 'react-icons/fi';
+import { TbTestPipe } from 'react-icons/tb';
+
+// Permission System Imports
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import toast from 'react-hot-toast';
+import emailSendingService from '../../helpers/Mail/emailSendingService';
 
 const MailSettings = () => {
   const { business } = useBusiness();
+  const navigate = useNavigate();
+  
+  // Security context for settings management
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'MailSettings',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
+  // Authentication using standardized hook
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin'],
+    requireBusiness: true,
+    componentName: 'MailSettings'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
   
   // Emergency pause state
   const [emailSendingPaused, setEmailSendingPaused] = useState(() => {
     const stored = localStorage.getItem('EMAIL_SENDING_PAUSED');
     return stored ? JSON.parse(stored) : true; // Default to paused for safety
+  });
+  const [emailTestingMode, setEmailTestingMode] = useState(() => {
+    try {
+      return emailSendingService.getTestMode();
+    } catch (error) {
+      console.warn('Failed to read email testing mode:', error);
+      return true;
+    }
   });
   
   const [settings, setSettings] = useState({
@@ -41,216 +99,308 @@ const MailSettings = () => {
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
 
-  const businessId = business?.id;
+  const businessId = selectedBusinessId || business?.id;
 
-  useEffect(() => {
-    if (businessId) {
-      loadSettings();
-    }
-  }, [businessId]);
+  // Permission checks - VERY STRICT for settings
+  const canViewSettings = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+  const canEditSettings = hasElevatedPrivileges(); // Only elevated users (owner/admin)
+  const canToggleEmailSending = hasElevatedPrivileges(); // Only elevated users
 
-  const toggleEmailSending = () => {
-    const newState = !emailSendingPaused;
-    setEmailSendingPaused(newState);
-    localStorage.setItem('EMAIL_SENDING_PAUSED', JSON.stringify(newState));
-    
-    if (newState) {
-      setMessage('🚨 EMAIL SENDING PAUSED - All campaigns and receipt emails are now blocked');
-    } else {
-      setMessage('✅ EMAIL SENDING ENABLED - Campaigns and receipt emails can now be sent');
-    }
-    
-    setTimeout(() => setMessage(''), 5000);
-  };
+  const loadSettings = React.useCallback(async () => {
+    if (!businessId || !canViewSettings) return;
 
-  const loadSettings = async () => {
     try {
       setLoading(true);
-      
-      // Load existing settings or create default if none exist
-      let { data: settingsData, error } = await supabase
+
+      if (!checkRateLimit('load_settings', 15, 60000)) {
+        toast.error('Too many requests. Please wait a moment.');
+        return;
+      }
+
+      const { data, error } = await supabase
         .from('mail_settings')
         .select('*')
         .eq('business_id', businessId)
         .single();
 
-      if (error && error.code === 'PGRST116') {
-        // No settings found, create default
-        const defaultSettings = {
-          business_id: businessId,
-          from_name: 'Your Business Name',
-          from_email: '',
-          reply_to: '',
-          business_address: 'Business Address Required for CASL Compliance',
-          social_links: {
-            facebook: '',
-            twitter: '',
-            instagram: '',
-            linkedin: '',
-            youtube: ''
-          },
-          session_timeout: 300,
-          auto_retry_failed: true,
-          max_retries: 3
-        };
-
-        const { data: newSettings, error: createError } = await supabase
-          .from('mail_settings')
-          .insert(defaultSettings)
-          .select()
-          .single();
-
-        if (createError) throw createError;
-        settingsData = newSettings;
-      } else if (error) {
+      if (error && error.code !== 'PGRST116') {
         throw error;
       }
 
+      if (!data) {
+        setSettings((prev) => ({ ...prev, business_id: businessId }));
+        return;
+      }
+
       setSettings({
-        from_name: settingsData.from_name || '',
-        from_email: settingsData.from_email || '',
-        reply_to: settingsData.reply_to || '',
-        business_address: settingsData.business_address || '',
-        social_links: settingsData.social_links || {
-          facebook: '',
-          twitter: '',
-          instagram: '',
-          linkedin: '',
-          youtube: ''
+        from_name: data.from_name || '',
+        from_email: data.from_email || '',
+        reply_to: data.reply_to || '',
+        business_address: data.business_address || '',
+        social_links: {
+          facebook: data.social_links?.facebook || '',
+          twitter: data.social_links?.twitter || '',
+          instagram: data.social_links?.instagram || '',
+          linkedin: data.social_links?.linkedin || '',
+          youtube: data.social_links?.youtube || ''
         },
-        session_timeout: settingsData.session_timeout || 300,
-        auto_retry_failed: settingsData.auto_retry_failed !== false,
-        max_retries: settingsData.max_retries || 3
+        session_timeout: data.session_timeout ?? 300,
+        auto_retry_failed: data.auto_retry_failed ?? true,
+        max_retries: data.max_retries ?? 3
       });
     } catch (error) {
       console.error('Error loading mail settings:', error);
-      setMessage('Error loading settings: ' + error.message);
+      toast.error('Failed to load mail settings');
     } finally {
       setLoading(false);
     }
+  }, [businessId, canViewSettings, checkRateLimit]);
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !authLoading && !canViewSettings) {
+      toast.error('You do not have permission to view mail settings');
+      navigate('/dashboard/mail');
+    }
+  }, [permissionsLoading, authLoading, canViewSettings]);
+
+  useEffect(() => {
+    if (businessId && !authLoading && !permissionsLoading && canViewSettings) {
+      loadSettings();
+    }
+  }, [businessId, authLoading, permissionsLoading, canViewSettings, loadSettings]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleTestingModeChange = (event) => {
+      if (event?.detail?.enabled !== undefined) {
+        setEmailTestingMode(event.detail.enabled);
+      } else {
+        setEmailTestingMode(emailSendingService.getTestMode());
+      }
+    };
+
+    window.addEventListener('emailTestingModeChanged', handleTestingModeChange);
+    return () => window.removeEventListener('emailTestingModeChanged', handleTestingModeChange);
+  }, []);
+
+  const toggleEmailSending = async () => {
+    // Permission check - CRITICAL
+    if (!canToggleEmailSending) {
+      toast.error('You do not have permission to toggle email sending. Only owners and admins can control this.');
+      return;
+    }
+
+    // Rate limiting - VERY STRICT
+    if (!checkRateLimit('toggle_email_sending', 5, 300000)) { // 5 per 5 minutes
+      toast.error('Too many toggle requests. Please wait before trying again.');
+      return;
+    }
+
+    const newState = !emailSendingPaused;
+    
+    try {
+      await logSecurityEvent('email_sending_toggle', {
+        action: newState ? 'pause_email_sending' : 'enable_email_sending',
+        previous_state: emailSendingPaused,
+        new_state: newState,
+        business_id: businessId,
+        user_id: authUser?.id,
+        user_role: userRole
+      }, 'critical');
+
+      setEmailSendingPaused(newState);
+      localStorage.setItem('EMAIL_SENDING_PAUSED', JSON.stringify(newState));
+      
+      // Dispatch custom event for other components to listen to
+      window.dispatchEvent(new Event('emailPauseStateChanged'));
+      
+      if (newState) {
+        setMessage('🚨 EMAIL SENDING PAUSED - All campaigns and receipt emails are now blocked');
+        toast.error('Email sending has been PAUSED');
+      } else {
+        setMessage('✅ EMAIL SENDING ENABLED - Campaigns and receipt emails can now be sent');
+        toast.success('Email sending has been ENABLED');
+      }
+      
+      await recordAction('email_sending_toggled', true, newState ? 'paused' : 'enabled');
+      setTimeout(() => setMessage(''), 5000);
+    } catch (error) {
+      console.error('Error toggling email sending:', error);
+      toast.error('Failed to toggle email sending');
+      await recordAction('email_sending_toggled', false, newState ? 'paused' : 'enabled');
+    }
   };
 
-  const validateForm = () => {
-    const newErrors = {};
-
-    if (!settings.from_name.trim()) {
-      newErrors.from_name = 'Business name is required';
+  const toggleEmailTestingMode = async () => {
+    if (!canToggleEmailSending) {
+      toast.error('You do not have permission to toggle testing mode.');
+      return;
     }
 
-    if (!settings.from_email.trim()) {
-      newErrors.from_email = 'From email is required';
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.from_email)) {
-      newErrors.from_email = 'Invalid email format';
+    if (!checkRateLimit('toggle_email_testing_mode', 5, 300000)) {
+      toast.error('Too many requests. Please wait before trying again.');
+      return;
     }
 
-    if (settings.reply_to && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.reply_to)) {
-      newErrors.reply_to = 'Invalid reply-to email format';
-    }
-
-    if (!settings.business_address.trim()) {
-      newErrors.business_address = 'Business address is required for CASL compliance';
-    }
-
-    if (settings.session_timeout < 60 || settings.session_timeout > 3600) {
-      newErrors.session_timeout = 'Session timeout must be between 60 and 3600 seconds';
-    }
-
-    if (settings.max_retries < 1 || settings.max_retries > 10) {
-      newErrors.max_retries = 'Max retries must be between 1 and 10';
-    }
-
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
-  };
-
-  const handleSave = async () => {
-    if (!validateForm()) return;
-
-    setSaving(true);
-    setMessage('');
+    const newMode = !emailTestingMode;
 
     try {
-      const { error } = await supabase
-        .from('mail_settings')
-        .update({
-          from_name: settings.from_name.trim(),
-          from_email: settings.from_email.toLowerCase().trim(),
-          reply_to: settings.reply_to.toLowerCase().trim() || null,
-          business_address: settings.business_address.trim(),
-          social_links: settings.social_links,
-          session_timeout: settings.session_timeout,
-          auto_retry_failed: settings.auto_retry_failed,
-          max_retries: settings.max_retries,
-          updated_at: new Date().toISOString()
-        })
-        .eq('business_id', businessId);
+      emailSendingService.setTestMode(newMode);
+      setEmailTestingMode(newMode);
 
-      if (error) throw error;
-
-      // Log audit event
-      await supabase.from('audit_logs').insert({
+      await logSecurityEvent('email_testing_mode_toggle', {
+        action: newMode ? 'enable_test_mode' : 'disable_test_mode',
+        previous_state: emailTestingMode,
+        new_state: newMode,
         business_id: businessId,
-        action: 'update_mail_settings',
-        details: { 
-          from_email: settings.from_email,
-          from_name: settings.from_name
-        },
-        created_at: new Date().toISOString()
-      });
+        user_id: authUser?.id,
+        user_role: userRole
+      }, 'high');
 
-      setMessage('Settings saved successfully!');
-      setTimeout(() => setMessage(''), 3000);
+      if (newMode) {
+        toast.success('Email test mode enabled – real emails will be suppressed.');
+        setMessage('🧪 EMAIL TEST MODE ENABLED - All mail will stay inside the sandbox until you disable test mode.');
+      } else {
+        toast.success('Email test mode disabled – live emails will be sent when sending is active.');
+        setMessage('📤 EMAIL TEST MODE DISABLED - Mail will send live once the pause is lifted.');
+      }
+
+      await recordAction('email_testing_mode_toggled', true, newMode ? 'test' : 'live');
+      setTimeout(() => setMessage(''), 5000);
     } catch (error) {
-      console.error('Error saving settings:', error);
-      setMessage('Error saving settings: ' + error.message);
-    } finally {
-      setSaving(false);
+      console.error('Error toggling email testing mode:', error);
+      toast.error('Failed to toggle test mode');
+      await recordAction('email_testing_mode_toggled', false, emailTestingMode ? 'test' : 'live');
     }
   };
 
   const handleTestEmail = async () => {
-    if (!settings.from_email) {
-      setTestResult({ success: false, message: 'Please enter a from email first' });
+    if (!canEditSettings) {
+      toast.error('You do not have permission to test the email configuration.');
       return;
     }
 
     if (emailSendingPaused) {
-      setTestResult({ success: false, message: 'Email sending is currently paused. Enable sending first to test.' });
+      toast.error('Email sending is paused. Enable it before running a test.');
       return;
     }
 
-    setTesting(true);
-    setTestResult(null);
+    if (!settings.from_email) {
+      toast.error('Set a from email address first.');
+      return;
+    }
 
     try {
-      // Simulate email test - in production this would test AWS SES
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // Simulate success/failure
-      const success = Math.random() > 0.2; // 80% success rate
-      
+      if (!checkRateLimit('test_email_configuration', 3, 60000)) {
+        toast.error('Too many tests. Please wait a minute before trying again.');
+        return;
+      }
+
+      setTesting(true);
+      setTestResult(null);
+
+      await logSecurityEvent('test_email_configuration', {
+        action: 'test_email',
+        from_email: settings.from_email,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
+
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      const success = Math.random() > 0.2;
+
       if (success) {
-        setTestResult({ 
-          success: true, 
-          message: 'Test email configuration is valid!' 
-        });
+        setTestResult({ success: true, message: 'Test email configuration is valid!' });
+        toast.success('Email configuration test passed');
+        await recordAction('email_config_tested', true, 'passed');
       } else {
-        setTestResult({ 
-          success: false, 
-          message: 'Email configuration test failed. Please check your settings.' 
-        });
+        setTestResult({ success: false, message: 'Email configuration test failed. Please check your settings.' });
+        toast.error('Email configuration test failed');
+        await recordAction('email_config_tested', false, 'failed');
       }
     } catch (error) {
-      setTestResult({ 
-        success: false, 
-        message: 'Error testing email: ' + error.message 
-      });
+      console.error('Error testing email configuration:', error);
+      setTestResult({ success: false, message: `Error testing email: ${error.message}` });
+      await recordAction('email_config_tested', false, error.message);
+      toast.error('Error testing email configuration');
     } finally {
       setTesting(false);
     }
   };
 
+  const handleSave = async () => {
+    if (!canEditSettings) {
+      toast.error('You do not have permission to save mail settings.');
+      return;
+    }
+
+    const errorsFound = {};
+    if (!settings.from_name?.trim()) {
+      errorsFound.from_name = 'Business name is required';
+    }
+    if (!settings.from_email?.trim()) {
+      errorsFound.from_email = 'From email is required';
+    }
+    if (!settings.business_address?.trim()) {
+      errorsFound.business_address = 'Business address is required';
+    }
+
+    if (Object.keys(errorsFound).length > 0) {
+      setErrors(errorsFound);
+      toast.error('Please correct the highlighted errors.');
+      return;
+    }
+
+    try {
+      if (!checkRateLimit('save_mail_settings', 5, 60000)) {
+        toast.error('Too many save attempts. Please wait a moment.');
+        return;
+      }
+
+      setSaving(true);
+      await logSecurityEvent('mail_settings_save_attempt', {
+        business_id: businessId,
+        user_id: authUser?.id,
+        settings: {
+          from_email: settings.from_email,
+          reply_to: settings.reply_to
+        }
+      }, 'high');
+
+      const payload = {
+        business_id: businessId,
+        ...settings
+      };
+
+      const { error } = await supabase
+        .from('mail_settings')
+        .upsert(payload, { onConflict: 'business_id' });
+
+      if (error) {
+        throw error;
+      }
+
+      toast.success('Mail settings saved successfully');
+      await recordAction('mail_settings_saved', true);
+    } catch (error) {
+      console.error('Error saving mail settings:', error);
+      toast.error('Failed to save mail settings');
+      await recordAction('mail_settings_saved', false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleInputChange = (field, value) => {
+    // Check permission for editing
+    if (!canEditSettings) {
+      toast.warning('You do not have permission to edit settings');
+      return;
+    }
+
     setSettings(prev => ({
       ...prev,
       [field]: value
@@ -266,6 +416,12 @@ const MailSettings = () => {
   };
 
   const handleSocialLinkChange = (platform, value) => {
+    // Check permission for editing
+    if (!canEditSettings) {
+      toast.warning('You do not have permission to edit settings');
+      return;
+    }
+
     setSettings(prev => ({
       ...prev,
       social_links: {
@@ -275,355 +431,462 @@ const MailSettings = () => {
     }));
   };
 
-  if (loading) {
+  if (authLoading || permissionsLoading || loading) {
     return (
-      <div style={styles.container}>
-        <div style={styles.loading}>
-          <FiRefreshCw style={styles.loadingIcon} />
-          <div>Loading mail settings...</div>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.loading}>
+            <FiRefreshCw style={styles.loadingIcon} />
+            <div>Loading mail settings...</div>
+          </div>
         </div>
-      </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  if (authError) {
+    return (
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.error}>
+            <FiAlertCircle style={styles.errorIcon} />
+            <h2>Authentication Error</h2>
+            <p>{authError}</p>
+          </div>
+        </div>
+      </POSAuthWrapper>
     );
   }
 
   return (
-    <div style={styles.container}>
-      {/* Header */}
-      <div style={styles.header}>
-        <h1 style={styles.title}>
-          <FiSettings style={styles.titleIcon} />
-          Mail Settings
-        </h1>
-        <p style={styles.subtitle}>
-          Configure your business email settings and CASL compliance information
-        </p>
-      </div>
-
-      {/* Message */}
-      {message && (
-        <div style={{
-          ...styles.message,
-          backgroundColor: message.includes('Error') ? '#ffebee' : 
-                          message.includes('PAUSED') ? '#fff3cd' : '#e8f5e8',
-          color: message.includes('Error') ? '#c62828' : 
-                 message.includes('PAUSED') ? '#856404' : '#2e7d32'
-        }}>
-          {message.includes('Error') ? <FiAlertCircle /> : 
-           message.includes('PAUSED') ? <FiAlertTriangle /> : <FiCheckCircle />}
-          <span>{message}</span>
-        </div>
-      )}
-
-      <div style={styles.content}>
-        {/* Emergency Email Controls */}
-        <div style={{
-          ...styles.section,
-          backgroundColor: emailSendingPaused ? '#ffebee' : '#e8f5e8',
-          border: emailSendingPaused ? '2px solid #f44336' : '2px solid #4caf50'
-        }}>
-          <h2 style={styles.sectionTitle}>
-            <FiAlertTriangle style={styles.sectionIcon} />
-            Emergency Email Controls
-          </h2>
-          
-          <div style={styles.emergencySection}>
-            <div style={styles.emergencyStatus}>
-              <div style={styles.statusIndicator}>
-                <div style={{
-                  ...styles.statusDot,
-                  backgroundColor: emailSendingPaused ? '#f44336' : '#4caf50'
-                }}></div>
-                <span style={{
-                  ...styles.statusText,
-                  color: emailSendingPaused ? '#f44336' : '#4caf50'
-                }}>
-                  Email Sending: {emailSendingPaused ? 'PAUSED' : 'ACTIVE'}
-                </span>
-              </div>
-              
-              <button 
-                style={{
-                  ...styles.emergencyButton,
-                  backgroundColor: emailSendingPaused ? '#4caf50' : '#f44336'
-                }}
-                onClick={toggleEmailSending}
-              >
-                {emailSendingPaused ? (
-                  <>
-                    <FiPlay style={styles.buttonIcon} />
-                    Enable Email Sending
-                  </>
-                ) : (
-                  <>
-                    <FiPause style={styles.buttonIcon} />
-                    Pause Email Sending
-                  </>
-                )}
-              </button>
-            </div>
-            
-            <div style={styles.emergencyDescription}>
-              {emailSendingPaused ? (
-                <>
-                  <FiAlertTriangle style={styles.warningIcon} />
-                  <div>
-                    <strong>All email sending is currently PAUSED</strong>
-                    <p>No campaigns or receipt emails can be sent until you enable email sending. This affects:</p>
-                    <ul>
-                      <li>Campaign bulk sends</li>
-                      <li>Test email sends</li>
-                      <li>Receipt email sends from POS</li>
-                      <li>All automated emails</li>
-                    </ul>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <FiCheckCircle style={styles.successIcon} />
-                  <div>
-                    <strong>Email sending is ACTIVE</strong>
-                    <p>All email functions are operational. Use the pause button above for emergency stops if needed.</p>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Email Configuration */}
-        <div style={styles.section}>
-          <h2 style={styles.sectionTitle}>
-            <FiMail style={styles.sectionIcon} />
-            Email Configuration
-          </h2>
-          
-          <div style={styles.formGrid}>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>
-                <FiUser style={styles.labelIcon} />
-                Business Name *
-              </label>
-              <input
-                type="text"
-                style={{
-                  ...styles.input,
-                  ...(errors.from_name ? styles.inputError : {})
-                }}
-                value={settings.from_name}
-                onChange={(e) => handleInputChange('from_name', e.target.value)}
-                placeholder="Your Business Name"
-              />
-              {errors.from_name && <span style={styles.errorText}>{errors.from_name}</span>}
-            </div>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>
-                <FiMail style={styles.labelIcon} />
-                From Email Address *
-              </label>
-              <input
-                type="email"
-                style={{
-                  ...styles.input,
-                  ...(errors.from_email ? styles.inputError : {})
-                }}
-                value={settings.from_email}
-                onChange={(e) => handleInputChange('from_email', e.target.value)}
-                placeholder="noreply@yourbusiness.com"
-              />
-              {errors.from_email && <span style={styles.errorText}>{errors.from_email}</span>}
-              <div style={styles.helpText}>
-                This email will appear as the sender for all campaigns
-              </div>
-            </div>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>
-                <FiMail style={styles.labelIcon} />
-                Reply-To Email (Optional)
-              </label>
-              <input
-                type="email"
-                style={{
-                  ...styles.input,
-                  ...(errors.reply_to ? styles.inputError : {})
-                }}
-                value={settings.reply_to}
-                onChange={(e) => handleInputChange('reply_to', e.target.value)}
-                placeholder="support@yourbusiness.com"
-              />
-              {errors.reply_to && <span style={styles.errorText}>{errors.reply_to}</span>}
-              <div style={styles.helpText}>
-                Replies will be sent to this address if different from sender
-              </div>
-            </div>
-          </div>
-
-          {/* Test Email Button */}
-          <div style={styles.testSection}>
-            <button 
-              style={{
-                ...styles.testButton,
-                opacity: emailSendingPaused ? 0.5 : 1,
-                cursor: emailSendingPaused ? 'not-allowed' : 'pointer'
-              }}
-              onClick={handleTestEmail}
-              disabled={testing || !settings.from_email || emailSendingPaused}
-            >
-              {testing ? <FiRefreshCw style={styles.spinningIcon} /> : <FiMail />}
-              {testing ? 'Testing...' : 'Test Email Configuration'}
-            </button>
-
-            {testResult && (
-              <div style={{
-                ...styles.testResult,
-                backgroundColor: testResult.success ? '#e8f5e8' : '#ffebee',
-                color: testResult.success ? '#2e7d32' : '#c62828'
-              }}>
-                {testResult.success ? <FiCheckCircle /> : <FiAlertCircle />}
-                <span>{testResult.message}</span>
+    <POSAuthWrapper>
+      <SecurityWrapper>
+        <div style={styles.container}>
+          {/* Header */}
+          <div style={styles.header}>
+            <h1 style={styles.title}>
+              <FiSettings style={styles.titleIcon} />
+              Mail Settings
+            </h1>
+            <p style={styles.subtitle}>
+              Configure your business email settings and CASL compliance information
+            </p>
+            {!canEditSettings && (
+              <div style={styles.readOnlyBadge}>
+                <FiAlertCircle style={styles.readOnlyIcon} />
+                <span>Read-Only Access - Contact owner/admin to make changes</span>
               </div>
             )}
           </div>
-        </div>
 
-        {/* CASL Compliance */}
-        <div style={styles.section}>
-          <h2 style={styles.sectionTitle}>
-            <FiShield style={styles.sectionIcon} />
-            CASL Compliance
-          </h2>
-          
-          <div style={styles.formGroup}>
-            <label style={styles.label}>
-              <FiMapPin style={styles.labelIcon} />
-              Business Address *
-            </label>
-            <textarea
-              style={{
-                ...styles.textarea,
-                ...(errors.business_address ? styles.inputError : {})
-              }}
-              value={settings.business_address}
-              onChange={(e) => handleInputChange('business_address', e.target.value)}
-              placeholder="123 Main Street, City, Province, Postal Code"
-              rows={3}
-            />
-            {errors.business_address && <span style={styles.errorText}>{errors.business_address}</span>}
-            <div style={styles.helpText}>
-              Required by CASL (Canadian Anti-Spam Legislation) - must appear in all emails
+          {/* Message */}
+          {message && (
+            <div style={{
+              ...styles.message,
+              backgroundColor: message.includes('Error') ? '#ffebee' : 
+                              message.includes('PAUSED') ? '#fff3cd' : '#e8f5e8',
+              color: message.includes('Error') ? '#c62828' : 
+                     message.includes('PAUSED') ? '#856404' : '#2e7d32'
+            }}>
+              {message.includes('Error') ? <FiAlertCircle /> : 
+               message.includes('PAUSED') ? <FiAlertTriangle /> : <FiCheckCircle />}
+              <span>{message}</span>
             </div>
-          </div>
-        </div>
+          )}
 
-        {/* Social Media Links */}
-        <div style={styles.section}>
-          <h2 style={styles.sectionTitle}>
-            <FiGlobe style={styles.sectionIcon} />
-            Social Media Links
-          </h2>
-          
-          <div style={styles.socialGrid}>
-            {Object.entries(settings.social_links).map(([platform, url]) => (
-              <div key={platform} style={styles.formGroup}>
+          <div style={styles.content}>
+            {/* Emergency Email Controls */}
+            <PermissionGate
+              requireElevated
+              fallback={
+                <div style={{
+                  ...styles.section,
+                  backgroundColor: emailSendingPaused ? '#ffebee' : '#e8f5e8',
+                  border: emailSendingPaused ? '2px solid #f44336' : '2px solid #4caf50'
+                }}>
+                  <h2 style={styles.sectionTitle}>
+                    <FiAlertTriangle style={styles.sectionIcon} />
+                    Emergency Email Controls
+                  </h2>
+                  
+                  <div style={styles.permissionDenied}>
+                    <FiAlertCircle style={styles.permissionIcon} />
+                    <div>
+                      <p><strong>Owner/Admin Only</strong></p>
+                      <p>Only business owners and administrators can control email sending.</p>
+                      <p>Current Status: <strong>{emailSendingPaused ? 'PAUSED' : 'ACTIVE'}</strong></p>
+                      <p>Testing Mode: <strong>{emailTestingMode ? 'ON (safe)' : 'OFF (live)'}</strong></p>
+                    </div>
+                  </div>
+                </div>
+              }
+            >
+              <div style={{
+                ...styles.section,
+                backgroundColor: emailSendingPaused ? '#ffebee' : '#e8f5e8',
+                border: emailSendingPaused ? '2px solid #f44336' : '2px solid #4caf50'
+              }}>
+                <h2 style={styles.sectionTitle}>
+                  <FiAlertTriangle style={styles.sectionIcon} />
+                  Emergency Email Controls
+                </h2>
+                
+                <div style={styles.emergencySection}>
+                  <div style={styles.emergencyStatus}>
+                    <div style={styles.statusIndicator}>
+                      <div style={{
+                        ...styles.statusDot,
+                        backgroundColor: emailSendingPaused ? '#f44336' : '#4caf50'
+                      }}></div>
+                      <span style={{
+                        ...styles.statusText,
+                        color: emailSendingPaused ? '#f44336' : '#4caf50'
+                      }}>
+                        Email Sending: {emailSendingPaused ? 'PAUSED' : 'ACTIVE'}
+                      </span>
+                    </div>
+                    
+                    <button 
+                      style={{
+                        ...styles.emergencyButton,
+                        backgroundColor: emailSendingPaused ? '#4caf50' : '#f44336'
+                      }}
+                      onClick={toggleEmailSending}
+                    >
+                      {emailSendingPaused ? (
+                        <>
+                          <FiPlay style={styles.buttonIcon} />
+                          Enable Email Sending
+                        </>
+                      ) : (
+                        <>
+                          <FiPause style={styles.buttonIcon} />
+                          Pause Email Sending
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  
+                  <div style={styles.emergencyDescription}>
+                    {emailSendingPaused ? (
+                      <>
+                        <FiAlertTriangle style={styles.warningIcon} />
+                        <div>
+                          <strong>All email sending is currently PAUSED</strong>
+                          <p>No campaigns or receipt emails can be sent until you enable email sending. This affects:</p>
+                          <ul>
+                            <li>Campaign bulk sends</li>
+                            <li>Test email sends</li>
+                            <li>Receipt email sends from POS</li>
+                            <li>All automated emails</li>
+                          </ul>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <FiCheckCircle style={styles.successIcon} />
+                        <div>
+                          <strong>Email sending is ACTIVE</strong>
+                          <p>All email functions are operational. Use the pause button above for emergency stops if needed.</p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  <div style={styles.testingModeCard}>
+                    <div style={styles.testingModeHeader}>
+                      <TbTestPipe style={styles.testingModeIcon} />
+                      Email Testing Mode
+                    </div>
+                    <div style={styles.testingModeBody}>
+                      <p style={styles.testingModeStatusText}>
+                        Testing Mode is currently <strong>{emailTestingMode ? 'ON (No real emails sent)' : 'OFF (Live sending enabled)'}</strong>.
+                      </p>
+                      <p style={styles.testingModeHelp}>
+                        Use testing mode while configuring templates or verifying deliverability. In test mode, all sends are simulated and stay inside the app.
+                      </p>
+                    </div>
+                    <button
+                      style={{
+                        ...styles.testingModeButton,
+                        backgroundColor: emailTestingMode ? '#3949ab' : '#00897b'
+                      }}
+                      onClick={toggleEmailTestingMode}
+                    >
+                      {emailTestingMode ? 'Disable Test Mode (Go Live)' : 'Enable Test Mode (Safe Send)'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </PermissionGate>
+
+            {/* Email Configuration */}
+            <div style={styles.section}>
+              <h2 style={styles.sectionTitle}>
+                <FiMail style={styles.sectionIcon} />
+                Email Configuration
+              </h2>
+              
+              <div style={styles.formGrid}>
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>
+                    <FiUser style={styles.labelIcon} />
+                    Business Name *
+                  </label>
+                  <input
+                    type="text"
+                    style={{
+                      ...styles.input,
+                      ...(errors.from_name ? styles.inputError : {}),
+                      ...(canEditSettings ? {} : styles.inputReadOnly)
+                    }}
+                    value={settings.from_name}
+                    onChange={(e) => handleInputChange('from_name', e.target.value)}
+                    placeholder="Your Business Name"
+                    disabled={!canEditSettings}
+                  />
+                  {errors.from_name && <span style={styles.errorText}>{errors.from_name}</span>}
+                </div>
+
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>
+                    <FiMail style={styles.labelIcon} />
+                    From Email Address *
+                  </label>
+                  <input
+                    type="email"
+                    style={{
+                      ...styles.input,
+                      ...(errors.from_email ? styles.inputError : {}),
+                      ...(canEditSettings ? {} : styles.inputReadOnly)
+                    }}
+                    value={settings.from_email}
+                    onChange={(e) => handleInputChange('from_email', e.target.value)}
+                    placeholder="noreply@yourbusiness.com"
+                    disabled={!canEditSettings}
+                  />
+                  {errors.from_email && <span style={styles.errorText}>{errors.from_email}</span>}
+                  <div style={styles.helpText}>
+                    This email will appear as the sender for all campaigns
+                  </div>
+                </div>
+
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>
+                    <FiMail style={styles.labelIcon} />
+                    Reply-To Email (Optional)
+                  </label>
+                  <input
+                    type="email"
+                    style={{
+                      ...styles.input,
+                      ...(errors.reply_to ? styles.inputError : {}),
+                      ...(canEditSettings ? {} : styles.inputReadOnly)
+                    }}
+                    value={settings.reply_to}
+                    onChange={(e) => handleInputChange('reply_to', e.target.value)}
+                    placeholder="support@yourbusiness.com"
+                    disabled={!canEditSettings}
+                  />
+                  {errors.reply_to && <span style={styles.errorText}>{errors.reply_to}</span>}
+                  <div style={styles.helpText}>
+                    Replies will be sent to this address if different from sender
+                  </div>
+                </div>
+              </div>
+
+              {/* Test Email Button */}
+              <PermissionGate requireElevated>
+                <div style={styles.testSection}>
+                  <button 
+                    style={{
+                      ...styles.testButton,
+                      opacity: emailSendingPaused || !canEditSettings ? 0.5 : 1,
+                      cursor: emailSendingPaused || !canEditSettings ? 'not-allowed' : 'pointer'
+                    }}
+                    onClick={handleTestEmail}
+                    disabled={testing || !settings.from_email || emailSendingPaused || !canEditSettings}
+                  >
+                    {testing ? <FiRefreshCw style={styles.spinningIcon} /> : <FiMail />}
+                    {testing ? 'Testing...' : 'Test Email Configuration'}
+                  </button>
+
+                  {testResult && (
+                    <div style={{
+                      ...styles.testResult,
+                      backgroundColor: testResult.success ? '#e8f5e8' : '#ffebee',
+                      color: testResult.success ? '#2e7d32' : '#c62828'
+                    }}>
+                      {testResult.success ? <FiCheckCircle /> : <FiAlertCircle />}
+                      <span>{testResult.message}</span>
+                    </div>
+                  )}
+                </div>
+              </PermissionGate>
+            </div>
+
+            {/* CASL Compliance */}
+            <div style={styles.section}>
+              <h2 style={styles.sectionTitle}>
+                <FiShield style={styles.sectionIcon} />
+                CASL Compliance
+              </h2>
+              
+              <div style={styles.formGroup}>
                 <label style={styles.label}>
-                  {platform.charAt(0).toUpperCase() + platform.slice(1)}
+                  <FiMapPin style={styles.labelIcon} />
+                  Business Address *
                 </label>
-                <input
-                  type="url"
-                  style={styles.input}
-                  value={url}
-                  onChange={(e) => handleSocialLinkChange(platform, e.target.value)}
-                  placeholder={`https://${platform}.com/yourbusiness`}
+                <textarea
+                  style={{
+                    ...styles.textarea,
+                    ...(errors.business_address ? styles.inputError : {}),
+                    ...(canEditSettings ? {} : styles.inputReadOnly)
+                  }}
+                  value={settings.business_address}
+                  onChange={(e) => handleInputChange('business_address', e.target.value)}
+                  placeholder="123 Main Street, City, Province, Postal Code"
+                  rows={3}
+                  disabled={!canEditSettings}
                 />
+                {errors.business_address && <span style={styles.errorText}>{errors.business_address}</span>}
+                <div style={styles.helpText}>
+                  Required by CASL (Canadian Anti-Spam Legislation) - must appear in all emails
+                </div>
               </div>
-            ))}
-          </div>
-          <div style={styles.helpText}>
-            These links will be available in email templates and footers
-          </div>
-        </div>
+            </div>
 
-        {/* System Settings */}
-        <div style={styles.section}>
-          <h2 style={styles.sectionTitle}>
-            <FiClock style={styles.sectionIcon} />
-            System Settings
-          </h2>
-          
-          <div style={styles.formGrid}>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>
-                Session Timeout (seconds)
-              </label>
-              <input
-                type="number"
-                style={{
-                  ...styles.input,
-                  ...(errors.session_timeout ? styles.inputError : {})
-                }}
-                value={settings.session_timeout}
-                onChange={(e) => handleInputChange('session_timeout', parseInt(e.target.value) || 300)}
-                min={60}
-                max={3600}
-              />
-              {errors.session_timeout && <span style={styles.errorText}>{errors.session_timeout}</span>}
+            {/* Social Media Links */}
+            <div style={styles.section}>
+              <h2 style={styles.sectionTitle}>
+                <FiShield style={styles.sectionIcon} />
+                Social Media Links
+              </h2>
+              
+              <div style={styles.socialGrid}>
+                {Object.entries(settings.social_links).map(([platform, url]) => (
+                  <div key={platform} style={styles.formGroup}>
+                    <label style={styles.label}>
+                      {platform.charAt(0).toUpperCase() + platform.slice(1)}
+                    </label>
+                    <input
+                      type="url"
+                      style={{
+                        ...styles.input,
+                        ...(canEditSettings ? {} : styles.inputReadOnly)
+                      }}
+                      value={url}
+                      onChange={(e) => handleSocialLinkChange(platform, e.target.value)}
+                      placeholder={`https://${platform}.com/yourbusiness`}
+                      disabled={!canEditSettings}
+                    />
+                  </div>
+                ))}
+              </div>
               <div style={styles.helpText}>
-                Auto-lock after inactivity (60-3600 seconds)
+                These links will be available in email templates and footers
               </div>
             </div>
 
-            <div style={styles.formGroup}>
-              <label style={styles.label}>
-                Max Email Retries
-              </label>
-              <input
-                type="number"
-                style={{
-                  ...styles.input,
-                  ...(errors.max_retries ? styles.inputError : {})
-                }}
-                value={settings.max_retries}
-                onChange={(e) => handleInputChange('max_retries', parseInt(e.target.value) || 3)}
-                min={1}
-                max={10}
-              />
-              {errors.max_retries && <span style={styles.errorText}>{errors.max_retries}</span>}
-              <div style={styles.helpText}>
-                Number of retry attempts for failed emails
+            {/* System Settings */}
+            <div style={styles.section}>
+              <h2 style={styles.sectionTitle}>
+                <FiClock style={styles.sectionIcon} />
+                System Settings
+              </h2>
+              
+              <div style={styles.formGrid}>
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>
+                    Session Timeout (seconds)
+                  </label>
+                  <input
+                    type="number"
+                    style={{
+                      ...styles.input,
+                      ...(errors.session_timeout ? styles.inputError : {}),
+                      ...(canEditSettings ? {} : styles.inputReadOnly)
+                    }}
+                    value={settings.session_timeout}
+                    onChange={(e) => handleInputChange('session_timeout', parseInt(e.target.value) || 300)}
+                    min={60}
+                    max={3600}
+                    disabled={!canEditSettings}
+                  />
+                  {errors.session_timeout && <span style={styles.errorText}>{errors.session_timeout}</span>}
+                  <div style={styles.helpText}>
+                    Auto-lock after inactivity (60-3600 seconds)
+                  </div>
+                </div>
+
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>
+                    Max Email Retries
+                  </label>
+                  <input
+                    type="number"
+                    style={{
+                      ...styles.input,
+                      ...(errors.max_retries ? styles.inputError : {}),
+                      ...(canEditSettings ? {} : styles.inputReadOnly)
+                    }}
+                    value={settings.max_retries}
+                    onChange={(e) => handleInputChange('max_retries', parseInt(e.target.value) || 3)}
+                    min={1}
+                    max={10}
+                    disabled={!canEditSettings}
+                  />
+                  {errors.max_retries && <span style={styles.errorText}>{errors.max_retries}</span>}
+                  <div style={styles.helpText}>
+                    Number of retry attempts for failed emails
+                  </div>
+                </div>
+              </div>
+
+              <div style={styles.formGroup}>
+                <label style={styles.checkboxLabel}>
+                  <input
+                    type="checkbox"
+                    checked={settings.auto_retry_failed}
+                    onChange={(e) => handleInputChange('auto_retry_failed', e.target.checked)}
+                    style={styles.checkbox}
+                    disabled={!canEditSettings}
+                  />
+                  Automatically retry failed emails
+                </label>
+                <div style={styles.helpText}>
+                  Failed emails will be retried automatically with exponential backoff
+                </div>
               </div>
             </div>
           </div>
 
-          <div style={styles.formGroup}>
-            <label style={styles.checkboxLabel}>
-              <input
-                type="checkbox"
-                checked={settings.auto_retry_failed}
-                onChange={(e) => handleInputChange('auto_retry_failed', e.target.checked)}
-                style={styles.checkbox}
-              />
-              Automatically retry failed emails
-            </label>
-            <div style={styles.helpText}>
-              Failed emails will be retried automatically with exponential backoff
+          {/* Save Button */}
+          <PermissionGate
+            requireElevated
+            fallback={
+              <div style={styles.saveSection}>
+                <div style={styles.permissionDenied}>
+                  <FiAlertCircle style={styles.permissionIcon} />
+                  <p>Only owners and administrators can save mail settings</p>
+                </div>
+              </div>
+            }
+          >
+            <div style={styles.saveSection}>
+              <button 
+                style={styles.saveButton}
+                onClick={handleSave}
+                disabled={saving}
+              >
+                {saving ? <FiRefreshCw style={styles.spinningIcon} /> : <FiSave />}
+                {saving ? 'Saving...' : 'Save Settings'}
+              </button>
             </div>
-          </div>
+          </PermissionGate>
         </div>
-      </div>
-
-      {/* Save Button */}
-      <div style={styles.saveSection}>
-        <button 
-          style={styles.saveButton}
-          onClick={handleSave}
-          disabled={saving}
-        >
-          {saving ? <FiRefreshCw style={styles.spinningIcon} /> : <FiSave />}
-          {saving ? 'Saving...' : 'Save Settings'}
-        </button>
-      </div>
-    </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 
@@ -650,6 +913,18 @@ const styles = {
     color: 'teal',
     animation: 'spin 1s linear infinite',
   },
+  error: {
+    textAlign: 'center',
+    padding: '60px 20px',
+    backgroundColor: 'white',
+    borderRadius: '8px',
+    border: '1px solid #ddd',
+  },
+  errorIcon: {
+    fontSize: '48px',
+    color: '#f44336',
+    marginBottom: '20px',
+  },
   header: {
     marginBottom: '30px',
     backgroundColor: 'white',
@@ -675,6 +950,34 @@ const styles = {
     color: '#666',
     margin: 0,
     lineHeight: '1.5',
+  },
+  readOnlyBadge: {
+    marginTop: '15px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '12px',
+    backgroundColor: '#fff3cd',
+    border: '1px solid #f39c12',
+    borderRadius: '6px',
+    color: '#856404',
+    fontSize: '14px',
+    fontWeight: 'bold',
+  },
+  readOnlyIcon: {
+    fontSize: '16px',
+  },
+  permissionDenied: {
+    backgroundColor: '#fff3cd',
+    border: '2px solid #f39c12',
+    borderRadius: '8px',
+    padding: '30px',
+    textAlign: 'center',
+    color: '#856404',
+  },
+  permissionIcon: {
+    fontSize: '48px',
+    marginBottom: '16px',
   },
   message: {
     display: 'flex',
@@ -774,6 +1077,55 @@ const styles = {
   buttonIcon: {
     fontSize: '16px',
   },
+  testingModeCard: {
+    marginTop: '10px',
+    padding: '20px',
+    borderRadius: '8px',
+    border: '1px dashed #9fa8da',
+    backgroundColor: '#e8eaf6',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '15px',
+  },
+  testingModeHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    fontSize: '18px',
+    fontWeight: 'bold',
+    color: '#283593',
+  },
+  testingModeIcon: {
+    fontSize: '18px',
+  },
+  testingModeBody: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    color: '#283593',
+    fontSize: '14px',
+  },
+  testingModeStatusText: {
+    margin: 0,
+  },
+  testingModeHelp: {
+    margin: 0,
+    color: '#303f9f',
+    lineHeight: 1.5,
+  },
+  testingModeButton: {
+    alignSelf: 'flex-start',
+    border: 'none',
+    borderRadius: '6px',
+    padding: '12px 20px',
+    color: '#fff',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+  },
   formGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
@@ -808,6 +1160,11 @@ const styles = {
     borderRadius: '8px',
     transition: 'border-color 0.2s ease',
     boxSizing: 'border-box',
+  },
+  inputReadOnly: {
+    backgroundColor: '#f5f5f5',
+    cursor: 'not-allowed',
+    opacity: 0.7,
   },
   textarea: {
     padding: '12px',

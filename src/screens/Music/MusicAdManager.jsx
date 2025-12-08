@@ -1,7 +1,7 @@
-// src/screens/Music/MusicAdManager.jsx - Updated with Tavari Build Standards
+// src/screens/Music/MusicAdManager.jsx - WITH PERMISSION SYSTEM INTEGRATION
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FiDollarSign, FiUpload, FiPlay, FiPause, FiSettings, FiBarChart, FiToggleLeft, FiToggleRight, FiAlertCircle, FiCheckCircle, FiTrash2, FiEdit } from 'react-icons/fi';
+import { FiDollarSign, FiUpload, FiPlay, FiPause, FiSettings, FiBarChart, FiToggleLeft, FiToggleRight, FiAlertCircle, FiCheckCircle, FiTrash2, FiEdit, FiLock, FiEye } from 'react-icons/fi';
 
 // Tavari Build Standards - Required imports
 import { TavariStyles } from '../../utils/TavariStyles';
@@ -12,12 +12,17 @@ import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { useSecurityContext } from '../../Security/useSecurityContext';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 
+// Permission system integration
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
+
 // Database connection
 import { supabase } from '../../supabaseClient';
 
 /**
  * Music Ad Manager - Manage advertisements and revenue
- * Integrates with all Tavari build standards for consistency
+ * Integrates with Tavari permission system for access control
  */
 const MusicAdManager = () => {
   const navigate = useNavigate();
@@ -29,10 +34,21 @@ const MusicAdManager = () => {
     componentName: 'MusicAdManager'
   });
 
+  // Permission system integration
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   // Tavari standardized security
+  // DISABLED device tracking to prevent AudioContext errors
   const security = useSecurityContext({
     enableRateLimiting: true,
-    enableDeviceTracking: true,
+    enableDeviceTracking: false, // DISABLED - prevents AudioContext errors
     enableInputValidation: true,
     enableAuditLogging: true,
     componentName: 'MusicAdManager',
@@ -64,28 +80,49 @@ const MusicAdManager = () => {
   const [errors, setErrors] = useState({});
   const [showRevenueDetails, setShowRevenueDetails] = useState(false);
 
+  // Permission checks based on permissionRegistry.js
+  const canManageAds = hasPermission('music.ads.manage') || hasElevatedPrivileges();
+  const canEditSettings = hasPermission('music.settings.edit') || hasElevatedPrivileges();
+  const canViewRevenue = hasAnyPermission(['reports.financial.view', 'music.ads.manage']) || hasElevatedPrivileges();
+  const canUploadAds = hasPermission('music.ads.manage') || isOwner();
+  const canDeleteAds = hasPermission('music.ads.manage') || isOwner();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canManageAds) {
+      toast.error('You do not have permission to manage music advertisements');
+      navigate('/dashboard/music/dashboard');
+    }
+  }, [permissionsLoading, canManageAds, navigate]);
+
   // Load data when authenticated
   useEffect(() => {
-    if (auth.isReady && auth.selectedBusinessId) {
+    if (auth.isReady && auth.selectedBusinessId && !permissionsLoading) {
       loadAllData();
     }
-  }, [auth.isReady, auth.selectedBusinessId]);
+  }, [auth.isReady, auth.selectedBusinessId, permissionsLoading]);
 
   /**
    * Load all ad-related data
    */
   const loadAllData = async () => {
+    // Check permission before loading
+    if (!canManageAds) {
+      toast.error('You do not have permission to view ad data');
+      return;
+    }
+
     setLoading(true);
     try {
       await Promise.all([
         loadNetworkAds(),
         loadLocalAds(),
         loadAdSettings(),
-        loadAdStats()
-      ]);
+        canViewRevenue && loadAdStats()
+      ].filter(Boolean));
     } catch (error) {
-      console.error('Error loading ad data:', error);
       setErrors(prev => ({ ...prev, loading: 'Failed to load ad data' }));
+      toast.error('Failed to load ad data');
     } finally {
       setLoading(false);
     }
@@ -113,7 +150,6 @@ const MusicAdManager = () => {
       }, 'low');
 
     } catch (error) {
-      console.error('Error loading network ads:', error);
       setErrors(prev => ({ ...prev, networkAds: 'Failed to load network ads' }));
     }
   };
@@ -133,7 +169,6 @@ const MusicAdManager = () => {
       setLocalAds(data || []);
 
     } catch (error) {
-      console.error('Error loading local ads:', error);
       setErrors(prev => ({ ...prev, localAds: 'Failed to load local ads' }));
     }
   };
@@ -159,7 +194,6 @@ const MusicAdManager = () => {
         });
       }
     } catch (error) {
-      console.error('Error loading ad settings:', error);
       setErrors(prev => ({ ...prev, settings: 'Failed to load ad settings' }));
     }
   };
@@ -168,6 +202,11 @@ const MusicAdManager = () => {
    * Load ad statistics
    */
   const loadAdStats = async () => {
+    // Check permission before loading financial data
+    if (!canViewRevenue) {
+      return;
+    }
+
     try {
       const today = new Date().toISOString().split('T')[0];
       
@@ -208,7 +247,6 @@ const MusicAdManager = () => {
       });
 
     } catch (error) {
-      console.error('Error loading ad stats:', error);
       setErrors(prev => ({ ...prev, stats: 'Failed to load ad statistics' }));
     }
   };
@@ -217,6 +255,12 @@ const MusicAdManager = () => {
    * Update ad settings with security logging
    */
   const updateAdSettings = async (newSettings) => {
+    // Permission check
+    if (!canEditSettings) {
+      toast.error('You do not have permission to edit ad settings');
+      return;
+    }
+
     // Validate input
     const validatedSettings = security.validateInput(newSettings, {
       frequency: 'number',
@@ -228,6 +272,7 @@ const MusicAdManager = () => {
 
     if (!validatedSettings.isValid) {
       setErrors(prev => ({ ...prev, settings: 'Invalid settings data' }));
+      toast.error('Invalid settings data');
       return;
     }
 
@@ -250,6 +295,7 @@ const MusicAdManager = () => {
 
       setAdSettings(newSettings);
       setErrors(prev => ({ ...prev, settings: null }));
+      toast.success('Ad settings updated successfully');
 
       // Log settings change
       await security.logSecurityEvent('ad_settings_updated', {
@@ -258,8 +304,8 @@ const MusicAdManager = () => {
       }, 'medium');
 
     } catch (error) {
-      console.error('Error updating ad settings:', error);
       setErrors(prev => ({ ...prev, settings: 'Failed to update ad settings' }));
+      toast.error('Failed to update ad settings');
     }
   };
 
@@ -267,21 +313,30 @@ const MusicAdManager = () => {
    * Upload local ad with security validation
    */
   const uploadLocalAd = async (file, adInfo) => {
+    // Permission check
+    if (!canUploadAds) {
+      toast.error('You do not have permission to upload advertisements');
+      return;
+    }
+
     // Input validation
     if (!file || !adInfo.title) {
       setErrors(prev => ({ ...prev, upload: 'File and title are required' }));
+      toast.error('File and title are required');
       return;
     }
 
     // File type validation
     if (!file.type.includes('audio')) {
       setErrors(prev => ({ ...prev, upload: 'Only audio files are allowed' }));
+      toast.error('Only audio files are allowed');
       return;
     }
 
     // File size validation (10MB max)
     if (file.size > 10 * 1024 * 1024) {
       setErrors(prev => ({ ...prev, upload: 'File size must be under 10MB' }));
+      toast.error('File size must be under 10MB');
       return;
     }
 
@@ -336,12 +391,13 @@ const MusicAdManager = () => {
         title: adInfo.title
       }, 'medium');
 
+      toast.success('Advertisement uploaded successfully');
       loadLocalAds(); // Refresh the list
       setErrors(prev => ({ ...prev, upload: null }));
 
     } catch (error) {
-      console.error('Upload error:', error);
       setErrors(prev => ({ ...prev, upload: `Failed to upload ad: ${error.message}` }));
+      toast.error(`Failed to upload ad: ${error.message}`);
     } finally {
       setUploadingAd(false);
     }
@@ -351,6 +407,12 @@ const MusicAdManager = () => {
    * Handle local ad upload with enhanced UI
    */
   const handleLocalAdUpload = () => {
+    // Permission check
+    if (!canUploadAds) {
+      toast.error('You do not have permission to upload advertisements');
+      return;
+    }
+
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.accept = '.mp3,.wav,.m4a,audio/*';
@@ -375,11 +437,18 @@ const MusicAdManager = () => {
    * Simulate ad play with proper tracking
    */
   const simulateAdPlay = async (ad, isLocal = false) => {
+    // Permission check
+    if (!canManageAds) {
+      toast.error('You do not have permission to test advertisements');
+      return;
+    }
+
     try {
       // Rate limiting for ad testing
       const rateLimitResult = await security.checkRateLimit('ad_test_play', 10, 60000); // 10 per minute
       if (!rateLimitResult.allowed) {
         setErrors(prev => ({ ...prev, play: 'Too many test plays. Please wait.' }));
+        toast.warning('Too many test plays. Please wait.');
         return;
       }
 
@@ -405,12 +474,15 @@ const MusicAdManager = () => {
         ad_title: ad.title
       }, 'low');
 
-      loadAdStats(); // Refresh stats
+      toast.success('Test play recorded successfully');
+      if (canViewRevenue) {
+        loadAdStats(); // Refresh stats if user can view them
+      }
       setErrors(prev => ({ ...prev, play: null }));
 
     } catch (error) {
-      console.error('Error logging ad play:', error);
       setErrors(prev => ({ ...prev, play: 'Failed to log ad play' }));
+      toast.error('Failed to log ad play');
     }
   };
 
@@ -418,6 +490,12 @@ const MusicAdManager = () => {
    * Delete local ad
    */
   const deleteLocalAd = async (adId) => {
+    // Permission check
+    if (!canDeleteAds) {
+      toast.error('You do not have permission to delete advertisements');
+      return;
+    }
+
     if (!window.confirm('Are you sure you want to delete this ad?')) {
       return;
     }
@@ -437,11 +515,12 @@ const MusicAdManager = () => {
         deleted_by: auth.authUser.id
       }, 'medium');
 
+      toast.success('Advertisement deleted successfully');
       loadLocalAds();
 
     } catch (error) {
-      console.error('Error deleting ad:', error);
       setErrors(prev => ({ ...prev, delete: 'Failed to delete ad' }));
+      toast.error('Failed to delete ad');
     }
   };
 
@@ -481,6 +560,24 @@ const MusicAdManager = () => {
     subtitle: {
       fontSize: TavariStyles.typography.fontSize.lg,
       color: TavariStyles.colors.gray600
+    },
+
+    readOnlyBadge: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.md}`,
+      backgroundColor: TavariStyles.colors.warningBg,
+      border: `2px solid ${TavariStyles.colors.warning}`,
+      borderRadius: TavariStyles.borderRadius.md,
+      color: TavariStyles.colors.warningText,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      fontWeight: TavariStyles.typography.fontWeight.medium,
+      marginTop: TavariStyles.spacing.md
+    },
+
+    readOnlyIcon: {
+      fontSize: TavariStyles.typography.fontSize.md
     },
 
     // Error banner
@@ -534,6 +631,11 @@ const MusicAdManager = () => {
       color: TavariStyles.colors.gray600
     },
 
+    lockedStat: {
+      filter: 'blur(4px)',
+      pointerEvents: 'none'
+    },
+
     // Settings section
     settingsSection: {
       ...TavariStyles.layout.card,
@@ -566,6 +668,13 @@ const MusicAdManager = () => {
 
     settingSelect: {
       ...TavariStyles.components.form.select
+    },
+
+    disabledSelect: {
+      ...TavariStyles.components.form.select,
+      backgroundColor: TavariStyles.colors.gray100,
+      cursor: 'not-allowed',
+      opacity: 0.6
     },
 
     toggle: {
@@ -605,6 +714,14 @@ const MusicAdManager = () => {
       backgroundColor: TavariStyles.colors.gray400,
       color: TavariStyles.colors.white,
       cursor: 'not-allowed'
+    },
+
+    lockedButton: {
+      ...TavariStyles.components.button.base,
+      backgroundColor: TavariStyles.colors.gray300,
+      color: TavariStyles.colors.gray600,
+      cursor: 'not-allowed',
+      border: `2px solid ${TavariStyles.colors.gray400}`
     },
 
     // Ads sections
@@ -702,10 +819,42 @@ const MusicAdManager = () => {
       padding: TavariStyles.spacing.lg,
       marginTop: TavariStyles.spacing.md,
       backgroundColor: TavariStyles.colors.gray50
+    },
+
+    accessDenied: {
+      ...TavariStyles.layout.card,
+      padding: TavariStyles.spacing['4xl'],
+      textAlign: 'center',
+      marginTop: TavariStyles.spacing['4xl']
+    },
+
+    accessDeniedIcon: {
+      fontSize: '64px',
+      color: TavariStyles.colors.danger,
+      marginBottom: TavariStyles.spacing.lg
+    },
+
+    accessDeniedTitle: {
+      fontSize: TavariStyles.typography.fontSize['2xl'],
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray800,
+      marginBottom: TavariStyles.spacing.md
+    },
+
+    accessDeniedText: {
+      fontSize: TavariStyles.typography.fontSize.md,
+      color: TavariStyles.colors.gray600,
+      marginBottom: TavariStyles.spacing.xl
+    },
+
+    backButton: {
+      ...TavariStyles.components.button.base,
+      ...TavariStyles.components.button.variants.primary
     }
   };
 
-  if (loading) {
+  // Show loading while permissions are being checked
+  if (permissionsLoading || loading) {
     return (
       <POSAuthWrapper 
         componentName="MusicAdManager"
@@ -715,7 +864,43 @@ const MusicAdManager = () => {
           componentName="MusicAdManager"
           sensitiveComponent={true}
         >
-          <div style={styles.loading}>Loading Ad Manager...</div>
+          <div style={styles.loading}>
+            {permissionsLoading ? 'Loading permissions...' : 'Loading Ad Manager...'}
+          </div>
+        </SecurityWrapper>
+      </POSAuthWrapper>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canManageAds) {
+    return (
+      <POSAuthWrapper 
+        componentName="MusicAdManager"
+        requiredRoles={['manager', 'owner']}
+      >
+        <SecurityWrapper 
+          componentName="MusicAdManager"
+          sensitiveComponent={true}
+        >
+          <div style={styles.container}>
+            <div style={styles.accessDenied}>
+              <FiLock style={styles.accessDeniedIcon} />
+              <h2 style={styles.accessDeniedTitle}>Access Denied</h2>
+              <p style={styles.accessDeniedText}>
+                You do not have permission to manage music advertisements.
+              </p>
+              <p style={styles.accessDeniedText}>
+                Contact your administrator to request access.
+              </p>
+              <button 
+                style={styles.backButton}
+                onClick={() => navigate('/dashboard/music/dashboard')}
+              >
+                Back to Music Dashboard
+              </button>
+            </div>
+          </div>
         </SecurityWrapper>
       </POSAuthWrapper>
     );
@@ -745,78 +930,108 @@ const MusicAdManager = () => {
             <p style={styles.subtitle}>
               Manage advertisements and revenue for {auth.businessData?.name || 'your business'}
             </p>
+            {!canEditSettings && (
+              <div style={styles.readOnlyBadge}>
+                <FiAlertCircle style={styles.readOnlyIcon} />
+                <span>Limited Access - Contact admin for full permissions</span>
+              </div>
+            )}
           </div>
 
-          {/* Revenue Stats */}
-          <div style={styles.statsSection}>
-            <div style={styles.statCard}>
-              <FiBarChart style={styles.statIcon} />
-              <div style={styles.statContent}>
-                <div style={styles.statNumber}>{adStats.totalPlays}</div>
-                <div style={styles.statLabel}>Network Ad Plays</div>
+          {/* Revenue Stats - Protected by permission */}
+          <PermissionGate
+            permissions={['reports.financial.view', 'music.ads.manage']}
+            requireAny
+            fallback={
+              <div style={styles.statsSection}>
+                <div style={{...styles.statCard, ...styles.lockedStat}}>
+                  <FiLock style={styles.statIcon} />
+                  <div style={styles.statContent}>
+                    <div style={styles.statNumber}>***</div>
+                    <div style={styles.statLabel}>Revenue Data Locked</div>
+                  </div>
+                </div>
               </div>
-            </div>
-
-            <div style={styles.statCard}>
-              <FiPlay style={styles.statIcon} />
-              <div style={styles.statContent}>
-                <div style={styles.statNumber}>{adStats.localAdPlays}</div>
-                <div style={styles.statLabel}>Local Ad Plays</div>
+            }
+          >
+            <div style={styles.statsSection}>
+              <div style={styles.statCard}>
+                <FiBarChart style={styles.statIcon} />
+                <div style={styles.statContent}>
+                  <div style={styles.statNumber}>{adStats.totalPlays}</div>
+                  <div style={styles.statLabel}>Network Ad Plays</div>
+                </div>
               </div>
-            </div>
 
-            <div style={styles.statCard}>
-              <FiDollarSign style={styles.statIcon} />
-              <div style={styles.statContent}>
-                <div style={styles.statNumber}>${adStats.revenue?.toFixed(2) || '0.00'}</div>
-                <div style={styles.statLabel}>
-                  Total Revenue
-                  <button
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: TavariStyles.colors.primary,
-                      cursor: 'pointer',
-                      marginLeft: TavariStyles.spacing.xs
-                    }}
-                    onClick={() => setShowRevenueDetails(!showRevenueDetails)}
-                  >
-                    (Details)
-                  </button>
+              <div style={styles.statCard}>
+                <FiPlay style={styles.statIcon} />
+                <div style={styles.statContent}>
+                  <div style={styles.statNumber}>{adStats.localAdPlays}</div>
+                  <div style={styles.statLabel}>Local Ad Plays</div>
+                </div>
+              </div>
+
+              <div style={styles.statCard}>
+                <FiDollarSign style={styles.statIcon} />
+                <div style={styles.statContent}>
+                  <div style={styles.statNumber}>${adStats.revenue?.toFixed(2) || '0.00'}</div>
+                  <div style={styles.statLabel}>
+                    Total Revenue
+                    <button
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: TavariStyles.colors.primary,
+                        cursor: 'pointer',
+                        marginLeft: TavariStyles.spacing.xs
+                      }}
+                      onClick={() => setShowRevenueDetails(!showRevenueDetails)}
+                    >
+                      (Details)
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div style={styles.statCard}>
+                <FiCheckCircle style={styles.statIcon} />
+                <div style={styles.statContent}>
+                  <div style={styles.statNumber}>{adStats.todayPlays}</div>
+                  <div style={styles.statLabel}>Today's Plays</div>
                 </div>
               </div>
             </div>
 
-            <div style={styles.statCard}>
-              <FiCheckCircle style={styles.statIcon} />
-              <div style={styles.statContent}>
-                <div style={styles.statNumber}>{adStats.todayPlays}</div>
-                <div style={styles.statLabel}>Today's Plays</div>
+            {/* Revenue Details */}
+            {showRevenueDetails && adStats.taxAmount !== undefined && (
+              <div style={styles.revenueDetails}>
+                <h4>Revenue Breakdown:</h4>
+                <p>Gross Revenue: ${adStats.revenue?.toFixed(2) || '0.00'}</p>
+                <p>Tax Amount: ${adStats.taxAmount?.toFixed(2) || '0.00'}</p>
+                <p>Net Revenue: ${((adStats.revenue || 0) - (adStats.taxAmount || 0)).toFixed(2)}</p>
               </div>
-            </div>
-          </div>
+            )}
+          </PermissionGate>
 
-          {/* Revenue Details */}
-          {showRevenueDetails && adStats.taxAmount !== undefined && (
-            <div style={styles.revenueDetails}>
-              <h4>Revenue Breakdown:</h4>
-              <p>Gross Revenue: ${adStats.revenue?.toFixed(2) || '0.00'}</p>
-              <p>Tax Amount: ${adStats.taxAmount?.toFixed(2) || '0.00'}</p>
-              <p>Net Revenue: ${((adStats.revenue || 0) - (adStats.taxAmount || 0)).toFixed(2)}</p>
-            </div>
-          )}
-
-          {/* Ad Settings */}
+          {/* Ad Settings - Protected by permission */}
           <div style={styles.settingsSection}>
             <h2 style={styles.sectionTitle}>Advertisement Settings</h2>
+            
+            {!canEditSettings && (
+              <div style={{...styles.readOnlyBadge, marginBottom: TavariStyles.spacing.lg}}>
+                <FiLock style={styles.readOnlyIcon} />
+                <span>Settings are read-only. Contact admin to make changes.</span>
+              </div>
+            )}
             
             <div style={styles.settingsGrid}>
               <div style={styles.settingItem}>
                 <label style={styles.settingLabel}>Ad Frequency</label>
                 <select
-                  style={styles.settingSelect}
+                  style={canEditSettings ? styles.settingSelect : styles.disabledSelect}
                   value={adSettings.frequency}
                   onChange={(e) => updateAdSettings({...adSettings, frequency: parseInt(e.target.value)})}
+                  disabled={!canEditSettings}
                 >
                   <option value={3}>Every 3 songs</option>
                   <option value={5}>Every 5 songs</option>
@@ -829,9 +1044,10 @@ const MusicAdManager = () => {
               <div style={styles.settingItem}>
                 <label style={styles.settingLabel}>Ad Volume</label>
                 <select
-                  style={styles.settingSelect}
+                  style={canEditSettings ? styles.settingSelect : styles.disabledSelect}
                   value={adSettings.volume_adjustment}
                   onChange={(e) => updateAdSettings({...adSettings, volume_adjustment: parseFloat(e.target.value)})}
+                  disabled={!canEditSettings}
                 >
                   <option value={0.6}>60% of music volume</option>
                   <option value={0.7}>70% of music volume</option>
@@ -845,45 +1061,63 @@ const MusicAdManager = () => {
             <div style={styles.checkboxContainer}>
               <TavariCheckbox
                 checked={adSettings.enabled}
-                onChange={(checked) => updateAdSettings({...adSettings, enabled: checked})}
+                onChange={(checked) => canEditSettings && updateAdSettings({...adSettings, enabled: checked})}
                 label="Enable all advertisements"
                 size="md"
+                disabled={!canEditSettings}
               />
             </div>
 
             <div style={styles.checkboxContainer}>
               <TavariCheckbox
                 checked={adSettings.networkAdsEnabled}
-                onChange={(checked) => updateAdSettings({...adSettings, networkAdsEnabled: checked})}
+                onChange={(checked) => canEditSettings && updateAdSettings({...adSettings, networkAdsEnabled: checked})}
                 label="Enable network advertisements (revenue generating)"
                 size="md"
+                disabled={!canEditSettings}
               />
             </div>
 
             <div style={styles.checkboxContainer}>
               <TavariCheckbox
                 checked={adSettings.localAdsEnabled}
-                onChange={(checked) => updateAdSettings({...adSettings, localAdsEnabled: checked})}
+                onChange={(checked) => canEditSettings && updateAdSettings({...adSettings, localAdsEnabled: checked})}
                 label="Enable local business advertisements"
                 size="md"
+                disabled={!canEditSettings}
               />
             </div>
           </div>
 
-          {/* Local Ad Upload */}
+          {/* Local Ad Upload - Protected by permission */}
           <div style={styles.uploadSection}>
             <h2 style={styles.sectionTitle}>Upload Local Advertisement</h2>
             <p style={styles.uploadDescription}>
               Upload your own advertisements to promote your business or products
             </p>
-            <button
-              style={uploadingAd ? styles.disabledButton : styles.uploadButton}
-              onClick={handleLocalAdUpload}
-              disabled={uploadingAd}
+            
+            <PermissionGate
+              permission="music.ads.manage"
+              fallback={
+                <button
+                  style={styles.lockedButton}
+                  disabled
+                  title="You don't have permission to upload ads"
+                >
+                  <FiLock size={20} />
+                  Upload Locked
+                </button>
+              }
             >
-              <FiUpload size={20} />
-              {uploadingAd ? 'Uploading...' : 'Upload Local Ad'}
-            </button>
+              <button
+                style={uploadingAd ? styles.disabledButton : styles.uploadButton}
+                onClick={handleLocalAdUpload}
+                disabled={uploadingAd}
+              >
+                <FiUpload size={20} />
+                {uploadingAd ? 'Uploading...' : 'Upload Local Ad'}
+              </button>
+            </PermissionGate>
           </div>
 
           {/* Local Ads */}
@@ -907,20 +1141,49 @@ const MusicAdManager = () => {
                       </p>
                     </div>
                     <div style={styles.adActions}>
-                      <button
-                        style={styles.actionButton}
-                        onClick={() => simulateAdPlay(ad, true)}
+                      {/* Test button - always visible if user can manage ads */}
+                      <PermissionGate
+                        permission="music.ads.manage"
+                        fallback={
+                          <button
+                            style={{...styles.actionButton, opacity: 0.5}}
+                            disabled
+                            title="You don't have permission to test ads"
+                          >
+                            <FiLock size={16} />
+                          </button>
+                        }
                       >
-                        <FiPlay size={16} />
-                        Test
-                      </button>
-                      <button
-                        style={styles.dangerButton}
-                        onClick={() => deleteLocalAd(ad.id)}
+                        <button
+                          style={styles.actionButton}
+                          onClick={() => simulateAdPlay(ad, true)}
+                        >
+                          <FiPlay size={16} />
+                          Test
+                        </button>
+                      </PermissionGate>
+
+                      {/* Delete button - restricted to owners */}
+                      <PermissionGate
+                        requireOwner
+                        fallback={
+                          <button
+                            style={{...styles.dangerButton, opacity: 0.5}}
+                            disabled
+                            title="Only owners can delete ads"
+                          >
+                            <FiLock size={16} />
+                          </button>
+                        }
                       >
-                        <FiTrash2 size={16} />
-                        Delete
-                      </button>
+                        <button
+                          style={styles.dangerButton}
+                          onClick={() => deleteLocalAd(ad.id)}
+                        >
+                          <FiTrash2 size={16} />
+                          Delete
+                        </button>
+                      </PermissionGate>
                     </div>
                   </div>
                 ))}
@@ -950,13 +1213,27 @@ const MusicAdManager = () => {
                       </p>
                     </div>
                     <div style={styles.adActions}>
-                      <button
-                        style={styles.actionButton}
-                        onClick={() => simulateAdPlay(ad, false)}
+                      {/* Test play button - protected */}
+                      <PermissionGate
+                        permission="music.ads.manage"
+                        fallback={
+                          <button
+                            style={{...styles.actionButton, opacity: 0.5}}
+                            disabled
+                            title="You don't have permission to test ads"
+                          >
+                            <FiLock size={16} />
+                          </button>
+                        }
                       >
-                        <FiPlay size={16} />
-                        Test Play
-                      </button>
+                        <button
+                          style={styles.actionButton}
+                          onClick={() => simulateAdPlay(ad, false)}
+                        >
+                          <FiPlay size={16} />
+                          Test Play
+                        </button>
+                      </PermissionGate>
                     </div>
                   </div>
                 ))}
@@ -974,6 +1251,7 @@ const MusicAdManager = () => {
               <li>All ad plays are tracked for accurate revenue reporting</li>
               <li>Tax calculations are automatically applied to ad revenue</li>
               <li>Revenue reports help you understand the value of the ad system</li>
+              <li><strong>Permission levels:</strong> Managers can view and test ads, Owners can also upload and delete</li>
             </ul>
           </div>
         </div>

@@ -1,76 +1,95 @@
+// screens/HR/HRDashboard.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { useNavigate } from 'react-router-dom';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import toast from 'react-hot-toast';
 
 const HRDashboard = () => {
-  const [user, setUser] = useState(null);
-  const [business, setBusiness] = useState(null);
-  const [userRole, setUserRole] = useState(null);
+  const navigate = useNavigate();
+
+  // Security context
+  const {
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'HRDashboard',
+    sensitiveComponent: false,
+    enableRateLimiting: false,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Authentication
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin', 'hr_admin'],
+    requireBusiness: true,
+    componentName: 'HRDashboard'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Component state
   const [loading, setLoading] = useState(true);
   const [dashboardStats, setDashboardStats] = useState(null);
   const [error, setError] = useState(null);
-  const navigate = useNavigate();
+
+  // Permission checks
+  const canViewHRDashboard = hasAnyPermission([
+    'hr.dashboard.view',
+    'hr.employees.view'
+  ]) || hasElevatedPrivileges();
+
+  const canAccessEmployees = hasAnyPermission(['hr.employees.view', 'hr.employees.view_all']) || hasElevatedPrivileges();
+  const canAccessOnboarding = hasPermission('hr.onboarding.view') || hasElevatedPrivileges();
+  const canAccessContracts = hasPermission('hr.contracts.view') || hasElevatedPrivileges();
+  const canAccessPolicies = hasPermission('hr.policies.view') || hasElevatedPrivileges();
+  const canAccessWriteups = hasPermission('hr.writeups.view') || hasElevatedPrivileges();
+  const canAccessDocuments = hasPermission('hr.documents.view') || hasElevatedPrivileges();
+  const canAccessSettings = hasPermission('hr.settings.manage') || isOwner();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewHRDashboard) {
+      toast.error('You do not have permission to access the HR Dashboard');
+      navigate('/dashboard/home');
+    }
+  }, [permissionsLoading, canViewHRDashboard]);
 
   useEffect(() => {
-    checkUserAndBusiness();
-  }, []);
-
-  const checkUserAndBusiness = async () => {
-    try {
-      // Check if user is authenticated
-      const { data: { user }, error: userError } = await supabase.auth.getUser();
-      
-      if (userError || !user) {
-        console.error('Authentication error:', userError);
-        navigate('/login');
-        return;
-      }
-
-      setUser(user);
-
-      // Get user's business association and role
-      const { data: businessUsers, error: businessError } = await supabase
-        .from('business_users')
-        .select(`
-          business_id, 
-          role,
-          businesses(id, name)
-        `)
-        .eq('user_id', user.id)
-        .single();
-
-      if (businessError || !businessUsers) {
-        console.error('Error loading business:', businessError);
-        setError('Unable to load business information. Please contact support.');
-        setLoading(false);
-        return;
-      }
-
-      setBusiness(businessUsers.businesses);
-      setUserRole(businessUsers.role);
-      
-      // Check if user has HR permissions
-      const hasHRAccess = ['owner', 'admin', 'manager'].includes(businessUsers.role.toLowerCase());
-      
-      if (!hasHRAccess) {
-        setError('You do not have permission to access the HR module.');
-        setLoading(false);
-        return;
-      }
-
-      // Load dashboard statistics
-      await loadDashboardStats(businessUsers.business_id);
-      
-    } catch (error) {
-      console.error('Error checking user and business:', error);
-      setError('An unexpected error occurred. Please try again.');
-    } finally {
-      setLoading(false);
+    if (selectedBusinessId && !authLoading && !permissionsLoading && canViewHRDashboard) {
+      loadDashboardStats();
     }
-  };
+  }, [selectedBusinessId, authLoading, permissionsLoading, canViewHRDashboard]);
 
-  const loadDashboardStats = async (businessId) => {
+  const loadDashboardStats = async () => {
     try {
+      setLoading(true);
+
+      await logSecurityEvent('hr_dashboard_access', {
+        action: 'view_hr_dashboard',
+        business_id: selectedBusinessId
+      }, 'low');
+
       // Calculate stats directly from users table
       const { data: employees, error } = await supabase
         .from('users')
@@ -82,7 +101,7 @@ const HRDashboard = () => {
           start_date,
           business_users!inner(business_id)
         `)
-        .eq('business_users.business_id', businessId);
+        .eq('business_users.business_id', selectedBusinessId);
 
       if (error) {
         console.error('Error loading employees for stats:', error);
@@ -127,10 +146,12 @@ const HRDashboard = () => {
         total_employees: totalEmployees,
         employees_on_probation: employeesOnProbation,
         pending_onboarding: pendingOnboarding,
-        overdue_policies: 0, // Placeholder until policy system is built
-        expiring_contracts: 0, // Placeholder until contract system is built
-        expiring_documents: 0 // Placeholder until document system is built
+        overdue_policies: 0,
+        expiring_contracts: 0,
+        expiring_documents: 0
       });
+
+      recordAction('view_dashboard_stats', selectedBusinessId);
 
     } catch (error) {
       console.error('Error calculating dashboard stats:', error);
@@ -142,10 +163,18 @@ const HRDashboard = () => {
         expiring_contracts: 0,
         expiring_documents: 0
       });
+
+      await logSecurityEvent('dashboard_stats_load_failed', {
+        error_message: error.message,
+        business_id: selectedBusinessId
+      }, 'medium');
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleNavigation = (path) => {
+    recordAction('navigate_from_dashboard', path);
     navigate(path);
   };
 
@@ -153,35 +182,13 @@ const HRDashboard = () => {
     navigate('/dashboard/home');
   };
 
-  if (loading) {
+  // Loading states
+  if (permissionsLoading || authLoading || loading) {
     return (
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: '100vh',
-        backgroundColor: '#f9fafb',
-        paddingTop: '60px',
-        paddingLeft: '20px',
-        paddingRight: '20px',
-        paddingBottom: '20px'
-      }}>
+      <div style={styles.loadingContainer}>
         <div style={{ textAlign: 'center' }}>
-          <div style={{
-            width: '32px',
-            height: '32px',
-            border: '3px solid #14B8A6',
-            borderTop: '3px solid transparent',
-            borderRadius: '50%',
-            animation: 'spin 1s linear infinite',
-            margin: '0 auto 8px auto'
-          }}></div>
-          <p style={{ 
-            margin: 0, 
-            color: '#6b7280',
-            fontSize: '16px',
-            fontWeight: '500'
-          }}>
+          <div style={styles.spinner}></div>
+          <p style={styles.loadingText}>
             Loading HR Dashboard...
           </p>
         </div>
@@ -189,54 +196,42 @@ const HRDashboard = () => {
     );
   }
 
-  if (error) {
+  if (!canViewHRDashboard) {
     return (
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: '100vh',
-        backgroundColor: '#f9fafb',
-        paddingTop: '60px',
-        paddingLeft: '20px',
-        paddingRight: '20px',
-        paddingBottom: '20px'
-      }}>
-        <div style={{ 
-          textAlign: 'center',
-          maxWidth: '400px'
-        }}>
-          <h2 style={{ 
-            fontSize: '24px', 
-            fontWeight: '600', 
-            color: '#111827', 
-            margin: '0 0 8px 0'
-          }}>
+      <div style={styles.errorContainer}>
+        <div style={styles.errorContent}>
+          <h2 style={styles.errorTitle}>
             Access Denied
           </h2>
-          <p style={{ 
-            color: '#6b7280', 
-            marginBottom: '20px',
-            fontSize: '16px',
-            lineHeight: '1.5',
-            margin: '0 0 20px 0'
-          }}>
-            {error}
+          <p style={styles.errorText}>
+            You do not have permission to access the HR Dashboard.
           </p>
           <button 
             onClick={handleBackToDashboard}
-            style={{
-              padding: '12px 24px',
-              backgroundColor: '#14B8A6',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              fontSize: '16px',
-              fontWeight: '600',
-              cursor: 'pointer',
-              transition: 'background-color 0.2s ease',
-              outline: 'none'
-            }}
+            style={styles.backButton}
+            onMouseOver={(e) => e.target.style.backgroundColor = '#0F766E'}
+            onMouseOut={(e) => e.target.style.backgroundColor = '#14B8A6'}
+          >
+            Return to Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (authError || error) {
+    return (
+      <div style={styles.errorContainer}>
+        <div style={styles.errorContent}>
+          <h2 style={styles.errorTitle}>
+            Access Denied
+          </h2>
+          <p style={styles.errorText}>
+            {authError || error}
+          </p>
+          <button 
+            onClick={handleBackToDashboard}
+            style={styles.backButton}
             onMouseOver={(e) => e.target.style.backgroundColor = '#0F766E'}
             onMouseOut={(e) => e.target.style.backgroundColor = '#14B8A6'}
           >
@@ -248,616 +243,460 @@ const HRDashboard = () => {
   }
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      backgroundColor: '#f9fafb',
-      paddingTop: '60px',
-      paddingLeft: '20px',
-      paddingRight: '20px',
-      paddingBottom: '20px'
-    }}>
-      {/* Add keyframes for spinner animation */}
-      <style>
-        {`
-          @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-          }
-        `}
-      </style>
+    <POSAuthWrapper
+      requiredRoles={['owner', 'manager', 'admin', 'hr_admin']}
+      requireBusiness={true}
+      componentName="HRDashboard"
+    >
+      <SecurityWrapper>
+        <div style={styles.container}>
+          {/* Add keyframes for spinner animation */}
+          <style>
+            {`
+              @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+              }
+            `}
+          </style>
 
-      {/* Header */}
-      <div style={{ marginBottom: '30px' }}>
-        <h1 style={{ 
-          fontSize: '32px', 
-          fontWeight: 'bold', 
-          color: '#111827',
-          margin: '0 0 8px 0'
-        }}>
-          HR & Compliance Dashboard
-        </h1>
-        <p style={{ 
-          color: '#6b7280', 
-          fontSize: '16px',
-          margin: 0
-        }}>
-          {business?.name} • {userRole}
-        </p>
-      </div>
+          {/* Header */}
+          <div style={styles.header}>
+            <h1 style={styles.mainTitle}>
+              HR & Compliance Dashboard
+            </h1>
+            <p style={styles.subtitle}>
+              {businessData?.business_name || 'Business'} • {userRole}
+            </p>
+          </div>
 
-      {/* Stats Grid */}
-      {dashboardStats && (
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-          gap: '20px',
-          marginBottom: '40px'
-        }}>
-          <div style={{
-            backgroundColor: 'white',
-            padding: '24px',
-            borderRadius: '12px',
-            border: '1px solid #e5e7eb',
-            boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
-          }}>
-            <h3 style={{ 
-              fontSize: '18px', 
-              fontWeight: '600', 
-              color: '#111827', 
-              margin: '0 0 8px 0'
-            }}>
-              Total Employees
-            </h3>
-            <p style={{ 
-              fontSize: '28px', 
-              fontWeight: 'bold', 
-              color: '#14B8A6',
-              margin: 0
-            }}>
-              {dashboardStats.total_employees}
-            </p>
-          </div>
-          
-          <div style={{
-            backgroundColor: 'white',
-            padding: '24px',
-            borderRadius: '12px',
-            border: '1px solid #e5e7eb',
-            boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
-          }}>
-            <h3 style={{ 
-              fontSize: '18px', 
-              fontWeight: '600', 
-              color: '#111827', 
-              margin: '0 0 8px 0'
-            }}>
-              On Probation
-            </h3>
-            <p style={{ 
-              fontSize: '28px', 
-              fontWeight: 'bold', 
-              color: '#f59e0b',
-              margin: 0
-            }}>
-              {dashboardStats.employees_on_probation}
-            </p>
-          </div>
-          
-          <div style={{
-            backgroundColor: 'white',
-            padding: '24px',
-            borderRadius: '12px',
-            border: '1px solid #e5e7eb',
-            boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
-          }}>
-            <h3 style={{ 
-              fontSize: '18px', 
-              fontWeight: '600', 
-              color: '#111827', 
-              margin: '0 0 8px 0'
-            }}>
-              New Hires (30 days)
-            </h3>
-            <p style={{ 
-              fontSize: '28px', 
-              fontWeight: 'bold', 
-              color: '#3b82f6',
-              margin: 0
-            }}>
-              {dashboardStats.pending_onboarding}
-            </p>
-          </div>
-          
-          <div style={{
-            backgroundColor: 'white',
-            padding: '24px',
-            borderRadius: '12px',
-            border: '1px solid #e5e7eb',
-            boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
-          }}>
-            <h3 style={{ 
-              fontSize: '18px', 
-              fontWeight: '600', 
-              color: '#111827', 
-              margin: '0 0 8px 0'
-            }}>
-              Policy Items
-            </h3>
-            <p style={{ 
-              fontSize: '28px', 
-              fontWeight: 'bold', 
-              color: '#ef4444',
-              margin: 0
-            }}>
-              {dashboardStats.overdue_policies}
-            </p>
-          </div>
-          
-          <div style={{
-            backgroundColor: 'white',
-            padding: '24px',
-            borderRadius: '12px',
-            border: '1px solid #e5e7eb',
-            boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
-          }}>
-            <h3 style={{ 
-              fontSize: '18px', 
-              fontWeight: '600', 
-              color: '#111827', 
-              margin: '0 0 8px 0'
-            }}>
-              Contract Items
-            </h3>
-            <p style={{ 
-              fontSize: '28px', 
-              fontWeight: 'bold', 
-              color: '#eab308',
-              margin: 0
-            }}>
-              {dashboardStats.expiring_contracts}
-            </p>
-          </div>
-          
-          <div style={{
-            backgroundColor: 'white',
-            padding: '24px',
-            borderRadius: '12px',
-            border: '1px solid #e5e7eb',
-            boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
-          }}>
-            <h3 style={{ 
-              fontSize: '18px', 
-              fontWeight: '600', 
-              color: '#111827', 
-              margin: '0 0 8px 0'
-            }}>
-              Document Items
-            </h3>
-            <p style={{ 
-              fontSize: '28px', 
-              fontWeight: 'bold', 
-              color: '#8b5cf6',
-              margin: 0
-            }}>
-              {dashboardStats.expiring_documents}
-            </p>
+          {/* Stats Grid */}
+          {dashboardStats && (
+            <div style={styles.statsGrid}>
+              <div style={styles.statCard}>
+                <h3 style={styles.statTitle}>
+                  Total Employees
+                </h3>
+                <p style={{ ...styles.statValue, color: '#14B8A6' }}>
+                  {dashboardStats.total_employees}
+                </p>
+              </div>
+              
+              <div style={styles.statCard}>
+                <h3 style={styles.statTitle}>
+                  On Probation
+                </h3>
+                <p style={{ ...styles.statValue, color: '#f59e0b' }}>
+                  {dashboardStats.employees_on_probation}
+                </p>
+              </div>
+              
+              <div style={styles.statCard}>
+                <h3 style={styles.statTitle}>
+                  New Hires (30 days)
+                </h3>
+                <p style={{ ...styles.statValue, color: '#3b82f6' }}>
+                  {dashboardStats.pending_onboarding}
+                </p>
+              </div>
+              
+              <div style={styles.statCard}>
+                <h3 style={styles.statTitle}>
+                  Policy Items
+                </h3>
+                <p style={{ ...styles.statValue, color: '#ef4444' }}>
+                  {dashboardStats.overdue_policies}
+                </p>
+              </div>
+              
+              <div style={styles.statCard}>
+                <h3 style={styles.statTitle}>
+                  Contract Items
+                </h3>
+                <p style={{ ...styles.statValue, color: '#eab308' }}>
+                  {dashboardStats.expiring_contracts}
+                </p>
+              </div>
+              
+              <div style={styles.statCard}>
+                <h3 style={styles.statTitle}>
+                  Document Items
+                </h3>
+                <p style={{ ...styles.statValue, color: '#8b5cf6' }}>
+                  {dashboardStats.expiring_documents}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Quick Actions - Permission Gated */}
+          <div style={styles.actionsGrid}>
+            <PermissionGate permissions={['hr.employees.view']} fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/employees')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  Employee Profiles
+                </h4>
+                <p style={styles.actionDescription}>
+                  Manage employee information
+                </p>
+              </button>
+            </PermissionGate>
+            
+            <PermissionGate permissions={['hr.onboarding.view']} fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/onboarding')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  Onboarding Center
+                </h4>
+                <p style={styles.actionDescription}>
+                  Track new hire progress
+                </p>
+              </button>
+            </PermissionGate>
+
+            <PermissionGate permissions={['hr.onboarding.view']} fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/milestones')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  Milestone Tracking
+                </h4>
+                <p style={styles.actionDescription}>
+                  Track onboarding milestones and celebrate achievements
+                </p>
+              </button>
+            </PermissionGate>
+
+            <PermissionGate permissions={['hr.onboarding.view']} fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/orientation')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  Orientation Calendar
+                </h4>
+                <p style={styles.actionDescription}>
+                  Schedule and track orientations
+                </p>
+              </button>
+            </PermissionGate>
+            
+            <PermissionGate permissions={['hr.contracts.view']} fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/contracts')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  Contracts
+                </h4>
+                <p style={styles.actionDescription}>
+                  Manage employment contracts
+                </p>
+              </button>
+            </PermissionGate>
+            
+            <PermissionGate permissions={['hr.policies.view']} fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/policies')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  Policy Center
+                </h4>
+                <p style={styles.actionDescription}>
+                  Policies & acknowledgments
+                </p>
+              </button>
+            </PermissionGate>
+
+            <PermissionGate permissions={['hr.writeups.view']} fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/writeups')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  Disciplinary Actions
+                </h4>
+                <p style={styles.actionDescription}>
+                  Manage writeups & warnings
+                </p>
+              </button>
+            </PermissionGate>
+
+            <PermissionGate permissions={['hr.documents.view']} fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/document-expiry')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  Document Expiry Tracker
+                </h4>
+                <p style={styles.actionDescription}>
+                  Monitor certifications and wage premiums
+                </p>
+              </button>
+            </PermissionGate>
+
+            <PermissionGate permissions={['hr.settings.manage']} requireOwner fallback={null}>
+              <button 
+                onClick={() => handleNavigation('/dashboard/hr/settings')}
+                style={styles.actionButton}
+                onMouseOver={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f0fdfa';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.backgroundColor = 'white';
+                  e.currentTarget.style.transform = 'translateY(0px)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <h4 style={styles.actionTitle}>
+                  HR Settings
+                </h4>
+                <p style={styles.actionDescription}>
+                  Configure HR preferences
+                </p>
+              </button>
+            </PermissionGate>
           </div>
         </div>
-      )}
-
-      {/* Quick Actions - 3x Grid Layout (Tavari Standard) */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-        gap: '20px'
-      }}>
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/employees')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            Employee Profiles
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Manage employee information
-          </p>
-        </button>
-        
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/onboarding')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            Onboarding Center
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Track new hire progress
-          </p>
-        </button>
-
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/milestones')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            Milestone Tracking
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Track onboarding milestones and celebrate achievements
-          </p>
-        </button>
-
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/orientation')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            Orientation Calendar
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Schedule and track orientations
-          </p>
-        </button>
-        
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/contracts')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            Contracts
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Manage employment contracts
-          </p>
-        </button>
-        
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/policies')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            Policy Center
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Policies & acknowledgments
-          </p>
-        </button>
-
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/writeups')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            Disciplinary Actions
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Manage writeups & warnings
-          </p>
-        </button>
-
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/document-expiry')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            Document Expiry Tracker
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Monitor certifications and wage premiums
-          </p>
-        </button>
-
-        <button 
-          onClick={() => handleNavigation('/dashboard/hr/settings')}
-          style={{
-            backgroundColor: 'white',
-            border: '2px solid #14B8A6',
-            padding: '24px',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease',
-            textAlign: 'left',
-            outline: 'none',
-            minHeight: '120px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center'
-          }}
-          onMouseOver={(e) => {
-            e.target.style.backgroundColor = '#f0fdfa';
-            e.target.style.transform = 'translateY(-2px)';
-            e.target.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-          }}
-          onMouseOut={(e) => {
-            e.target.style.backgroundColor = 'white';
-            e.target.style.transform = 'translateY(0px)';
-            e.target.style.boxShadow = 'none';
-          }}
-        >
-          <h4 style={{ 
-            fontWeight: '600', 
-            color: '#374151',
-            margin: '0 0 8px 0',
-            fontSize: '18px'
-          }}>
-            HR Settings
-          </h4>
-          <p style={{ 
-            fontSize: '14px', 
-            color: '#6b7280',
-            margin: 0,
-            lineHeight: '1.4'
-          }}>
-            Configure HR preferences
-          </p>
-        </button>
-      </div>
-    </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
+};
+
+const styles = {
+  container: {
+    minHeight: '100vh',
+    backgroundColor: '#f9fafb',
+    paddingTop: '60px',
+    paddingLeft: '20px',
+    paddingRight: '20px',
+    paddingBottom: '20px'
+  },
+  loadingContainer: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: '100vh',
+    backgroundColor: '#f9fafb',
+    paddingTop: '60px',
+    paddingLeft: '20px',
+    paddingRight: '20px',
+    paddingBottom: '20px'
+  },
+  spinner: {
+    width: '32px',
+    height: '32px',
+    border: '3px solid #14B8A6',
+    borderTop: '3px solid transparent',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite',
+    margin: '0 auto 8px auto'
+  },
+  loadingText: {
+    margin: 0,
+    color: '#6b7280',
+    fontSize: '16px',
+    fontWeight: '500'
+  },
+  errorContainer: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: '100vh',
+    backgroundColor: '#f9fafb',
+    paddingTop: '60px',
+    paddingLeft: '20px',
+    paddingRight: '20px',
+    paddingBottom: '20px'
+  },
+  errorContent: {
+    textAlign: 'center',
+    maxWidth: '400px'
+  },
+  errorTitle: {
+    fontSize: '24px',
+    fontWeight: '600',
+    color: '#111827',
+    margin: '0 0 8px 0'
+  },
+  errorText: {
+    color: '#6b7280',
+    marginBottom: '20px',
+    fontSize: '16px',
+    lineHeight: '1.5',
+    margin: '0 0 20px 0'
+  },
+  backButton: {
+    padding: '12px 24px',
+    backgroundColor: '#14B8A6',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '16px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'background-color 0.2s ease',
+    outline: 'none'
+  },
+  header: {
+    marginBottom: '30px'
+  },
+  mainTitle: {
+    fontSize: '32px',
+    fontWeight: 'bold',
+    color: '#111827',
+    margin: '0 0 8px 0'
+  },
+  subtitle: {
+    color: '#6b7280',
+    fontSize: '16px',
+    margin: 0
+  },
+  statsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+    gap: '20px',
+    marginBottom: '40px'
+  },
+  statCard: {
+    backgroundColor: 'white',
+    padding: '24px',
+    borderRadius: '12px',
+    border: '1px solid #e5e7eb',
+    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
+  },
+  statTitle: {
+    fontSize: '18px',
+    fontWeight: '600',
+    color: '#111827',
+    margin: '0 0 8px 0'
+  },
+  statValue: {
+    fontSize: '28px',
+    fontWeight: 'bold',
+    margin: 0
+  },
+  actionsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+    gap: '20px'
+  },
+  actionButton: {
+    backgroundColor: 'white',
+    border: '2px solid #14B8A6',
+    padding: '24px',
+    borderRadius: '12px',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    textAlign: 'left',
+    outline: 'none',
+    minHeight: '120px',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center'
+  },
+  actionTitle: {
+    fontWeight: '600',
+    color: '#374151',
+    margin: '0 0 8px 0',
+    fontSize: '18px'
+  },
+  actionDescription: {
+    fontSize: '14px',
+    color: '#6b7280',
+    margin: 0,
+    lineHeight: '1.4'
+  }
 };
 
 export default HRDashboard;

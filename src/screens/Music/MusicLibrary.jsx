@@ -1,7 +1,7 @@
-// src/screens/Music/MusicLibrary.jsx - Fixed Database Constraints and Error Handling
+// src/screens/Music/MusicLibrary.jsx - WITH PERMISSION SYSTEM INTEGRATION
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FiMusic, FiSearch, FiEdit2, FiTrash2, FiToggleLeft, FiToggleRight, FiClock, FiUser, FiFilter, FiRefreshCw, FiDownload, FiCheckCircle } from 'react-icons/fi';
+import { FiMusic, FiSearch, FiEdit2, FiTrash2, FiToggleLeft, FiToggleRight, FiClock, FiUser, FiFilter, FiRefreshCw, FiDownload, FiCheckCircle, FiLock, FiAlertCircle } from 'react-icons/fi';
 
 // Tavari Build Standards - Required imports
 import { TavariStyles } from '../../utils/TavariStyles';
@@ -12,12 +12,22 @@ import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { useSecurityContext } from '../../Security/useSecurityContext';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 
+// UX Enhancement Components
+import EmptyState from '../../components/UI/EmptyState';
+import SkeletonLoader from '../../components/UI/SkeletonLoader';
+import ContextualHelp from '../../components/UI/ContextualHelp';
+
+// Permission system integration
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
+
 // Database connection
 import { supabase } from '../../supabaseClient';
 
 /**
  * Music Library - Manage and organize music tracks
- * Integrates with all Tavari build standards for consistency
+ * Integrates with Tavari permission system for granular access control
  */
 const MusicLibrary = () => {
   const navigate = useNavigate();
@@ -29,10 +39,21 @@ const MusicLibrary = () => {
     componentName: 'MusicLibrary'
   });
 
+  // Permission system integration
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   // Tavari standardized security
+  // DISABLED device tracking to prevent AudioContext errors
   const security = useSecurityContext({
     enableRateLimiting: true,
-    enableDeviceTracking: true,
+    enableDeviceTracking: false, // DISABLED - prevents AudioContext errors
     enableInputValidation: true,
     enableAuditLogging: true,
     componentName: 'MusicLibrary',
@@ -75,6 +96,20 @@ const MusicLibrary = () => {
     hasArtist: 'all'
   });
 
+  // Permission checks based on permissionRegistry.js
+  const canViewLibrary = true; // Anyone with access to this page can view
+  const canEditTracks = hasPermission('music.library.upload') || hasElevatedPrivileges();
+  const canDeleteTracks = hasPermission('music.library.upload') || hasElevatedPrivileges();
+  const canBulkEdit = hasPermission('music.library.upload') || hasElevatedPrivileges();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewLibrary) {
+      toast.error('You do not have permission to view the music library');
+      navigate('/dashboard/music/dashboard');
+    }
+  }, [permissionsLoading, canViewLibrary, navigate]);
+
   // Load tracks function - stable with useCallback
   const loadTracks = useCallback(async () => {
     if (!auth.selectedBusinessId || loadingRef.current) return;
@@ -84,18 +119,34 @@ const MusicLibrary = () => {
     setErrors(prev => ({ ...prev, loading: null }));
 
     try {
-      let query = supabase
-        .from('music_tracks')
-        .select('*')
-        .eq('business_id', auth.selectedBusinessId);
+      // Load all tracks without pagination limit
+      let allTracks = [];
+      let page = 0;
+      const pageSize = 1000;
+      let hasMore = true;
 
-      query = query.order(sortBy, { ascending: sortOrder === 'asc' });
+      while (hasMore) {
+        let query = supabase
+          .from('music_tracks')
+          .select('*')
+          .eq('business_id', auth.selectedBusinessId)
+          .order(sortBy, { ascending: sortOrder === 'asc' })
+          .range(page * pageSize, (page + 1) * pageSize - 1);
 
-      const { data, error } = await query;
+        const { data, error } = await query;
 
-      if (error) throw error;
+        if (error) throw error;
 
-      setTracks(data || []);
+        if (data && data.length > 0) {
+          allTracks = allTracks.concat(data);
+          page++;
+          hasMore = data.length === pageSize;
+        } else {
+          hasMore = false;
+        }
+      }
+
+      setTracks(allTracks || []);
 
       // Log access only once per session (with error handling)
       if (!initializedRef.current) {
@@ -104,11 +155,14 @@ const MusicLibrary = () => {
             await security.logSecurityEvent('music_library_accessed', {
               track_count: data?.length || 0,
               sort_by: sortBy,
-              sort_order: sortOrder
+              sort_order: sortOrder,
+              permissions: {
+                canEdit: canEditTracks,
+                canDelete: canDeleteTracks
+              }
             }, 'low');
           }
         } catch (logError) {
-          // Security logging is optional - don't break functionality
           console.warn('Security logging unavailable:', logError.message);
         }
       }
@@ -119,19 +173,20 @@ const MusicLibrary = () => {
         ...prev, 
         loading: 'Failed to load music library. Please try again.' 
       }));
+      toast.error('Failed to load music library');
     } finally {
       setLoading(false);
       loadingRef.current = false;
       initializedRef.current = true;
     }
-  }, [auth.selectedBusinessId, sortBy, sortOrder]);
+  }, [auth.selectedBusinessId, sortBy, sortOrder, canEditTracks, canDeleteTracks]);
 
   // Initialize data loading - only once when ready
   useEffect(() => {
-    if (auth.isReady && auth.selectedBusinessId && !initializedRef.current) {
+    if (auth.isReady && auth.selectedBusinessId && !initializedRef.current && !permissionsLoading) {
       loadTracks();
     }
-  }, [auth.isReady, auth.selectedBusinessId]);
+  }, [auth.isReady, auth.selectedBusinessId, permissionsLoading, loadTracks]);
 
   // Handle sort changes
   useEffect(() => {
@@ -175,7 +230,6 @@ const MusicLibrary = () => {
         await security.logSecurityEvent(eventType, details, severity);
       }
     } catch (error) {
-      // Security logging is optional - log but don't throw
       console.warn(`Security logging failed for ${eventType}:`, error.message);
     }
   };
@@ -191,16 +245,20 @@ const MusicLibrary = () => {
     } catch (error) {
       console.warn(`Rate limiting failed for ${action}:`, error.message);
     }
-    // Return allowed if rate limiting is unavailable
     return { allowed: true };
   };
 
   /**
-   * Toggle shuffle inclusion with enhanced validation
+   * Toggle shuffle inclusion with permission check
    */
   const toggleShuffle = async (track) => {
+    // Permission check
+    if (!canEditTracks && track.uploaded_by !== auth.authUser.id) {
+      toast.error('You can only modify tracks you uploaded');
+      return;
+    }
+
     try {
-      // Safe rate limiting check
       const rateLimitResult = await safeRateLimit('shuffle_toggle', 30, 60000);
       
       if (!rateLimitResult.allowed) {
@@ -208,18 +266,11 @@ const MusicLibrary = () => {
           ...prev, 
           shuffle: 'Too many changes. Please wait before making more updates.' 
         }));
+        toast.warning('Too many changes. Please slow down.');
         return;
       }
 
       const newValue = !track.include_in_shuffle;
-      
-      if (!auth.hasRole(['manager', 'owner']) && track.uploaded_by !== auth.authUser.id) {
-        setErrors(prev => ({ 
-          ...prev, 
-          shuffle: 'You can only modify tracks you uploaded.' 
-        }));
-        return;
-      }
 
       const { data, error } = await supabase
         .from('music_tracks')
@@ -237,7 +288,6 @@ const MusicLibrary = () => {
           )
         );
 
-        // Safe security logging
         await safeSecurityLog('track_shuffle_toggled', {
           track_id: track.id,
           track_title: track.title,
@@ -246,6 +296,7 @@ const MusicLibrary = () => {
         }, 'low');
 
         setErrors(prev => ({ ...prev, shuffle: null }));
+        toast.success(`Track ${newValue ? 'added to' : 'removed from'} shuffle`);
       } else {
         throw new Error('No data returned from update');
       }
@@ -256,15 +307,18 @@ const MusicLibrary = () => {
         ...prev, 
         shuffle: `Failed to update shuffle setting: ${error.message}` 
       }));
+      toast.error('Failed to update shuffle setting');
     }
   };
 
   const startEdit = (track) => {
-    if (!auth.hasRole(['manager', 'owner']) && track.uploaded_by !== auth.authUser.id) {
+    // Permission check
+    if (!canEditTracks && track.uploaded_by !== auth.authUser.id) {
       setErrors(prev => ({ 
         ...prev, 
         edit: 'You can only edit tracks you uploaded.' 
       }));
+      toast.error('You can only edit tracks you uploaded');
       return;
     }
 
@@ -289,6 +343,7 @@ const MusicLibrary = () => {
         ...prev, 
         edit: 'Please provide a valid title (required).' 
       }));
+      toast.error('Title is required');
       return;
     }
 
@@ -320,6 +375,7 @@ const MusicLibrary = () => {
         edited_by: auth.authUser.id
       }, 'medium');
 
+      toast.success('Track updated successfully');
       cancelEdit();
 
     } catch (error) {
@@ -328,18 +384,21 @@ const MusicLibrary = () => {
         ...prev, 
         edit: `Failed to update track: ${error.message}` 
       }));
+      toast.error('Failed to update track');
     }
   };
 
   /**
-   * Delete track with proper playlist cleanup
+   * Delete track with permission check
    */
   const deleteTrack = async (track) => {
-    if (!auth.hasRole(['manager', 'owner']) && track.uploaded_by !== auth.authUser.id) {
+    // Permission check
+    if (!canDeleteTracks && track.uploaded_by !== auth.authUser.id) {
       setErrors(prev => ({ 
         ...prev, 
         delete: 'You can only delete tracks you uploaded.' 
       }));
+      toast.error('You can only delete tracks you uploaded');
       return;
     }
 
@@ -356,7 +415,6 @@ const MusicLibrary = () => {
 
       if (playlistError) {
         console.warn('Failed to remove track from playlists:', playlistError);
-        // Continue anyway - this might not be critical
       }
 
       // Delete file from storage (optional)
@@ -385,6 +443,7 @@ const MusicLibrary = () => {
         deleted_by: auth.authUser.id
       }, 'medium');
 
+      toast.success('Track deleted successfully');
       setErrors(prev => ({ ...prev, delete: null }));
 
     } catch (error) {
@@ -393,6 +452,7 @@ const MusicLibrary = () => {
         ...prev, 
         delete: `Failed to delete track: ${error.message}` 
       }));
+      toast.error('Failed to delete track');
     }
   };
 
@@ -441,6 +501,12 @@ const MusicLibrary = () => {
   };
 
   const findDuplicates = useCallback(() => {
+    // Permission check
+    if (!canDeleteTracks) {
+      toast.error('You do not have permission to manage duplicates');
+      return;
+    }
+
     const duplicateGroups = [];
     const processed = new Set();
 
@@ -491,19 +557,24 @@ const MusicLibrary = () => {
 
     setDuplicates(duplicateGroups);
     
-    // Safe security logging
     safeSecurityLog('duplicates_detected', {
       method: duplicateMethod,
       groups_found: duplicateGroups.length,
       total_duplicates: duplicateGroups.reduce((sum, group) => sum + group.length, 0)
     }, 'low');
 
-  }, [tracks, duplicateMethod]);
+  }, [tracks, duplicateMethod, canDeleteTracks]);
 
   /**
-   * Remove duplicates with proper constraint handling
+   * Remove duplicates with permission check
    */
   const removeDuplicates = async (group, keepIndex) => {
+    // Permission check
+    if (!canDeleteTracks) {
+      toast.error('You do not have permission to remove duplicates');
+      return;
+    }
+
     if (!window.confirm(`Remove ${group.length - 1} duplicate(s) of "${group[0].title}"?`)) {
       return;
     }
@@ -515,7 +586,7 @@ const MusicLibrary = () => {
       const trackIds = tracksToRemove.map(track => track.id);
       const filePaths = tracksToRemove.map(track => track.file_path);
 
-      // Remove tracks from playlists first to avoid foreign key constraints
+      // Remove tracks from playlists first
       const { error: playlistError } = await supabase
         .from('music_playlist_tracks')
         .delete()
@@ -523,10 +594,9 @@ const MusicLibrary = () => {
 
       if (playlistError) {
         console.warn('Failed to remove tracks from playlists:', playlistError);
-        // Continue anyway - might not be critical
       }
 
-      // Delete files from storage (optional)
+      // Delete files from storage
       try {
         if (filePaths.length > 0) {
           await supabase.storage
@@ -555,6 +625,7 @@ const MusicLibrary = () => {
         removed_tracks: tracksToRemove.map(t => ({ id: t.id, title: t.title }))
       }, 'medium');
 
+      toast.success(`Removed ${tracksToRemove.length} duplicate(s)`);
       setErrors(prev => ({ ...prev, duplicates: null }));
 
     } catch (error) {
@@ -563,15 +634,22 @@ const MusicLibrary = () => {
         ...prev, 
         duplicates: `Failed to remove duplicates: ${error.message}` 
       }));
+      toast.error('Failed to remove duplicates');
     } finally {
       setRemovingDuplicates(false);
     }
   };
 
   /**
-   * Auto-remove duplicates with proper constraint handling
+   * Auto-remove duplicates with permission check
    */
   const autoRemoveDuplicates = async () => {
+    // Permission check
+    if (!canDeleteTracks) {
+      toast.error('You do not have permission to auto-remove duplicates');
+      return;
+    }
+
     if (duplicates.length === 0) return;
     
     const totalDuplicates = duplicates.reduce((sum, group) => sum + group.length - 1, 0);
@@ -589,12 +667,12 @@ const MusicLibrary = () => {
       let allFilesToRemove = [];
 
       duplicates.forEach(group => {
-        const tracksToRemove = group.slice(1); // Keep the first (oldest)
+        const tracksToRemove = group.slice(1);
         allTracksToRemove.push(...tracksToRemove.map(t => t.id));
         allFilesToRemove.push(...tracksToRemove.map(t => t.file_path));
       });
 
-      // Remove tracks from playlists first to avoid foreign key constraints
+      // Remove tracks from playlists first
       if (allTracksToRemove.length > 0) {
         const { error: playlistError } = await supabase
           .from('music_playlist_tracks')
@@ -603,11 +681,10 @@ const MusicLibrary = () => {
 
         if (playlistError) {
           console.warn('Failed to remove tracks from playlists:', playlistError);
-          // Continue anyway - might not be critical
         }
       }
 
-      // Delete files from storage (optional)
+      // Delete files from storage
       try {
         if (allFilesToRemove.length > 0) {
           await supabase.storage
@@ -619,7 +696,7 @@ const MusicLibrary = () => {
       }
 
       // Delete from database in batches
-      const batchSize = 50; // Smaller batches for better reliability
+      const batchSize = 50;
       for (let i = 0; i < allTracksToRemove.length; i += batchSize) {
         const batch = allTracksToRemove.slice(i, i + batchSize);
         
@@ -645,20 +722,28 @@ const MusicLibrary = () => {
         method: duplicateMethod
       }, 'medium');
 
+      toast.success(`Removed ${allTracksToRemove.length} duplicate tracks`);
       setErrors(prev => ({ ...prev, duplicates: null }));
 
     } catch (error) {
       console.error('Error auto-removing duplicates:', error);
       setErrors(prev => ({ 
         ...prev, 
-        duplicates: `Failed to auto-remove duplicates: ${error.message}. Some tracks may be referenced in playlists.` 
+        duplicates: `Failed to auto-remove duplicates: ${error.message}` 
       }));
+      toast.error('Failed to auto-remove duplicates');
     } finally {
       setRemovingDuplicates(false);
     }
   };
 
   const handleBulkShuffleToggle = async (includeInShuffle) => {
+    // Permission check
+    if (!canBulkEdit) {
+      toast.error('You do not have permission to bulk edit tracks');
+      return;
+    }
+
     if (selectedTracks.length === 0) return;
 
     try {
@@ -680,6 +765,7 @@ const MusicLibrary = () => {
         changed_by: auth.authUser.id
       }, 'medium');
 
+      toast.success(`Updated ${selectedTracks.length} tracks`);
       setSelectedTracks([]);
       setBulkEditMode(false);
 
@@ -689,6 +775,7 @@ const MusicLibrary = () => {
         ...prev, 
         bulk: `Failed to update tracks: ${error.message}` 
       }));
+      toast.error('Failed to bulk update tracks');
     }
   };
 
@@ -752,7 +839,22 @@ const MusicLibrary = () => {
 
     subtitle: {
       fontSize: TavariStyles.typography.fontSize.lg,
-      color: TavariStyles.colors.gray600
+      color: TavariStyles.colors.gray600,
+      margin: 0
+    },
+
+    limitedAccessBadge: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.md}`,
+      backgroundColor: TavariStyles.colors.infoBg,
+      border: `2px solid ${TavariStyles.colors.info}`,
+      borderRadius: TavariStyles.borderRadius.md,
+      color: TavariStyles.colors.infoText,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      fontWeight: TavariStyles.typography.fontWeight.medium,
+      marginTop: TavariStyles.spacing.md
     },
 
     controls: {
@@ -942,6 +1044,16 @@ const MusicLibrary = () => {
       transition: TavariStyles.transitions.normal
     },
 
+    shuffleToggleDisabled: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      cursor: 'not-allowed',
+      padding: TavariStyles.spacing.sm,
+      borderRadius: TavariStyles.borderRadius.md,
+      opacity: 0.5
+    },
+
     toggleLabel: {
       fontSize: TavariStyles.typography.fontSize.sm,
       fontWeight: TavariStyles.typography.fontWeight.medium
@@ -966,6 +1078,17 @@ const MusicLibrary = () => {
       ...TavariStyles.components.button.sizes.sm,
       minWidth: 'auto',
       padding: TavariStyles.spacing.sm
+    },
+
+    disabledButton: {
+      ...TavariStyles.components.button.base,
+      ...TavariStyles.components.button.sizes.sm,
+      minWidth: 'auto',
+      padding: TavariStyles.spacing.sm,
+      backgroundColor: TavariStyles.colors.gray300,
+      color: TavariStyles.colors.gray500,
+      cursor: 'not-allowed',
+      opacity: 0.5
     },
 
     primaryButton: {
@@ -1101,7 +1224,8 @@ const MusicLibrary = () => {
     }
   };
 
-  if (loading) {
+  // Show loading while permissions are being checked
+  if (permissionsLoading || loading) {
     return (
       <POSAuthWrapper 
         componentName="MusicLibrary"
@@ -1111,7 +1235,9 @@ const MusicLibrary = () => {
           componentName="MusicLibrary"
           sensitiveComponent={false}
         >
-          <div style={styles.loading}>Loading Music Library...</div>
+          <div style={{ padding: '24px' }}>
+            <SkeletonLoader variant="table" count={10} />
+          </div>
         </SecurityWrapper>
       </POSAuthWrapper>
     );
@@ -1136,11 +1262,19 @@ const MusicLibrary = () => {
 
           {/* Header */}
           <div style={styles.header}>
-            <FiMusic size={48} style={styles.headerIcon} />
-            <h1 style={styles.title}>Music Library</h1>
-            <p style={styles.subtitle}>
-              {tracks.length} songs in {auth.businessData?.name || 'your business'} library
-            </p>
+            <FiMusic size={32} style={styles.headerIcon} />
+            <div style={styles.headerContent}>
+              <h1 style={styles.title}>Music Library</h1>
+              <p style={styles.subtitle}>
+                {tracks.length} songs in {auth.businessData?.name || 'your business'} library
+              </p>
+            </div>
+            {!canEditTracks && !canDeleteTracks && (
+              <div style={styles.limitedAccessBadge}>
+                <FiAlertCircle />
+                <span>View Only - You can only edit/delete tracks you uploaded</span>
+              </div>
+            )}
           </div>
 
           {/* Controls */}
@@ -1148,12 +1282,27 @@ const MusicLibrary = () => {
             <div style={styles.controlsHeader}>
               <h3>Library Controls</h3>
               <div style={styles.bulkActions}>
-                <TavariCheckbox
-                  checked={bulkEditMode}
-                  onChange={setBulkEditMode}
-                  label="Bulk Edit Mode"
-                  size="sm"
-                />
+                {/* Bulk Edit - Protected */}
+                <PermissionGate
+                  permission="music.library.upload"
+                  fallback={
+                    <TavariCheckbox
+                      checked={false}
+                      onChange={() => toast.error('You need upload permission for bulk edit')}
+                      label="Bulk Edit Mode"
+                      size="sm"
+                      disabled
+                    />
+                  }
+                >
+                  <TavariCheckbox
+                    checked={bulkEditMode}
+                    onChange={setBulkEditMode}
+                    label="Bulk Edit Mode"
+                    size="sm"
+                  />
+                </PermissionGate>
+
                 <button
                   style={styles.actionButton}
                   onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
@@ -1161,16 +1310,33 @@ const MusicLibrary = () => {
                   <FiFilter size={16} />
                   Filters
                 </button>
-                <button
-                  style={styles.actionButton}
-                  onClick={() => {
-                    findDuplicates();
-                    setShowDuplicates(!showDuplicates);
-                  }}
+
+                {/* Find Duplicates - Protected */}
+                <PermissionGate
+                  permission="music.library.upload"
+                  fallback={
+                    <button
+                      style={styles.disabledButton}
+                      disabled
+                      title="You need permission to manage duplicates"
+                    >
+                      <FiLock size={16} />
+                      Duplicates
+                    </button>
+                  }
                 >
-                  <FiTrash2 size={16} />
-                  Find Duplicates
-                </button>
+                  <button
+                    style={styles.actionButton}
+                    onClick={() => {
+                      findDuplicates();
+                      setShowDuplicates(!showDuplicates);
+                    }}
+                  >
+                    <FiTrash2 size={16} />
+                    Find Duplicates
+                  </button>
+                </PermissionGate>
+
                 <button
                   style={styles.actionButton}
                   onClick={loadTracks}
@@ -1286,8 +1452,8 @@ const MusicLibrary = () => {
               </div>
             )}
 
-            {/* Duplicate Detection Panel */}
-            {showDuplicates && (
+            {/* Duplicate Detection Panel - Protected */}
+            {showDuplicates && canDeleteTracks && (
               <div style={styles.duplicatesPanel}>
                 <div style={styles.duplicatesHeader}>
                   <h4>Duplicate Detection</h4>
@@ -1383,8 +1549,8 @@ const MusicLibrary = () => {
               </div>
             )}
 
-            {/* Bulk Actions */}
-            {bulkEditMode && selectedTracks.length > 0 && (
+            {/* Bulk Actions - Protected */}
+            {bulkEditMode && selectedTracks.length > 0 && canBulkEdit && (
               <div style={{ 
                 marginTop: TavariStyles.spacing.lg,
                 padding: TavariStyles.spacing.lg,
@@ -1446,138 +1612,188 @@ const MusicLibrary = () => {
 
           {/* Track List */}
           {filteredTracks.length === 0 ? (
-            <div style={styles.emptyState}>
-              <FiMusic size={48} style={styles.emptyIcon} />
-              <h3>No tracks found</h3>
-              <p>
-                {searchTerm || filterShuffle !== 'all' || showAdvancedFilters
-                  ? 'Try adjusting your search or filters'
-                  : 'Upload some music files to get started'
-                }
-              </p>
-            </div>
+            <EmptyState
+              icon="🎵"
+              title="No tracks found"
+              description={
+                searchTerm || filterShuffle !== 'all' || showAdvancedFilters
+                  ? 'Try adjusting your search or filters to find what you\'re looking for.'
+                  : 'Upload some music files to get started with your music library.'
+              }
+              primaryAction={
+                !searchTerm && filterShuffle === 'all' && !showAdvancedFilters && canUploadMusic
+                  ? {
+                      label: 'Upload Your First Track',
+                      onClick: () => navigate('/dashboard/music?tab=upload')
+                    }
+                  : null
+              }
+              secondaryAction={
+                !searchTerm && filterShuffle === 'all' && !showAdvancedFilters
+                  ? {
+                      label: 'Learn more about the Music Library',
+                      href: '/dashboard/help?module=music&section=library'
+                    }
+                  : null
+              }
+            />
           ) : (
             <div style={styles.trackList}>
-              {filteredTracks.map(track => (
-                <div key={track.id} style={styles.trackItem}>
-                  <div style={styles.trackMain}>
-                    {/* Bulk selection checkbox */}
-                    {bulkEditMode && (
-                      <TavariCheckbox
-                        checked={selectedTracks.includes(track.id)}
-                        onChange={(checked) => {
-                          setSelectedTracks(prev => 
-                            checked 
-                              ? [...prev, track.id]
-                              : prev.filter(id => id !== track.id)
-                          );
-                        }}
-                        size="sm"
-                      />
-                    )}
+              {filteredTracks.map(track => {
+                const isOwnTrack = track.uploaded_by === auth.authUser.id;
+                const canEditThisTrack = canEditTracks || isOwnTrack;
+                const canDeleteThisTrack = canDeleteTracks || isOwnTrack;
 
-                    <div style={styles.trackInfo}>
-                      {editingTrack === track.id ? (
-                        <div style={styles.editForm}>
-                          <input
-                            style={styles.editInput}
-                            type="text"
-                            value={editForm.title}
-                            onChange={(e) => setEditForm({...editForm, title: e.target.value})}
-                            placeholder="Song title *"
-                          />
-                          <input
-                            style={styles.editInput}
-                            type="text"
-                            value={editForm.artist}
-                            onChange={(e) => setEditForm({...editForm, artist: e.target.value})}
-                            placeholder="Artist name"
-                          />
-                          <input
-                            style={styles.editInput}
-                            type="text"
-                            value={editForm.album}
-                            onChange={(e) => setEditForm({...editForm, album: e.target.value})}
-                            placeholder="Album name"
-                          />
-                          <div style={styles.editActions}>
-                            <button style={styles.saveButton} onClick={saveEdit}>
-                              Save Changes
-                            </button>
-                            <button style={styles.cancelButton} onClick={cancelEdit}>
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          <h3 style={styles.trackTitle}>{track.title}</h3>
-                          <p style={styles.trackArtist}>
-                            <FiUser size={14} />
-                            {track.artist || 'Unknown Artist'}
-                          </p>
-                          {track.album && (
-                            <p style={styles.trackArtist}>
-                              <FiMusic size={14} />
-                              {track.album}
-                            </p>
-                          )}
-                          <p style={styles.trackMeta}>
-                            <FiClock size={14} />
-                            {formatDuration(track.duration)}
-                            <span>•</span>
-                            Uploaded {formatDate(track.uploaded_at)}
-                            {track.file_size && (
-                              <>
-                                <span>•</span>
-                                {formatFileSize(track.file_size)}
-                              </>
-                            )}
-                          </p>
-                        </>
+                return (
+                  <div key={track.id} style={styles.trackItem}>
+                    <div style={styles.trackMain}>
+                      {/* Bulk selection checkbox - only if can bulk edit */}
+                      {bulkEditMode && canBulkEdit && (
+                        <TavariCheckbox
+                          checked={selectedTracks.includes(track.id)}
+                          onChange={(checked) => {
+                            setSelectedTracks(prev => 
+                              checked 
+                                ? [...prev, track.id]
+                                : prev.filter(id => id !== track.id)
+                            );
+                          }}
+                          size="sm"
+                        />
                       )}
-                    </div>
 
-                    <div style={styles.trackControls}>
-                      <div 
-                        style={{
-                          ...styles.shuffleToggle,
-                          opacity: editingTrack === track.id ? 0.5 : 1,
-                          backgroundColor: track.include_in_shuffle ? TavariStyles.colors.successBg : TavariStyles.colors.gray100
-                        }} 
-                        onClick={() => editingTrack !== track.id && toggleShuffle(track)}
-                      >
-                        {track.include_in_shuffle ? (
-                          <FiToggleRight size={24} color={TavariStyles.colors.success} />
+                      <div style={styles.trackInfo}>
+                        {editingTrack === track.id ? (
+                          <div style={styles.editForm}>
+                            <input
+                              style={styles.editInput}
+                              type="text"
+                              value={editForm.title}
+                              onChange={(e) => setEditForm({...editForm, title: e.target.value})}
+                              placeholder="Song title *"
+                            />
+                            <input
+                              style={styles.editInput}
+                              type="text"
+                              value={editForm.artist}
+                              onChange={(e) => setEditForm({...editForm, artist: e.target.value})}
+                              placeholder="Artist name"
+                            />
+                            <input
+                              style={styles.editInput}
+                              type="text"
+                              value={editForm.album}
+                              onChange={(e) => setEditForm({...editForm, album: e.target.value})}
+                              placeholder="Album name"
+                            />
+                            <div style={styles.editActions}>
+                              <button style={styles.saveButton} onClick={saveEdit}>
+                                Save Changes
+                              </button>
+                              <button style={styles.cancelButton} onClick={cancelEdit}>
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
                         ) : (
-                          <FiToggleLeft size={24} color={TavariStyles.colors.gray500} />
+                          <>
+                            <h3 style={styles.trackTitle}>{track.title}</h3>
+                            <p style={styles.trackArtist}>
+                              <FiUser size={14} />
+                              {track.artist || 'Unknown Artist'}
+                            </p>
+                            {track.album && (
+                              <p style={styles.trackArtist}>
+                                <FiMusic size={14} />
+                                {track.album}
+                              </p>
+                            )}
+                            <p style={styles.trackMeta}>
+                              <FiClock size={14} />
+                              {formatDuration(track.duration)}
+                              <span>•</span>
+                              Uploaded {formatDate(track.uploaded_at)}
+                              {track.file_size && (
+                                <>
+                                  <span>•</span>
+                                  {formatFileSize(track.file_size)}
+                                </>
+                              )}
+                            </p>
+                          </>
                         )}
-                        <span style={styles.toggleLabel}>
-                          {track.include_in_shuffle ? 'In Shuffle' : 'Excluded'}
-                        </span>
                       </div>
 
-                      <div style={styles.trackActions}>
-                        <button
-                          style={styles.actionButton}
-                          onClick={() => startEdit(track)}
-                          disabled={editingTrack === track.id}
-                          title="Edit Track Info"
+                      <div style={styles.trackControls}>
+                        {/* Shuffle Toggle - Protected */}
+                        <div 
+                          style={
+                            canEditThisTrack && editingTrack !== track.id
+                              ? {
+                                  ...styles.shuffleToggle,
+                                  backgroundColor: track.include_in_shuffle ? TavariStyles.colors.successBg : TavariStyles.colors.gray100
+                                }
+                              : styles.shuffleToggleDisabled
+                          } 
+                          onClick={() => canEditThisTrack && editingTrack !== track.id && toggleShuffle(track)}
+                          title={!canEditThisTrack ? 'You can only modify tracks you uploaded' : ''}
                         >
-                          <FiEdit2 size={16} />
-                        </button>
-                        <button
-                          style={styles.deleteButton}
-                          onClick={() => deleteTrack(track)}
-                          title="Delete Track"
-                        >
-                          <FiTrash2 size={16} />
-                        </button>
+                          {!canEditThisTrack && <FiLock size={14} />}
+                          {track.include_in_shuffle ? (
+                            <FiToggleRight size={24} color={TavariStyles.colors.success} />
+                          ) : (
+                            <FiToggleLeft size={24} color={TavariStyles.colors.gray500} />
+                          )}
+                          <span style={styles.toggleLabel}>
+                            {track.include_in_shuffle ? 'In Shuffle' : 'Excluded'}
+                          </span>
+                        </div>
+
+                        <div style={styles.trackActions}>
+                          {/* Edit Button - Protected */}
+                          {canEditThisTrack ? (
+                            <button
+                              style={styles.actionButton}
+                              onClick={() => startEdit(track)}
+                              disabled={editingTrack === track.id}
+                              title="Edit Track Info"
+                            >
+							<FiEdit2 size={16} />
+                            </button>
+                          ) : (
+                            <button
+                              style={styles.disabledButton}
+                              disabled
+                              title="You can only edit tracks you uploaded"
+                            >
+                              <FiLock size={16} />
+                            </button>
+                          )}
+
+                          {/* Delete Button - Protected */}
+                          {canDeleteThisTrack ? (
+                            <button
+                              style={styles.deleteButton}
+                              onClick={() => deleteTrack(track)}
+                              title="Delete Track"
+                            >
+                              <FiTrash2 size={16} />
+                            </button>
+                          ) : (
+                            <button
+                              style={styles.disabledButton}
+                              disabled
+                              title="You can only delete tracks you uploaded"
+                            >
+                              <FiLock size={16} />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

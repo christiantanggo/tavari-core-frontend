@@ -1,9 +1,17 @@
-// screens/POS/SaleReviewScreen.jsx - Fixed with proper error handling
+// screens/POS/SaleReviewScreen.jsx - WITH PERMISSION SYSTEM + NO CONSOLE LOGGING
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
+import toast from 'react-hot-toast';
+
+// Security & Authentication
+import { SecurityWrapper, useSecurityContext } from '../../Security';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+
+// Foundation Components
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { TavariStyles } from '../../utils/TavariStyles';
 
@@ -11,12 +19,42 @@ const SaleReviewScreen = () => {
   const navigate = useNavigate();
   const location = useLocation();
   
+  // Security context for sensitive sale review operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'SaleReviewScreen',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
   // Use standardized auth hook
   const auth = usePOSAuth({
     requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'SaleReviewScreen'
   });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canCreateSales = hasAnyPermission(['pos.sales.create', 'pos.register.operate']) || hasElevatedPrivileges();
+  const canViewAllSales = hasPermission('pos.sales.view_all') || hasElevatedPrivileges();
+  const canViewReports = hasPermission('pos.reports.view') || hasElevatedPrivileges();
+  const canApplyDiscounts = hasPermission('pos.discounts.apply') || hasElevatedPrivileges();
 
   // Use tax calculations hook
   const taxCalc = useTaxCalculations(auth.selectedBusinessId);
@@ -33,6 +71,14 @@ const SaleReviewScreen = () => {
   // Get cart data from navigation state
   const checkoutData = location.state?.checkoutData;
 
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canCreateSales) {
+      toast.error('You do not have permission to create sales');
+      navigate(location.state?.from === 'register' ? '/dashboard/pos/register' : '/dashboard/pos');
+    }
+  }, [permissionsLoading, canCreateSales, navigate, location.state?.from]);
+
   // Helper function to get rebate names for a specific item using tax hook
   const getItemRebateNames = (item) => {
     if (!cartData.item_tax_details) return [];
@@ -47,53 +93,69 @@ const SaleReviewScreen = () => {
   };
 
   useEffect(() => {
-    if (auth.isReady && auth.selectedBusinessId) {
+    if (auth.isReady && auth.selectedBusinessId && !permissionsLoading && canCreateSales) {
       if (!checkoutData) {
         setError('No checkout data provided');
         setLoading(false);
         return;
       }
 
-      console.log('Checkout data received:', checkoutData);
       loadSaleData();
     }
-  }, [auth.isReady, auth.selectedBusinessId, checkoutData]);
+  }, [auth.isReady, auth.selectedBusinessId, checkoutData, permissionsLoading, canCreateSales]);
 
   const loadSaleData = async () => {
     try {
       setLoading(true);
 
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('load_sale_review');
+      if (!rateLimitCheck.allowed) {
+        setError('Too many requests. Please wait a moment.');
+        setLoading(false);
+        return;
+      }
+
+      await logSecurityEvent('sale_review_access', {
+        action: 'load_sale_data',
+        business_id: auth.selectedBusinessId,
+        item_count: checkoutData?.items?.length || 0,
+        total_amount: checkoutData?.total_amount || 0
+      }, 'medium');
+
       // Fetch business settings - Handle missing or multiple records
-      console.log('Loading POS settings for business:', auth.selectedBusinessId);
       const { data: settingsArray, error: settingsError } = await supabase
         .from('pos_settings')
         .select('*')
         .eq('business_id', auth.selectedBusinessId);
 
       if (settingsError) {
-        console.error('Error loading POS settings:', settingsError);
-        // Don't throw, use defaults
+        await logSecurityEvent('settings_load_error', {
+          action: 'load_pos_settings_failed',
+          business_id: auth.selectedBusinessId,
+          error_message: settingsError.message
+        }, 'low');
       }
 
       // Use first settings record or defaults
       const settings = settingsArray && settingsArray.length > 0 ? settingsArray[0] : {};
-      console.log('POS settings loaded:', settings);
 
       // Fetch loyalty settings separately - Handle missing or multiple records
-      console.log('Loading loyalty settings for business:', auth.selectedBusinessId);
       const { data: loyaltyArray, error: loyaltyError } = await supabase
         .from('pos_loyalty_settings')
         .select('*')
         .eq('business_id', auth.selectedBusinessId);
 
       if (loyaltyError) {
-        console.error('Error loading loyalty settings:', loyaltyError);
-        // Don't throw, continue without loyalty
+        await logSecurityEvent('loyalty_settings_error', {
+          action: 'load_loyalty_settings_failed',
+          business_id: auth.selectedBusinessId,
+          error_message: loyaltyError.message
+        }, 'low');
       }
 
       // Use first loyalty settings record or defaults
       const loyaltySettings = loyaltyArray && loyaltyArray.length > 0 ? loyaltyArray[0] : {};
-      console.log('Loyalty settings loaded:', loyaltySettings);
 
       // Combine both settings objects
       const enhancedSettings = {
@@ -106,39 +168,46 @@ const SaleReviewScreen = () => {
       };
       
       setBusinessSettings(enhancedSettings);
-      console.log('Combined settings:', enhancedSettings);
 
       // If loyalty customer is attached, fetch their details and daily usage
       if (checkoutData.loyalty_customer_id) {
-        console.log('Loading loyalty customer:', checkoutData.loyalty_customer_id);
         const { data: customerArray, error: customerError } = await supabase
           .from('pos_loyalty_accounts')
           .select('*')
           .eq('id', checkoutData.loyalty_customer_id);
 
         if (customerError) {
-          console.error('Error loading loyalty customer:', customerError);
+          await logSecurityEvent('loyalty_customer_error', {
+            action: 'load_loyalty_customer_failed',
+            business_id: auth.selectedBusinessId,
+            customer_id: checkoutData.loyalty_customer_id,
+            error_message: customerError.message
+          }, 'low');
         } else if (customerArray && customerArray.length > 0) {
           const customer = customerArray[0];
           setLoyaltyCustomer(customer);
-          console.log('Loyalty customer loaded:', customer);
+          
+          await logSecurityEvent('loyalty_customer_loaded', {
+            action: 'load_loyalty_customer_success',
+            business_id: auth.selectedBusinessId,
+            customer_id: customer.id
+          }, 'low');
           
           await loadDailyLoyaltyUsage(checkoutData.loyalty_customer_id);
-        } else {
-          console.log('No loyalty customer found with ID:', checkoutData.loyalty_customer_id);
         }
       }
 
       setCartData(checkoutData);
-      console.log('Using actual tax data from checkout:', {
-        aggregated_taxes: checkoutData.aggregated_taxes,
-        aggregated_rebates: checkoutData.aggregated_rebates,
-        tax_amount: checkoutData.tax_amount,
-        item_tax_details: checkoutData.item_tax_details
-      });
+      
+      await recordAction('sale_review_loaded', auth.selectedBusinessId, true);
 
     } catch (err) {
-      console.error('Error loading sale data:', err);
+      await logSecurityEvent('sale_review_error', {
+        action: 'load_sale_data_failed',
+        business_id: auth.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
       setError(err.message);
     } finally {
       setLoading(false);
@@ -149,6 +218,12 @@ const SaleReviewScreen = () => {
     try {
       const today = new Date().toISOString().split('T')[0];
       
+      await logSecurityEvent('daily_loyalty_usage_access', {
+        action: 'load_daily_usage',
+        business_id: auth.selectedBusinessId,
+        customer_id: customerId
+      }, 'low');
+
       const { data: loyaltyTransactions, error } = await supabase
         .from('pos_loyalty_transactions')
         .select(`
@@ -172,12 +247,35 @@ const SaleReviewScreen = () => {
         });
       }
     } catch (err) {
-      console.error('Error loading daily loyalty usage:', err);
+      await logSecurityEvent('daily_loyalty_usage_error', {
+        action: 'load_daily_usage_failed',
+        business_id: auth.selectedBusinessId,
+        customer_id: customerId,
+        error_message: err.message
+      }, 'low');
     }
   };
 
   const handleTransactionClick = async (saleNumber) => {
+    if (!canViewAllSales) {
+      toast.error('You do not have permission to view transaction details');
+      return;
+    }
+
     try {
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('view_transaction_details');
+      if (!rateLimitCheck.allowed) {
+        toast.error('Too many requests. Please wait a moment.');
+        return;
+      }
+
+      await logSecurityEvent('transaction_detail_access', {
+        action: 'view_transaction',
+        business_id: auth.selectedBusinessId,
+        sale_number: saleNumber
+      }, 'medium');
+
       // Handle potential multiple or no results
       const { data: saleArray, error } = await supabase
         .from('pos_sales')
@@ -196,7 +294,13 @@ const SaleReviewScreen = () => {
       if (error) throw error;
 
       if (!saleArray || saleArray.length === 0) {
-        alert('Transaction not found');
+        await logSecurityEvent('transaction_not_found', {
+          action: 'view_transaction_failed',
+          business_id: auth.selectedBusinessId,
+          sale_number: saleNumber
+        }, 'low');
+        
+        toast.error('Transaction not found');
         return;
       }
 
@@ -204,27 +308,70 @@ const SaleReviewScreen = () => {
       const saleData = saleArray[0];
       setSelectedTransaction(saleData);
       setShowReceiptModal(true);
+
+      await recordAction('transaction_viewed', saleData.id, true);
+
     } catch (err) {
-      console.error('Error fetching transaction:', err);
-      alert('Could not load transaction details: ' + err.message);
+      await logSecurityEvent('transaction_detail_error', {
+        action: 'view_transaction_error',
+        business_id: auth.selectedBusinessId,
+        sale_number: saleNumber,
+        error_message: err.message
+      }, 'medium');
+      
+      toast.error('Could not load transaction details: ' + err.message);
     }
   };
 
-  const handleBackToRegister = () => {
+  const handleBackToRegister = async () => {
+    await logSecurityEvent('sale_review_cancelled', {
+      action: 'back_to_register',
+      business_id: auth.selectedBusinessId
+    }, 'low');
+
+    await recordAction('sale_review_cancelled', auth.selectedBusinessId, true);
+
     navigate('/dashboard/pos/register');
   };
 
-  const handleProceedToPayment = () => {
-    navigate('/dashboard/pos/payment', {
-      state: {
-        saleData: {
-          ...cartData,
-          businessSettings,
-          loyaltyCustomer,
-          business_id: auth.selectedBusinessId
-        }
+  const handleProceedToPayment = async () => {
+    try {
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('proceed_to_payment');
+      if (!rateLimitCheck.allowed) {
+        toast.error('Too many requests. Please wait a moment.');
+        return;
       }
-    });
+
+      await logSecurityEvent('proceed_to_payment', {
+        action: 'proceed_to_payment',
+        business_id: auth.selectedBusinessId,
+        total_amount: cartData.total_amount,
+        item_count: cartData.items?.length || 0
+      }, 'medium');
+
+      await recordAction('proceed_to_payment', auth.selectedBusinessId, true);
+
+      navigate('/dashboard/pos/payment', {
+        state: {
+          saleData: {
+            ...cartData,
+            businessSettings,
+            loyaltyCustomer,
+            business_id: auth.selectedBusinessId
+          },
+          from: location.state?.from || 'register'
+        }
+      });
+    } catch (err) {
+      await logSecurityEvent('proceed_to_payment_error', {
+        action: 'proceed_to_payment_failed',
+        business_id: auth.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
+      toast.error('Error proceeding to payment: ' + err.message);
+    }
   };
 
   const renderLoyaltyBalance = () => {
@@ -281,301 +428,329 @@ const SaleReviewScreen = () => {
   // Loading state
   if (loading) {
     return (
-      <POSAuthWrapper
-        requiredRoles={['employee', 'manager', 'owner']}
-        requireBusiness={true}
+      <SecurityWrapper
         componentName="SaleReviewScreen"
+        sensitiveComponent={true}
+        requireSecureConnection={false}
+        securityLevel="high"
       >
-        <div style={styles.container}>
-          <div style={styles.loading}>
-            <div style={styles.spinner}></div>
-            <div>Loading sale review...</div>
-            <style>{TavariStyles.keyframes.spin}</style>
-            <div style={{ fontSize: TavariStyles.typography.fontSize.sm, marginTop: TavariStyles.spacing.md }}>
-              Business ID: {auth.selectedBusinessId?.slice(0, 8) || 'Not selected'}...
-            </div>
-            {checkoutData && (
-              <div style={{ fontSize: TavariStyles.typography.fontSize.sm, marginTop: TavariStyles.spacing.xs }}>
-                Items count: {checkoutData.items?.length || 0}
+        <POSAuthWrapper
+          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="SaleReviewScreen"
+        >
+          <div style={styles.container}>
+            <div style={styles.loading}>
+              <div style={styles.spinner}></div>
+              <div>Loading sale review...</div>
+              <style>{TavariStyles.keyframes.spin}</style>
+              <div style={{ fontSize: TavariStyles.typography.fontSize.sm, marginTop: TavariStyles.spacing.md }}>
+                Business ID: {auth.selectedBusinessId?.slice(0, 8) || 'Not selected'}...
               </div>
-            )}
+              {checkoutData && (
+                <div style={{ fontSize: TavariStyles.typography.fontSize.sm, marginTop: TavariStyles.spacing.xs }}>
+                  Items count: {checkoutData.items?.length || 0}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      </POSAuthWrapper>
+        </POSAuthWrapper>
+      </SecurityWrapper>
     );
   }
 
   if (error) {
     return (
-      <POSAuthWrapper
-        requiredRoles={['employee', 'manager', 'owner']}
-        requireBusiness={true}
+      <SecurityWrapper
         componentName="SaleReviewScreen"
+        sensitiveComponent={true}
+        requireSecureConnection={false}
+        securityLevel="high"
       >
-        <div style={styles.container}>
-          <div style={styles.error}>
-            <h3>Error</h3>
-            <p>{error}</p>
-            <div style={{ fontSize: TavariStyles.typography.fontSize.sm, marginTop: TavariStyles.spacing.md, color: TavariStyles.colors.gray600 }}>
-              Debug Info:
-              <br />Business ID: {auth.selectedBusinessId?.slice(0, 8) || 'Not selected'}...
-              <br />Checkout Data: {checkoutData ? 'Present' : 'Missing'}
-              {checkoutData && (
-                <>
-                  <br />Items: {checkoutData.items?.length || 'No items'}
-                  <br />Total: ${checkoutData.total_amount?.toFixed(2) || 'No total'}
-                </>
-              )}
+        <POSAuthWrapper
+          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="SaleReviewScreen"
+        >
+          <div style={styles.container}>
+            <div style={styles.error}>
+              <h3>Error</h3>
+              <p>{error}</p>
+              <div style={{ fontSize: TavariStyles.typography.fontSize.sm, marginTop: TavariStyles.spacing.md, color: TavariStyles.colors.gray600 }}>
+                Debug Info:
+                <br />Business ID: {auth.selectedBusinessId?.slice(0, 8) || 'Not selected'}...
+                <br />Checkout Data: {checkoutData ? 'Present' : 'Missing'}
+                {checkoutData && (
+                  <>
+                    <br />Items: {checkoutData.items?.length || 'No items'}
+                    <br />Total: ${checkoutData.total_amount?.toFixed(2) || 'No total'}
+                  </>
+                )}
+              </div>
+              <button style={styles.backButton} onClick={handleBackToRegister}>
+                Back to Register
+              </button>
             </div>
-            <button style={styles.backButton} onClick={handleBackToRegister}>
-              Back to Register
-            </button>
           </div>
-        </div>
-      </POSAuthWrapper>
+        </POSAuthWrapper>
+      </SecurityWrapper>
     );
   }
 
   if (!cartData) {
     return (
-      <POSAuthWrapper
-        requiredRoles={['employee', 'manager', 'owner']}
-        requireBusiness={true}
+      <SecurityWrapper
         componentName="SaleReviewScreen"
+        sensitiveComponent={true}
+        requireSecureConnection={false}
+        securityLevel="high"
       >
-        <div style={styles.container}>
-          <div style={styles.error}>
-            <h3>No Sale Data</h3>
-            <p>No items to review</p>
-            <button style={styles.backButton} onClick={handleBackToRegister}>
-              Back to Register
-            </button>
+        <POSAuthWrapper
+          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="SaleReviewScreen"
+        >
+          <div style={styles.container}>
+            <div style={styles.error}>
+              <h3>No Sale Data</h3>
+              <p>No items to review</p>
+              <button style={styles.backButton} onClick={handleBackToRegister}>
+                Back to Register
+              </button>
+            </div>
           </div>
-        </div>
-      </POSAuthWrapper>
+        </POSAuthWrapper>
+      </SecurityWrapper>
     );
   }
 
   return (
-    <POSAuthWrapper
-      requiredRoles={['employee', 'manager', 'owner']}
-      requireBusiness={true}
+    <SecurityWrapper
       componentName="SaleReviewScreen"
+      sensitiveComponent={true}
+      requireSecureConnection={false}
+      securityLevel="high"
     >
-      <div style={styles.container}>
-        <div style={styles.header}>
-          <h2>Review Sale</h2>
-          <p>Please review the order details before proceeding to payment</p>
-        </div>
+      <POSAuthWrapper
+        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="SaleReviewScreen"
+      >
+        <div style={styles.container}>
+          <div style={styles.header}>
+            <h2>Review Sale</h2>
+            <p>Please review the order details before proceeding to payment</p>
+          </div>
 
-        <div style={styles.content}>
-          {/* Cart Items Review - WITH REBATE NAMES */}
-          <div style={styles.section}>
-            <h3 style={styles.sectionTitle}>Items ({cartData.item_count})</h3>
-            <div style={styles.itemsList}>
-              {cartData.items?.map((item, index) => {
-                const itemRebateNames = getItemRebateNames(item);
-                
-                return (
-                  <div key={index} style={styles.item}>
-                    <div style={styles.itemInfo}>
-                      <div style={styles.itemName}>{item.name}</div>
-                      {item.modifiers && item.modifiers.length > 0 && (
-                        <div style={styles.modifiers}>
-                          {item.modifiers.map((mod, modIndex) => (
-                            <div key={modIndex} style={styles.modifier}>
-                              {mod.required ? '• ' : '+ '}{mod.name}
-                              {mod.price > 0 && <span> (+${Number(mod.price).toFixed(2)})</span>}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {/* Show rebate names for this item */}
-                      {itemRebateNames.length > 0 && (
-                        <div style={styles.itemRebates}>
-                          {itemRebateNames.map((rebateName, rebateIndex) => (
-                            <div key={rebateIndex} style={styles.rebateName}>
-                              {rebateName}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {item.notes && (
-                        <div style={styles.notes}>Note: {item.notes}</div>
-                      )}
+          <div style={styles.content}>
+            {/* Cart Items Review - WITH REBATE NAMES */}
+            <div style={styles.section}>
+              <h3 style={styles.sectionTitle}>Items ({cartData.item_count})</h3>
+              <div style={styles.itemsList}>
+                {cartData.items?.map((item, index) => {
+                  const itemRebateNames = getItemRebateNames(item);
+                  
+                  return (
+                    <div key={index} style={styles.item}>
+                      <div style={styles.itemInfo}>
+                        <div style={styles.itemName}>{item.name}</div>
+                        {item.modifiers && item.modifiers.length > 0 && (
+                          <div style={styles.modifiers}>
+                            {item.modifiers.map((mod, modIndex) => (
+                              <div key={modIndex} style={styles.modifier}>
+                                {mod.required ? '• ' : '+ '}{mod.name}
+                                {mod.price > 0 && <span> (+${Number(mod.price).toFixed(2)})</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {/* Show rebate names for this item */}
+                        {itemRebateNames.length > 0 && (
+                          <div style={styles.itemRebates}>
+                            {itemRebateNames.map((rebateName, rebateIndex) => (
+                              <div key={rebateIndex} style={styles.rebateName}>
+                                {rebateName}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {item.notes && (
+                          <div style={styles.notes}>Note: {item.notes}</div>
+                        )}
+                      </div>
+                      <div style={styles.itemDetails}>
+                        <div style={styles.quantity}>Qty: {item.quantity}</div>
+                        <div style={styles.price}>${(item.price * item.quantity).toFixed(2)}</div>
+                      </div>
                     </div>
-                    <div style={styles.itemDetails}>
-                      <div style={styles.quantity}>Qty: {item.quantity}</div>
-                      <div style={styles.price}>${(item.price * item.quantity).toFixed(2)}</div>
-                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Customer Information */}
+            {loyaltyCustomer && (
+              <div style={styles.section}>
+                <h3 style={styles.sectionTitle}>Customer</h3>
+                <div style={styles.customerInfo}>
+                  <div style={styles.customerName}>{loyaltyCustomer.customer_name}</div>
+                  {loyaltyCustomer.customer_email && (
+                    <div style={styles.customerDetail}>{loyaltyCustomer.customer_email}</div>
+                  )}
+                  {loyaltyCustomer.customer_phone && (
+                    <div style={styles.customerDetail}>{loyaltyCustomer.customer_phone}</div>
+                  )}
+                  <div style={styles.loyaltyBalance}>
+                    {renderLoyaltyBalance()}
                   </div>
-                );
-              })}
+                  {renderDailyUsage()}
+                </div>
+              </div>
+            )}
+
+            {/* Sale Totals - USING ACTUAL CHECKOUT DATA */}
+            <div style={styles.section}>
+              <h3 style={styles.sectionTitle}>Order Total</h3>
+              <div style={styles.totals}>
+                <div style={styles.totalRow}>
+                  <span>Subtotal</span>
+                  <span>${cartData.subtotal.toFixed(2)}</span>
+                </div>
+
+                {cartData.discount_amount > 0 && (
+                  <div style={styles.totalRowDiscount}>
+                    <span>Discount</span>
+                    <span>-${cartData.discount_amount.toFixed(2)}</span>
+                  </div>
+                )}
+
+                {cartData.loyalty_redemption > 0 && (
+                  <div style={styles.totalRowLoyalty}>
+                    <span>
+                      {businessSettings.loyalty_mode === 'points' ? 'Points Redemption' : 'Loyalty Redemption'}
+                    </span>
+                    <span>
+                      {businessSettings.loyalty_mode === 'points' 
+                        ? `-${Math.round(cartData.loyalty_redemption * 1000).toLocaleString()} pts`
+                        : `-$${cartData.loyalty_redemption.toFixed(2)}`
+                      }
+                    </span>
+                  </div>
+                )}
+
+                <div style={styles.totalRowSubtotal}>
+                  <span>Taxable Amount</span>
+                  <span>${(cartData.subtotal - (cartData.discount_amount || 0) - (cartData.loyalty_redemption || 0)).toFixed(2)}</span>
+                </div>
+
+                {/* ACTUAL TAX BREAKDOWN FROM CHECKOUT DATA */}
+                {(cartData.aggregated_taxes && Object.keys(cartData.aggregated_taxes).length > 0) || 
+                 (cartData.aggregated_rebates && Object.keys(cartData.aggregated_rebates).length > 0) ? (
+                  <div style={styles.taxSection}>
+                    <div style={styles.taxSectionTitle}>Tax Details</div>
+                    
+                    {/* Show aggregated taxes from actual checkout data */}
+                    {cartData.aggregated_taxes && Object.entries(cartData.aggregated_taxes).map(([taxName, amount]) => (
+                      <div key={taxName} style={styles.taxRow}>
+                        <span>{taxName}</span>
+                        <span>${amount.toFixed(2)}</span>
+                      </div>
+                    ))}
+                    
+                    {/* Show aggregated rebates from actual checkout data */}
+                    {cartData.aggregated_rebates && Object.entries(cartData.aggregated_rebates).map(([rebateName, amount]) => (
+                      <div key={rebateName} style={styles.rebateRow}>
+                        <span>{rebateName}</span>
+                        <span>-${amount.toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div style={styles.totalRow}>
+                  <span>Total Tax</span>
+                  <span>${cartData.tax_amount.toFixed(2)}</span>
+                </div>
+
+                {businessSettings.service_fee > 0 && (
+                  <div style={styles.totalRow}>
+                    <span>Service Fee</span>
+                    <span>${((cartData.subtotal * businessSettings.service_fee) || 0).toFixed(2)}</span>
+                  </div>
+                )}
+
+                <div style={styles.totalRowFinal}>
+                  <span>Total</span>
+                  <span>${cartData.total_amount.toFixed(2)}</span>
+                </div>
+              </div>
             </div>
           </div>
 
-          {/* Customer Information */}
-          {loyaltyCustomer && (
-            <div style={styles.section}>
-              <h3 style={styles.sectionTitle}>Customer</h3>
-              <div style={styles.customerInfo}>
-                <div style={styles.customerName}>{loyaltyCustomer.customer_name}</div>
-                {loyaltyCustomer.customer_email && (
-                  <div style={styles.customerDetail}>{loyaltyCustomer.customer_email}</div>
-                )}
-                {loyaltyCustomer.customer_phone && (
-                  <div style={styles.customerDetail}>{loyaltyCustomer.customer_phone}</div>
-                )}
-                <div style={styles.loyaltyBalance}>
-                  {renderLoyaltyBalance()}
+          {/* Transaction Receipt Modal */}
+          {showReceiptModal && selectedTransaction && (
+            <div style={styles.modal}>
+              <div style={styles.modalContent}>
+                <div style={styles.modalHeader}>
+                  <h3>Transaction #{selectedTransaction.sale_number}</h3>
+                  <button 
+                    style={styles.closeButton}
+                    onClick={() => setShowReceiptModal(false)}
+                  >
+                    ×
+                  </button>
                 </div>
-                {renderDailyUsage()}
+                <div style={styles.receiptDetails}>
+                  <div style={styles.detailRow}>
+                    <strong>Date:</strong> {new Date(selectedTransaction.created_at).toLocaleString()}
+                  </div>
+                  <div style={styles.detailRow}>
+                    <strong>Total:</strong> ${selectedTransaction.final_total?.toFixed(2) || selectedTransaction.total?.toFixed(2) || '0.00'}
+                  </div>
+                  <div style={styles.detailRow}>
+                    <strong>Customer:</strong> {selectedTransaction.pos_loyalty_accounts?.customer_name || 'N/A'}
+                  </div>
+                  
+                  <h4 style={styles.itemsHeader}>Items</h4>
+                  {selectedTransaction.pos_sale_items?.map((item, index) => (
+                    <div key={index} style={styles.receiptItem}>
+                      <span>{item.quantity}x {item.inventory?.name || item.name || 'Item'}</span>
+                      <span>${((item.price || item.unit_price || 0) * (item.quantity || 1)).toFixed(2)}</span>
+                    </div>
+                  ))}
+                  
+                  <h4 style={styles.itemsHeader}>Payments</h4>
+                  {selectedTransaction.pos_payments?.map((payment, index) => (
+                    <div key={index} style={styles.receiptItem}>
+                      <span>{payment.payment_method || payment.method}</span>
+                      <span>${payment.amount.toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={styles.modalActions}>
+                  <button 
+                    style={styles.closeModalButton}
+                    onClick={() => setShowReceiptModal(false)}
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Sale Totals - USING ACTUAL CHECKOUT DATA */}
-          <div style={styles.section}>
-            <h3 style={styles.sectionTitle}>Order Total</h3>
-            <div style={styles.totals}>
-              <div style={styles.totalRow}>
-                <span>Subtotal</span>
-                <span>${cartData.subtotal.toFixed(2)}</span>
-              </div>
-
-              {cartData.discount_amount > 0 && (
-                <div style={styles.totalRowDiscount}>
-                  <span>Discount</span>
-                  <span>-${cartData.discount_amount.toFixed(2)}</span>
-                </div>
-              )}
-
-              {cartData.loyalty_redemption > 0 && (
-                <div style={styles.totalRowLoyalty}>
-                  <span>
-                    {businessSettings.loyalty_mode === 'points' ? 'Points Redemption' : 'Loyalty Redemption'}
-                  </span>
-                  <span>
-                    {businessSettings.loyalty_mode === 'points' 
-                      ? `-${Math.round(cartData.loyalty_redemption * 1000).toLocaleString()} pts`
-                      : `-$${cartData.loyalty_redemption.toFixed(2)}`
-                    }
-                  </span>
-                </div>
-              )}
-
-              <div style={styles.totalRowSubtotal}>
-                <span>Taxable Amount</span>
-                <span>${(cartData.subtotal - (cartData.discount_amount || 0) - (cartData.loyalty_redemption || 0)).toFixed(2)}</span>
-              </div>
-
-              {/* ACTUAL TAX BREAKDOWN FROM CHECKOUT DATA */}
-              {(cartData.aggregated_taxes && Object.keys(cartData.aggregated_taxes).length > 0) || 
-               (cartData.aggregated_rebates && Object.keys(cartData.aggregated_rebates).length > 0) ? (
-                <div style={styles.taxSection}>
-                  <div style={styles.taxSectionTitle}>Tax Details</div>
-                  
-                  {/* Show aggregated taxes from actual checkout data */}
-                  {cartData.aggregated_taxes && Object.entries(cartData.aggregated_taxes).map(([taxName, amount]) => (
-                    <div key={taxName} style={styles.taxRow}>
-                      <span>{taxName}</span>
-                      <span>${amount.toFixed(2)}</span>
-                    </div>
-                  ))}
-                  
-                  {/* Show aggregated rebates from actual checkout data */}
-                  {cartData.aggregated_rebates && Object.entries(cartData.aggregated_rebates).map(([rebateName, amount]) => (
-                    <div key={rebateName} style={styles.rebateRow}>
-                      <span>{rebateName}</span>
-                      <span>-${amount.toFixed(2)}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-
-              <div style={styles.totalRow}>
-                <span>Total Tax</span>
-                <span>${cartData.tax_amount.toFixed(2)}</span>
-              </div>
-
-              {businessSettings.service_fee > 0 && (
-                <div style={styles.totalRow}>
-                  <span>Service Fee</span>
-                  <span>${((cartData.subtotal * businessSettings.service_fee) || 0).toFixed(2)}</span>
-                </div>
-              )}
-
-              <div style={styles.totalRowFinal}>
-                <span>Total</span>
-                <span>${cartData.total_amount.toFixed(2)}</span>
-              </div>
-            </div>
+          {/* Action Buttons */}
+          <div style={styles.actions}>
+            <button style={styles.backButton} onClick={handleBackToRegister}>
+              Back to Register
+            </button>
+            <button style={styles.proceedButton} onClick={handleProceedToPayment}>
+              Proceed to Payment - ${cartData.total_amount.toFixed(2)}
+            </button>
           </div>
         </div>
-
-        {/* Transaction Receipt Modal */}
-        {showReceiptModal && selectedTransaction && (
-          <div style={styles.modal}>
-            <div style={styles.modalContent}>
-              <div style={styles.modalHeader}>
-                <h3>Transaction #{selectedTransaction.sale_number}</h3>
-                <button 
-                  style={styles.closeButton}
-                  onClick={() => setShowReceiptModal(false)}
-                >
-                  ×
-                </button>
-              </div>
-              <div style={styles.receiptDetails}>
-                <div style={styles.detailRow}>
-                  <strong>Date:</strong> {new Date(selectedTransaction.created_at).toLocaleString()}
-                </div>
-                <div style={styles.detailRow}>
-                  <strong>Total:</strong> ${selectedTransaction.final_total?.toFixed(2) || selectedTransaction.total?.toFixed(2) || '0.00'}
-                </div>
-                <div style={styles.detailRow}>
-                  <strong>Customer:</strong> {selectedTransaction.pos_loyalty_accounts?.customer_name || 'N/A'}
-                </div>
-                
-                <h4 style={styles.itemsHeader}>Items</h4>
-                {selectedTransaction.pos_sale_items?.map((item, index) => (
-                  <div key={index} style={styles.receiptItem}>
-                    <span>{item.quantity}x {item.inventory?.name || item.name || 'Item'}</span>
-                    <span>${((item.price || item.unit_price || 0) * (item.quantity || 1)).toFixed(2)}</span>
-                  </div>
-                ))}
-                
-                <h4 style={styles.itemsHeader}>Payments</h4>
-                {selectedTransaction.pos_payments?.map((payment, index) => (
-                  <div key={index} style={styles.receiptItem}>
-                    <span>{payment.payment_method || payment.method}</span>
-                    <span>${payment.amount.toFixed(2)}</span>
-                  </div>
-                ))}
-              </div>
-              <div style={styles.modalActions}>
-                <button 
-                  style={styles.closeModalButton}
-                  onClick={() => setShowReceiptModal(false)}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Action Buttons */}
-        <div style={styles.actions}>
-          <button style={styles.backButton} onClick={handleBackToRegister}>
-            Back to Register
-          </button>
-          <button style={styles.proceedButton} onClick={handleProceedToPayment}>
-            Proceed to Payment - ${cartData.total_amount.toFixed(2)}
-          </button>
-        </div>
-      </div>
-    </POSAuthWrapper>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

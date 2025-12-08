@@ -1,4 +1,4 @@
-// CampaignBuilder.jsx - Full Featured Email Campaign Builder with Pause Protection
+// CampaignBuilder.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
@@ -9,14 +9,62 @@ import {
   FiSave, FiSend, FiEye, FiSmartphone, FiMonitor, FiFileText, FiDollarSign,
   FiClock, FiSettings, FiBarChart2, FiActivity, FiLayers, FiTarget, FiArrowLeft,
   FiType, FiImage, FiLink, FiMinus, FiShare2, FiCopy, FiMove, FiTrash2,
-  FiAlignLeft, FiAlignCenter, FiAlignRight, FiUpload, FiPlus, FiChevronUp, FiChevronDown
+  FiAlignLeft, FiAlignCenter, FiAlignRight, FiUpload, FiPlus, FiChevronUp, FiChevronDown,
+  FiAlertCircle, FiMail, FiX
 } from 'react-icons/fi';
+import emailSendingService from '../../helpers/Mail/emailSendingService';
+
+// Permission System Imports
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import toast from 'react-hot-toast';
 
 const CampaignBuilder = () => {
   const navigate = useNavigate();
   const { campaignId } = useParams();
   const { business } = useBusiness();
   const isEditing = !!campaignId;
+
+  // Security context for sensitive campaign data
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'CampaignBuilder',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'medium'
+  });
+
+  // Authentication using standardized hook
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin'],
+    requireBusiness: true,
+    componentName: 'CampaignBuilder'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
 
   // State management
   const [campaign, setCampaign] = useState({
@@ -33,14 +81,52 @@ const CampaignBuilder = () => {
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 1024);
   const [activeBlock, setActiveBlock] = useState(null);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [showTestModal, setShowTestModal] = useState(false);
+  const [testEmail, setTestEmail] = useState('');
+  const [sendingTest, setSendingTest] = useState(false);
 
   const businessId = business?.id;
 
+  // Permission checks
+  const canViewCampaigns = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+  const canCreateCampaigns = hasPermission('mail.campaigns.create') || hasElevatedPrivileges();
+  const canEditCampaigns = hasPermission('mail.campaigns.create') || hasElevatedPrivileges();
+  const canSendCampaigns = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
+  const canUploadImages = hasPermission('mail.campaigns.create') || hasElevatedPrivileges();
+
+  const TEST_PATTERNS = [
+    /^(test|fake|sample)[\.\+\w-]*@/i,
+    /@example\.com$/i,
+    /@test\./i,
+    /@invalid\./i,
+    /@no-reply\./i
+  ];
+
+  const isMailboxSimulator = (email) => /@simulator\.amazonses\.com$/i.test(email);
+
+  const isSafeRecipient = (email) => {
+    if (!email) return false;
+    return !TEST_PATTERNS.some(pattern => pattern.test(email));
+  };
+
+  // Check permissions on mount
   useEffect(() => {
-    if (isEditing && campaignId && businessId) {
+    if (!permissionsLoading && !authLoading) {
+      if (isEditing && !canEditCampaigns) {
+        toast.error('You do not have permission to edit campaigns');
+        navigate('/dashboard/mail/campaigns');
+      } else if (!isEditing && !canCreateCampaigns) {
+        toast.error('You do not have permission to create campaigns');
+        navigate('/dashboard/mail/campaigns');
+      }
+    }
+  }, [permissionsLoading, authLoading, canEditCampaigns, canCreateCampaigns, isEditing]);
+
+  useEffect(() => {
+    if (isEditing && campaignId && businessId && canViewCampaigns) {
       loadCampaign();
     }
-  }, [campaignId, businessId]);
+  }, [campaignId, businessId, canViewCampaigns]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -51,7 +137,26 @@ const CampaignBuilder = () => {
   }, []);
 
   const loadCampaign = async () => {
+    // Permission check
+    if (!canViewCampaigns) {
+      toast.error('You do not have permission to view campaigns');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('load_campaign', 10, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
     try {
+      await logSecurityEvent('campaign_access', {
+        action: 'load_campaign',
+        campaign_id: campaignId,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
+
       const { data, error } = await supabase
         .from('mail_campaigns')
         .select('*')
@@ -68,9 +173,12 @@ const CampaignBuilder = () => {
         content_blocks: data.content_json || [],
         status: data.status || 'draft'
       });
+
+      await recordAction('campaign_loaded', true, campaignId);
     } catch (error) {
       console.error('Error loading campaign:', error);
       setMessage('Error loading campaign');
+      await recordAction('campaign_loaded', false, campaignId);
     }
   };
 
@@ -141,6 +249,12 @@ const CampaignBuilder = () => {
 
   // Add block functions
   const addBlock = (blockType) => {
+    // Permission check
+    if (!canCreateCampaigns && !canEditCampaigns) {
+      toast.error('You do not have permission to add content blocks');
+      return;
+    }
+
     const newBlock = createBlockTemplate(blockType);
     setCampaign(prev => ({
       ...prev,
@@ -281,6 +395,12 @@ const CampaignBuilder = () => {
 
   // Block management functions
   const updateBlock = (blockId, updates) => {
+    // Permission check
+    if (!canEditCampaigns) {
+      toast.error('You do not have permission to edit campaign content');
+      return;
+    }
+
     setCampaign(prev => ({
       ...prev,
       content_blocks: prev.content_blocks.map(block =>
@@ -290,6 +410,12 @@ const CampaignBuilder = () => {
   };
 
   const removeBlock = (blockId) => {
+    // Permission check
+    if (!canEditCampaigns) {
+      toast.error('You do not have permission to remove content blocks');
+      return;
+    }
+
     setCampaign(prev => ({
       ...prev,
       content_blocks: prev.content_blocks.filter(block => block.id !== blockId)
@@ -297,6 +423,12 @@ const CampaignBuilder = () => {
   };
 
   const duplicateBlock = (blockId) => {
+    // Permission check
+    if (!canEditCampaigns) {
+      toast.error('You do not have permission to duplicate content blocks');
+      return;
+    }
+
     const blockToDupe = campaign.content_blocks.find(block => block.id === blockId);
     if (blockToDupe) {
       const duplicated = {
@@ -311,6 +443,12 @@ const CampaignBuilder = () => {
   };
 
   const moveBlock = (blockId, direction) => {
+    // Permission check
+    if (!canEditCampaigns) {
+      toast.error('You do not have permission to reorder content blocks');
+      return;
+    }
+
     const blocks = [...campaign.content_blocks];
     const currentIndex = blocks.findIndex(block => block.id === blockId);
     
@@ -325,18 +463,38 @@ const CampaignBuilder = () => {
 
   // Image upload function
   const uploadImage = async (file, blockId) => {
+    // Permission check
+    if (!canUploadImages) {
+      toast.error('You do not have permission to upload images');
+      return;
+    }
+
     if (!file.type.startsWith('image/')) {
-      alert('Please select an image file.');
+      toast.error('Please select an image file.');
       return;
     }
 
     if (file.size > 5 * 1024 * 1024) {
-      alert('Image must be smaller than 5MB.');
+      toast.error('Image must be smaller than 5MB.');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('upload_image', 5, 60000)) {
+      toast.error('Too many uploads. Please wait a moment.');
       return;
     }
 
     setUploadingImage(true);
     try {
+      await logSecurityEvent('image_upload', {
+        action: 'upload_campaign_image',
+        file_name: file.name,
+        file_size: file.size,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
+
       const fileExt = file.name.split('.').pop();
       const fileName = `${businessId}/${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`;
 
@@ -361,9 +519,12 @@ const CampaignBuilder = () => {
         }
       });
 
+      toast.success('Image uploaded successfully');
+      await recordAction('image_uploaded', true, fileName);
     } catch (error) {
       console.error('Error uploading image:', error);
-      alert('Error uploading image: ' + error.message);
+      toast.error('Error uploading image: ' + error.message);
+      await recordAction('image_uploaded', false, file.name);
     } finally {
       setUploadingImage(false);
     }
@@ -489,14 +650,39 @@ const CampaignBuilder = () => {
   };
 
   const handleSave = async () => {
+    // Permission check
+    if (isEditing && !canEditCampaigns) {
+      toast.error('You do not have permission to edit campaigns');
+      return;
+    }
+
+    if (!isEditing && !canCreateCampaigns) {
+      toast.error('You do not have permission to create campaigns');
+      return;
+    }
+
     if (!businessId) {
       setMessage('No business selected');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('save_campaign', 10, 60000)) {
+      toast.error('Too many save requests. Please wait a moment.');
       return;
     }
 
     setSaving(true);
     try {
       setMessage('');
+
+      await logSecurityEvent('campaign_save', {
+        action: isEditing ? 'update_campaign' : 'create_campaign',
+        campaign_id: campaignId,
+        campaign_name: campaign.name,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
 
       const campaignData = {
         business_id: businessId,
@@ -518,6 +704,7 @@ const CampaignBuilder = () => {
           .select()
           .single();
       } else {
+        campaignData.created_by = authUser?.id;
         result = await supabase
           .from('mail_campaigns')
           .insert(campaignData)
@@ -528,20 +715,30 @@ const CampaignBuilder = () => {
       if (result.error) throw result.error;
 
       setMessage('Campaign saved successfully');
+      toast.success('Campaign saved successfully');
 
       if (!isEditing && result.data) {
         navigate(`/dashboard/mail/builder/${result.data.id}`);
       }
 
+      await recordAction('campaign_saved', true, result.data?.id);
     } catch (error) {
       console.error('Error saving campaign:', error);
       setMessage('Error saving campaign: ' + error.message);
+      toast.error('Error saving campaign');
+      await recordAction('campaign_saved', false, campaignId);
     } finally {
       setSaving(false);
     }
   };
 
   const handleSend = async () => {
+    // Permission check
+    if (!canSendCampaigns) {
+      toast.error('You do not have permission to send campaigns');
+      return;
+    }
+
     // Block sending if paused
     if (blockEmailSendIfPaused('Campaign sending')) return;
 
@@ -556,9 +753,130 @@ const CampaignBuilder = () => {
   
     // Navigate to the campaign sender
     if (isEditing && campaignId) {
+      await logSecurityEvent('campaign_send_initiated', {
+        action: 'navigate_to_sender',
+        campaign_id: campaignId,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'high');
       navigate(`/dashboard/mail/sender/${campaignId}`);
     } else {
       setMessage('Please save the campaign first');
+    }
+  };
+
+  const handleOpenTestModal = () => {
+    if (!canSendCampaigns) {
+      toast.error('You do not have permission to send test emails');
+      return;
+    }
+
+    if (!campaignId) {
+      toast.error('Save the campaign before sending a test email.');
+      return;
+    }
+
+    setShowTestModal(true);
+  };
+
+  const handleCloseTestModal = () => {
+    if (sendingTest) return;
+    setShowTestModal(false);
+    setTestEmail('');
+  };
+
+  const handleSendTestEmail = async () => {
+    if (!canSendCampaigns) {
+      toast.error('You do not have permission to send test emails');
+      return;
+    }
+
+    if (!campaignId) {
+      toast.error('Save the campaign before sending a test email.');
+      return;
+    }
+
+    if (!businessId) {
+      toast.error('No business selected. Please refresh and try again.');
+      return;
+    }
+
+    const emailToSend = testEmail.trim();
+    if (!emailToSend) {
+      toast.error('Enter an email address to send your test campaign.');
+      return;
+    }
+
+    const validation = await validateInput(emailToSend, 'email', 'campaign_test_email');
+    if (!validation.valid) {
+      toast.error(validation.error || 'Invalid email address');
+      return;
+    }
+
+    if (blockEmailSendIfPaused('Test email sending')) return;
+
+    if (!checkRateLimit('send_test_email', 5, 60000)) {
+      toast.error('Too many test email requests. Please wait a moment.');
+      return;
+    }
+
+    if (!isSafeRecipient(emailToSend) && !isMailboxSimulator(emailToSend)) {
+      toast.error('That looks like a test/invalid email. Use the Amazon SES mailbox simulator for testing.');
+      return;
+    }
+
+    setSendingTest(true);
+    try {
+      await logSecurityEvent('builder_test_email_send', {
+        action: 'send_test_email',
+        campaign_id: campaignId,
+        campaign_name: campaign.name,
+        test_email: emailToSend,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
+
+      const testContact = {
+        id: 'test-contact',
+        email: emailToSend,
+        first_name: 'Test',
+        last_name: 'User',
+        subscribed: true
+      };
+
+      const testCampaignPayload = {
+        ...campaign,
+        id: campaignId,
+        business_id: businessId,
+        content_html: generateEmailHTML()
+      };
+
+      const queueItem = {
+        campaign_id: campaignId,
+        contact_id: testContact.id,
+        email_address: testContact.email,
+        campaign: testCampaignPayload,
+        contact: testContact,
+        business_id: businessId
+      };
+
+      const result = await emailSendingService.sendSingleEmail(queueItem);
+
+      if (result.success) {
+        toast.success(`Test email sent successfully to ${emailToSend}!`);
+        setTestEmail('');
+        setShowTestModal(false);
+        await recordAction('test_email_sent', true, emailToSend);
+      } else {
+        toast.error(`Test email failed: ${result.error}`);
+        await recordAction('test_email_sent', false, emailToSend);
+      }
+    } catch (error) {
+      console.error('Test email error:', error);
+      toast.error(`Test email failed: ${error.message}`);
+      await recordAction('test_email_sent', false, emailToSend);
+    } finally {
+      setSendingTest(false);
     }
   };
 
@@ -815,7 +1133,7 @@ const CampaignBuilder = () => {
                 }}
                 style={styles.fileInput}
                 id={`image-${block.id}`}
-                disabled={uploadingImage}
+                disabled={uploadingImage || !canUploadImages}
               />
               <label htmlFor={`image-${block.id}`} style={styles.imageUploadLabel}>
                 {uploadingImage ? (
@@ -1023,225 +1341,354 @@ const CampaignBuilder = () => {
     }
   };
 
+  if (authLoading || permissionsLoading) {
+    return (
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.loadingState}>
+            <div style={styles.spinner}></div>
+            <p>Loading campaign builder...</p>
+          </div>
+        </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  if (authError) {
+    return (
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.errorState}>
+            <FiAlertCircle style={styles.errorIcon} />
+            <h3>Authentication Error</h3>
+            <p>{authError}</p>
+          </div>
+        </div>
+      </POSAuthWrapper>
+    );
+  }
+
   return (
-    <div style={styles.container}>
-      {/* Email Pause Banner */}
-      <EmailPauseBanner />
+    <POSAuthWrapper>
+      <SecurityWrapper>
+        <div style={styles.container}>
+          {/* Email Pause Banner */}
+          <EmailPauseBanner />
 
-      {/* Header */}
-      <div style={styles.header}>
-        <div style={styles.titleSection}>
-          <button
-            style={styles.backButton}
-            onClick={() => navigate('/dashboard/mail/campaigns')}
-          >
-            <FiArrowLeft />
-            Back to Campaigns
-          </button>
-          <h1 style={styles.title}>
-            {isEditing ? 'Edit Campaign' : 'Create Campaign'}
-          </h1>
-        </div>
-        <div style={styles.headerActions}>
-          <button
-            style={styles.secondaryButton}
-            onClick={() => setPreviewMode(previewMode === 'desktop' ? 'mobile' : 'desktop')}
-          >
-            {previewMode === 'desktop' ? <FiSmartphone /> : <FiMonitor />}
-            {previewMode === 'desktop' ? 'Mobile' : 'Desktop'} Preview
-          </button>
-          <button
-            style={styles.secondaryButton}
-            onClick={handleSave}
-            disabled={saving}
-          >
-            <FiSave />
-            {saving ? 'Saving...' : 'Save'}
-          </button>
-          <button
-            style={styles.primaryButton}
-            onClick={handleSend}
-          >
-            <FiSend />
-            Send Campaign
-          </button>
-        </div>
-      </div>
-
-      {/* Message */}
-      {message && (
-        <div style={{
-          ...styles.message,
-          backgroundColor: message.includes('Error') || message.includes('fix') ? '#ffebee' : '#e8f5e8',
-          color: message.includes('Error') || message.includes('fix') ? '#c62828' : '#2e7d32'
-        }}>
-          {message.split('\n').map((line, index) => (
-            <div key={index}>{line}</div>
-          ))}
-        </div>
-      )}
-
-      {/* Main Content */}
-      <div style={isMobile ? styles.contentMobile : styles.content}>
-        {/* Editor Panel */}
-        <div style={styles.editorPanel}>
-          {/* Campaign Settings */}
-          <div style={styles.settingsSection}>
-            <h3 style={styles.sectionTitle}>Campaign Settings</h3>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Campaign Name</label>
-              <input
-                type="text"
-                style={styles.input}
-                value={campaign.name}
-                onChange={(e) => handleInputChange('name', e.target.value)}
-                placeholder="Enter campaign name"
-              />
+          {/* Permission Denied Message */}
+          {!canViewCampaigns && (
+            <div style={styles.permissionDenied}>
+              <FiAlertCircle style={styles.permissionIcon} />
+              <h3>Access Denied</h3>
+              <p>You do not have permission to access the campaign builder</p>
+              <button
+                style={styles.backButton}
+                onClick={() => navigate('/dashboard/mail/campaigns')}
+              >
+                <FiArrowLeft />
+                Return to Campaigns
+              </button>
             </div>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Subject Line</label>
-              <input
-                type="text"
-                style={styles.input}
-                value={campaign.subject_line}
-                onChange={(e) => handleInputChange('subject_line', e.target.value)}
-                placeholder="Enter subject line"
-              />
-            </div>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Preheader Text (Optional)</label>
-              <input
-                type="text"
-                style={styles.input}
-                value={campaign.preheader_text}
-                onChange={(e) => handleInputChange('preheader_text', e.target.value)}
-                placeholder="Preview text that appears in inbox"
-              />
-            </div>
-          </div>
+          )}
 
-          {/* Block Library */}
-          <div style={styles.blockLibrarySection}>
-            <h3 style={styles.sectionTitle}>Add Content Blocks</h3>
-            <div style={styles.blockLibrary}>
-              {blockTypes.map(blockType => (
-                <button
-                  key={blockType.type}
-                  style={styles.blockTypeButton}
-                  onClick={() => addBlock(blockType.type)}
-                  title={blockType.description}
-                >
-                  <blockType.icon style={styles.blockTypeIcon} />
-                  <span style={styles.blockTypeLabel}>{blockType.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Content Editor */}
-          <div style={styles.contentSection}>
-            <h3 style={styles.sectionTitle}>Email Content</h3>
-            {campaign.content_blocks.length === 0 ? (
-              <div style={styles.emptyState}>
-                <FiPlus style={styles.emptyIcon} />
-                <p>No content blocks yet.</p>
-                <p>Add your first block from the options above to get started.</p>
+          {canViewCampaigns && (
+            <>
+              {/* Header */}
+              <div style={styles.header}>
+                <div style={styles.titleSection}>
+                  <button
+                    style={styles.backButton}
+                    onClick={() => navigate('/dashboard/mail/campaigns')}
+                  >
+                    <FiArrowLeft />
+                    Back to Campaigns
+                  </button>
+                  <h1 style={styles.title}>
+                    {isEditing ? 'Edit Campaign' : 'Create Campaign'}
+                  </h1>
+                </div>
+                <div style={styles.headerActions}>
+                  <button
+                    style={styles.secondaryButton}
+                    onClick={() => setPreviewMode(previewMode === 'desktop' ? 'mobile' : 'desktop')}
+                  >
+                    {previewMode === 'desktop' ? <FiSmartphone /> : <FiMonitor />}
+                    {previewMode === 'desktop' ? 'Mobile' : 'Desktop'} Preview
+                  </button>
+                  <PermissionGate permissions={['mail.campaigns.create']} requireAny>
+                    <button
+                      style={styles.secondaryButton}
+                      onClick={handleSave}
+                      disabled={saving}
+                    >
+                      <FiSave />
+                      {saving ? 'Saving...' : 'Save'}
+                    </button>
+                  </PermissionGate>
+                  <PermissionGate permission="mail.campaigns.send">
+                    <button
+                      style={{
+                        ...styles.secondaryButton,
+                        opacity: campaignId ? 1 : 0.6,
+                        cursor: campaignId ? 'pointer' : 'not-allowed'
+                      }}
+                      onClick={handleOpenTestModal}
+                      disabled={!campaignId}
+                      title={!campaignId ? 'Save the campaign before sending a test email' : 'Send a test email to yourself'}
+                    >
+                      <FiMail />
+                      Test Campaign
+                    </button>
+                  </PermissionGate>
+                  <PermissionGate permission="mail.campaigns.send">
+                    <button
+                      style={styles.primaryButton}
+                      onClick={handleSend}
+                    >
+                      <FiSend />
+                      Send Campaign
+                    </button>
+                  </PermissionGate>
+                </div>
               </div>
-            ) : (
-              <div style={styles.blocksList}>
-                {campaign.content_blocks.map((block, index) => (
-                  <div key={block.id} style={styles.contentBlock}>
-                    <div style={styles.blockHeader}>
-                      <div style={styles.blockTitle}>
-                        <FiMove style={styles.dragHandle} />
-                        <span style={styles.blockTypeName}>
-                          {block.type.charAt(0).toUpperCase() + block.type.slice(1)} Block
-                        </span>
-                      </div>
-                      <div style={styles.blockActions}>
-                        <button
-                          style={styles.actionButton}
-                          onClick={() => moveBlock(block.id, 'up')}
-                          disabled={index === 0}
-                          title="Move Up"
-                        >
-                          <FiChevronUp />
-                        </button>
-                        <button
-                          style={styles.actionButton}
-                          onClick={() => moveBlock(block.id, 'down')}
-                          disabled={index === campaign.content_blocks.length - 1}
-                          title="Move Down"
-                        >
-                          <FiChevronDown />
-                        </button>
-                        <button
-                          style={styles.actionButton}
-                          onClick={() => duplicateBlock(block.id)}
-                          title="Duplicate"
-                        >
-                          <FiCopy />
-                        </button>
-                        <button
-                          style={styles.actionButton}
-                          onClick={() => removeBlock(block.id)}
-                          title="Delete"
-                        >
-                          <FiTrash2 />
-                        </button>
-                      </div>
+
+              {/* Message */}
+              {message && (
+                <div style={{
+                  ...styles.message,
+                  backgroundColor: message.includes('Error') || message.includes('fix') ? '#ffebee' : '#e8f5e8',
+                  color: message.includes('Error') || message.includes('fix') ? '#c62828' : '#2e7d32'
+                }}>
+                  {message.split('\n').map((line, index) => (
+                    <div key={index}>{line}</div>
+                  ))}
+                </div>
+              )}
+
+              {/* Main Content */}
+              <div style={isMobile ? styles.contentMobile : styles.content}>
+                {/* Editor Panel */}
+                <div style={styles.editorPanel}>
+                  {/* Campaign Settings */}
+                  <div style={styles.settingsSection}>
+                    <h3 style={styles.sectionTitle}>Campaign Settings</h3>
+                    <div style={styles.formGroup}>
+                      <label style={styles.label}>Campaign Name</label>
+                      <input
+                        type="text"
+                        style={styles.input}
+                        value={campaign.name}
+                        onChange={(e) => handleInputChange('name', e.target.value)}
+                        placeholder="Enter campaign name"
+                        disabled={!canEditCampaigns && !canCreateCampaigns}
+                      />
                     </div>
-                    <div style={styles.blockContent}>
-                      {renderBlockEditor(block)}
+                    <div style={styles.formGroup}>
+                      <label style={styles.label}>Subject Line</label>
+                      <input
+                        type="text"
+                        style={styles.input}
+                        value={campaign.subject_line}
+                        onChange={(e) => handleInputChange('subject_line', e.target.value)}
+                        placeholder="Enter subject line"
+                        disabled={!canEditCampaigns && !canCreateCampaigns}
+                      />
+                    </div>
+                    <div style={styles.formGroup}>
+                      <label style={styles.label}>Preheader Text (Optional)</label>
+                      <input
+                        type="text"
+                        style={styles.input}
+                        value={campaign.preheader_text}
+                        onChange={(e) => handleInputChange('preheader_text', e.target.value)}
+                        placeholder="Preview text that appears in inbox"
+                        disabled={!canEditCampaigns && !canCreateCampaigns}
+                      />
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
 
-        {/* Preview Panel */}
-        <div style={styles.previewPanel}>
-          <h3 style={styles.sectionTitle}>Email Preview</h3>
-          <div style={styles.previewContainer}>
-            <div style={previewMode === 'mobile' ? styles.mobilePreview : styles.desktopPreview}>
-              <div style={styles.emailContent}>
-                <div style={styles.emailHeader}>
-                  <strong>Subject: </strong>{campaign.subject_line || 'Your Subject Line'}
-                  {campaign.preheader_text && (
-                    <div style={styles.preheaderText}>
-                      {campaign.preheader_text}
+                  {/* Block Library */}
+                  <PermissionGate permissions={['mail.campaigns.create']} requireAny>
+                    <div style={styles.blockLibrarySection}>
+                      <h3 style={styles.sectionTitle}>Add Content Blocks</h3>
+                      <div style={styles.blockLibrary}>
+                        {blockTypes.map(blockType => (
+                          <button
+                            key={blockType.type}
+                            style={styles.blockTypeButton}
+                            onClick={() => addBlock(blockType.type)}
+                            title={blockType.description}
+                          >
+                            <blockType.icon style={styles.blockTypeIcon} />
+                            <span style={styles.blockTypeLabel}>{blockType.label}</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  )}
+                  </PermissionGate>
+
+                  {/* Content Editor */}
+                  <div style={styles.contentSection}>
+                    <h3 style={styles.sectionTitle}>Email Content</h3>
+                    {campaign.content_blocks.length === 0 ? (
+                      <div style={styles.emptyState}>
+                        <FiPlus style={styles.emptyIcon} />
+                        <p>No content blocks yet.</p>
+                        <p>Add your first block from the options above to get started.</p>
+                      </div>
+                    ) : (
+                      <div style={styles.blocksList}>
+                        {campaign.content_blocks.map((block, index) => (
+                          <div key={block.id} style={styles.contentBlock}>
+                            <div style={styles.blockHeader}>
+                              <div style={styles.blockTitle}>
+                                <FiMove style={styles.dragHandle} />
+                                <span style={styles.blockTypeName}>
+                                  {block.type.charAt(0).toUpperCase() + block.type.slice(1)} Block
+                                </span>
+                              </div>
+                              <PermissionGate permissions={['mail.campaigns.create']} requireAny>
+                                <div style={styles.blockActions}>
+                                  <button
+                                    style={styles.actionButton}
+                                    onClick={() => moveBlock(block.id, 'up')}
+                                    disabled={index === 0}
+                                    title="Move Up"
+                                  >
+                                    <FiChevronUp />
+                                  </button>
+                                  <button
+                                    style={styles.actionButton}
+                                    onClick={() => moveBlock(block.id, 'down')}
+                                    disabled={index === campaign.content_blocks.length - 1}
+                                    title="Move Down"
+                                  >
+                                    <FiChevronDown />
+                                  </button>
+                                  <button
+                                    style={styles.actionButton}
+                                    onClick={() => duplicateBlock(block.id)}
+                                    title="Duplicate"
+                                  >
+                                    <FiCopy />
+                                  </button>
+                                  <button
+                                    style={styles.actionButton}
+                                    onClick={() => removeBlock(block.id)}
+                                    title="Delete"
+                                  >
+                                    <FiTrash2 />
+                                  </button>
+                                </div>
+                              </PermissionGate>
+                            </div>
+                            <div style={styles.blockContent}>
+                              {renderBlockEditor(block)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div 
-                  style={styles.emailBody}
-                  dangerouslySetInnerHTML={{ 
-                    __html: campaign.content_blocks.length > 0 
-                      ? generateEmailHTML().match(/<div style="max-width: 600px[^>]*">([\s\S]*?)<div style="margin-top: 40px/)[1] || ''
-                      : '<p style="color: #999; font-style: italic; text-align: center; padding: 40px;">Add content blocks to see preview</p>'
-                  }}
+
+                {/* Preview Panel */}
+                <div style={styles.previewPanel}>
+                  <h3 style={styles.sectionTitle}>Email Preview</h3>
+                  <div style={styles.previewContainer}>
+                    <div style={previewMode === 'mobile' ? styles.mobilePreview : styles.desktopPreview}>
+                      <div style={styles.emailContent}>
+                        <div style={styles.emailHeader}>
+                          <strong>Subject: </strong>{campaign.subject_line || 'Your Subject Line'}
+                          {campaign.preheader_text && (
+                            <div style={styles.preheaderText}>
+                              {campaign.preheader_text}
+                            </div>
+                          )}
+                        </div>
+                        <div 
+                          style={styles.emailBody}
+                          dangerouslySetInnerHTML={{ 
+                            __html: campaign.content_blocks.length > 0 
+                              ? generateEmailHTML().match(/<div style="max-width: 600px[^>]*">([\s\S]*?)<div style="margin-top: 40px/)[1] || ''
+                              : '<p style="color: #999; font-style: italic; text-align: center; padding: 40px;">Add content blocks to see preview</p>'
+                          }}
+                        />
+                        <div style={styles.emailFooter}>
+                          <p style={styles.footerText}>
+                            You received this email because you subscribed to our mailing list.
+                          </p>
+                          <p style={styles.footerText}>
+                            <strong>{business?.name || 'Your Business Name'}</strong><br />
+                            Your Business Address - Required for CASL Compliance
+                          </p>
+                          <p style={styles.footerText}>
+                            <a href="#" style={styles.footerLink}>Unsubscribe</a> | 
+                            <a href="#" style={styles.footerLink}>Update Preferences</a>
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+        {showTestModal && (
+          <div style={styles.testModalOverlay}>
+            <div style={styles.testModal}>
+              <div style={styles.testModalHeader}>
+                <h3 style={styles.testModalTitle}>Send Test Campaign</h3>
+                <button
+                  style={styles.testModalClose}
+                  onClick={handleCloseTestModal}
+                  disabled={sendingTest}
+                  title="Close"
+                >
+                  <FiX />
+                </button>
+              </div>
+              <div style={styles.testModalBody}>
+                <label style={styles.testModalLabel}>Test email address</label>
+                <input
+                  type="email"
+                  style={styles.testModalInput}
+                  placeholder="name@example.com"
+                  value={testEmail}
+                  onChange={(e) => setTestEmail(e.target.value)}
+                  disabled={sendingTest}
                 />
-                <div style={styles.emailFooter}>
-                  <p style={styles.footerText}>
-                    You received this email because you subscribed to our mailing list.
-                  </p>
-                  <p style={styles.footerText}>
-                    <strong>{business?.name || 'Your Business Name'}</strong><br />
-                    Your Business Address - Required for CASL Compliance
-                  </p>
-                  <p style={styles.footerText}>
-                    <a href="#" style={styles.footerLink}>Unsubscribe</a> | 
-                    <a href="#" style={styles.footerLink}>Update Preferences</a>
-                  </p>
-                </div>
+                <p style={styles.testModalHint}>
+                  We'll send this campaign to a single recipient so you can review the layout before launching.
+                </p>
+              </div>
+              <div style={styles.testModalFooter}>
+                <button
+                  style={{
+                    ...styles.secondaryButton,
+                    opacity: sendingTest ? 0.7 : 1,
+                    cursor: sendingTest ? 'wait' : 'pointer'
+                  }}
+                  onClick={handleSendTestEmail}
+                  disabled={sendingTest}
+                >
+                  {sendingTest ? 'Sending...' : 'Send Test Email'}
+                </button>
+                <button
+                  style={styles.tertiaryButton}
+                  onClick={handleCloseTestModal}
+                  disabled={sendingTest}
+                >
+                  Cancel
+                </button>
               </div>
             </div>
           </div>
+        )}
         </div>
-      </div>
-    </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 
@@ -1253,6 +1700,48 @@ const styles = {
     margin: '0 auto',
     backgroundColor: '#f8f8f8',
     minHeight: '100vh',
+  },
+  loadingState: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '60px',
+    color: '#666',
+  },
+  spinner: {
+    width: '40px',
+    height: '40px',
+    border: '4px solid #e9ecef',
+    borderTop: '4px solid #008080',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite',
+    marginBottom: '20px',
+  },
+  errorState: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '60px',
+    textAlign: 'center',
+  },
+  errorIcon: {
+    fontSize: '48px',
+    color: '#e74c3c',
+    marginBottom: '20px',
+  },
+  permissionDenied: {
+    backgroundColor: '#fff3cd',
+    border: '2px solid #f39c12',
+    borderRadius: '8px',
+    padding: '40px',
+    textAlign: 'center',
+    color: '#856404',
+  },
+  permissionIcon: {
+    fontSize: '48px',
+    marginBottom: '16px',
   },
   header: {
     display: 'flex',
@@ -1315,6 +1804,19 @@ const styles = {
     alignItems: 'center',
     gap: '8px',
   },
+  tertiaryButton: {
+    backgroundColor: '#ffffff',
+    color: '#4b5563',
+    border: '1px solid #d1d5db',
+    borderRadius: '8px',
+    padding: '10px 18px',
+    fontSize: '14px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
   message: {
     padding: '15px',
     borderRadius: '8px',
@@ -1342,6 +1844,83 @@ const styles = {
     borderRadius: '12px',
     padding: '25px',
     boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+  },
+  testModalOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+    padding: '20px',
+  },
+  testModal: {
+    backgroundColor: '#ffffff',
+    borderRadius: '12px',
+    width: '100%',
+    maxWidth: '420px',
+    boxShadow: '0 20px 45px rgba(15, 23, 42, 0.25)',
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+  },
+  testModalHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '18px 24px',
+    borderBottom: '1px solid #e5e7eb',
+  },
+  testModalTitle: {
+    margin: 0,
+    fontSize: '18px',
+    fontWeight: 'bold',
+    color: '#1f2937',
+  },
+  testModalClose: {
+    backgroundColor: 'transparent',
+    border: 'none',
+    color: '#6b7280',
+    fontSize: '20px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  testModalBody: {
+    padding: '20px 24px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+  },
+  testModalLabel: {
+    fontSize: '14px',
+    fontWeight: 600,
+    color: '#374151',
+  },
+  testModalInput: {
+    width: '100%',
+    padding: '12px',
+    borderRadius: '8px',
+    border: '2px solid #e5e7eb',
+    fontSize: '14px',
+    boxSizing: 'border-box',
+  },
+  testModalHint: {
+    fontSize: '13px',
+    color: '#6b7280',
+    margin: 0,
+  },
+  testModalFooter: {
+    padding: '18px 24px',
+    borderTop: '1px solid #e5e7eb',
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: '12px',
   },
   sectionTitle: {
     fontSize: '18px',

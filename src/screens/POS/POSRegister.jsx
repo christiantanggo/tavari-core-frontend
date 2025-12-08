@@ -1,5 +1,5 @@
-// screens/POS/POSRegister.jsx - Fixed DataCloneError
-import React, { useEffect, useState, useCallback, useRef } from "react";
+// screens/POS/POSRegister.jsx - Production Ready with Permissions & Security
+import React, { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import POSProductGrid from "../../components/POS/POSProductGrid";
 import POSCartPanel from "../../components/POS/POSCartPanel";
@@ -13,8 +13,10 @@ import SaveCartModal from "../../components/POS/POSRegisterComponents/SaveCartMo
 import CategorySelector from "../../components/POS/POSRegisterComponents/CategorySelector";
 import { useSessionLock } from "../../hooks/useSessionLock";
 import { usePOSAuth } from "../../hooks/usePOSAuth";
+import { usePermissions } from "../../hooks/usePermissions";
 import { useTaxCalculations } from "../../hooks/useTaxCalculations";
 import { useAuditLog } from "../../hooks/useAuditLog";
+import { SecurityWrapper, useSecurityContext } from "../../Security";
 import { TavariStyles } from "../../utils/TavariStyles";
 import dayjs from "dayjs";
 import { supabase } from "../../supabaseClient";
@@ -24,22 +26,58 @@ const POSRegister = () => {
   const navigate = useNavigate();
   const location = useLocation();
   
+  // Authentication
   const auth = usePOSAuth({
     requiredRoles: ['employee', 'cashier', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'POSRegister'
   });
 
-  // Centralized audit logging
-  const { logPOS, logSecurity, logManagerOverride } = useAuditLog();
+  // Security context
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSRegister',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
 
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks
+  const canOperateRegister = hasAnyPermission([
+    'pos.register.operate',
+    'pos.sales.create'
+  ]) || hasElevatedPrivileges();
+
+  const canAccessDrawer = hasPermission('pos.drawer.access') || hasElevatedPrivileges();
+  const canSaveCart = hasPermission('pos.cart.save') || hasElevatedPrivileges();
+  const canViewRefunds = hasPermission('pos.refunds.view') || hasElevatedPrivileges();
+  const canManageTabs = hasPermission('pos.tabs.manage') || hasElevatedPrivileges();
+  const canAttachCustomer = hasPermission('pos.loyalty.attach') || hasElevatedPrivileges();
+
+  // Audit logging
+  const { logPOS, logSecurity } = useAuditLog();
+
+  // Tax calculations
   const {
     taxCategories,
     categoryTaxAssignments,
-    calculateTotalTax,
-    applyCashRounding
+    calculateTotalTax
   } = useTaxCalculations(auth.selectedBusinessId);
 
+  // Session lock
   const {
     isLocked,
     warningSeconds,
@@ -59,11 +97,11 @@ const POSRegister = () => {
   const [cartItems, setCartItems] = useState([]);
   const [time, setTime] = useState(dayjs().format("hh:mm A"));
   
-  // Drawer management state
+  // Drawer management
   const [showDrawerManager, setShowDrawerManager] = useState(false);
   const [currentTerminalId, setCurrentTerminalId] = useState(null);
   
-  // Multi-staff PIN unlock state
+  // PIN unlock state
   const [registerLocked, setRegisterLocked] = useState(false);
   const [showPinModal, setShowPinModal] = useState(false);
   const [pinInput, setPinInput] = useState('');
@@ -76,20 +114,13 @@ const POSRegister = () => {
     lock_after_sale: false
   });
   
-  // LOYALTY STATE
+  // Loyalty state
   const [currentCustomer, setCurrentCustomer] = useState(null);
-  const [showCustomerScanner, setShowCustomerScanner] = useState(false);
-  const [manualCustomerId, setManualCustomerId] = useState('');
-  const [showManualEntry, setShowManualEntry] = useState(false);
   
-  // Cart initialization state
+  // Cart state
   const [cartInitialized, setCartInitialized] = useState(false);
-  
-  // Cart resumption state
   const [savedCartId, setSavedCartId] = useState(null);
   const [isFromSavedCarts, setIsFromSavedCarts] = useState(false);
-
-  // Business settings
   const [businessSettings, setBusinessSettings] = useState({});
 
   // Tab state
@@ -97,29 +128,96 @@ const POSRegister = () => {
   const [isTabMode, setIsTabMode] = useState(false);
   const [tabItems, setTabItems] = useState([]);
 
-  // Save cart modal state
+  // Modal state
   const [showSaveCartModal, setShowSaveCartModal] = useState(false);
 
-  // CHECK FOR LOCK AFTER SALE ON MOUNT
+  const getActivePosUserFromStorage = () => {
+    try {
+      const raw = localStorage.getItem('posActiveUser');
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (err) {
+      return null;
+    }
+  };
+
+  const getLoginPosUserFromStorage = () => {
+    try {
+      const raw = localStorage.getItem('posLoginUser');
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (err) {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    const syncActivePosUser = () => {
+      const activeUser = getActivePosUserFromStorage();
+      const loginUser = getLoginPosUserFromStorage();
+
+      if (loginUser && loginUser.business_id === auth.selectedBusinessId) {
+        setEmployeeName(loginUser.name || loginUser.full_name || loginUser.email || 'POS Team Member');
+      } else if (auth.authUser) {
+        setEmployeeName(auth.authUser.email || 'POS Team Member');
+      }
+
+      if (activeUser && activeUser.business_id === auth.selectedBusinessId) {
+        setCurrentUnlockingUser(activeUser);
+      } else {
+        setCurrentUnlockingUser(null);
+      }
+    };
+
+    syncActivePosUser();
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pos-active-user-changed', syncActivePosUser);
+      const handleStorage = (event) => {
+        if (event.key === 'posActiveUser' || event.key === 'posLoginUser') {
+          syncActivePosUser();
+        }
+      };
+      window.addEventListener('storage', handleStorage);
+      return () => {
+        window.removeEventListener('pos-active-user-changed', syncActivePosUser);
+        window.removeEventListener('storage', handleStorage);
+      };
+    }
+
+    return undefined;
+  }, [auth.selectedBusinessId]);
+
+  const activePosUser = currentUnlockingUser && currentUnlockingUser.business_id === auth.selectedBusinessId
+    ? currentUnlockingUser
+    : null;
+
+  const effectiveUserId = activePosUser?.id || auth.authUser?.id || null;
+  const effectiveUserName = activePosUser?.name || activePosUser?.full_name || employeeName;
+
+  // Check for lock after sale on mount
   useEffect(() => {
     if (location.state?.shouldLock) {
-      console.log('POSRegister: Received shouldLock flag from navigation');
       setRegisterLocked(true);
       setShowPinModal(true);
       
-      // Log lock after sale
+      logSecurityEvent('register_locked_after_sale', {
+        terminal_id: currentTerminalId,
+        lock_reason: 'sale_completed',
+        triggered_by_navigation: true
+      }, 'low');
+      
       logPOS('register_locked_after_sale', {
         terminal_id: currentTerminalId,
         lock_reason: 'sale_completed',
         triggered_by_navigation: true
       });
       
-      // Clean up navigation state
       navigate(location.pathname, { replace: true, state: {} });
     }
   }, [location.state?.shouldLock]);
 
-  // Load terminal ID on component mount
+  // Load terminal ID
   useEffect(() => {
     const storedTerminalId = localStorage.getItem('tavari_terminal_id');
     if (storedTerminalId) {
@@ -130,7 +228,7 @@ const POSRegister = () => {
     }
   }, []);
 
-  // Generate terminal ID function
+  // Generate terminal ID
   const generateTerminalId = () => {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -158,21 +256,29 @@ const POSRegister = () => {
     return terminalId;
   };
 
-  // Fetch POS settings for lock configuration
+  // Fetch POS settings
   useEffect(() => {
     const fetchPosSettings = async () => {
-      if (!auth.selectedBusinessId) {
-        return;
-      }
+      if (!auth.selectedBusinessId) return;
       
       try {
+        await logSecurityEvent('pos_settings_accessed', {
+          action: 'fetch_lock_settings',
+          business_id: auth.selectedBusinessId,
+          terminal_id: currentTerminalId
+        }, 'low');
+
         const { data, error } = await supabase
           .from('pos_settings')
           .select('pin_required, lock_on_startup, lock_after_sale')
           .eq('business_id', auth.selectedBusinessId)
-          .single();
+          .maybeSingle();
 
-        if (data && !error) {
+        if (error) {
+          console.warn('⚠️ POS settings fetch error:', error.message);
+        }
+
+        if (data) {
           const settings = {
             pin_required: data.pin_required || false,
             lock_on_startup: data.lock_on_startup || false,
@@ -187,6 +293,13 @@ const POSRegister = () => {
             setRegisterLocked(true);
             setShowPinModal(true);
             
+            await logSecurityEvent('register_locked_on_startup', {
+              terminal_id: currentTerminalId,
+              lock_reason: data.pin_required ? 'pin_required' : 'lock_on_startup',
+              settings: { pin_required: data.pin_required, lock_on_startup: data.lock_on_startup },
+              business_id: auth.selectedBusinessId
+            }, 'low');
+            
             logPOS('register_locked_on_startup', {
               terminal_id: currentTerminalId,
               lock_reason: data.pin_required ? 'pin_required' : 'lock_on_startup',
@@ -198,7 +311,12 @@ const POSRegister = () => {
           setShowPinModal(true);
         }
       } catch (err) {
-        console.error('POS Settings: Exception occurred:', err);
+        await logSecurityEvent('pos_settings_fetch_error', {
+          error: err.message,
+          business_id: auth.selectedBusinessId,
+          terminal_id: currentTerminalId
+        }, 'medium');
+        
         setRegisterLocked(true);
         setShowPinModal(true);
       }
@@ -209,14 +327,31 @@ const POSRegister = () => {
     }
   }, [auth.isReady, auth.selectedBusinessId, currentTerminalId, logPOS]);
 
-  // Multi-staff PIN unlock handler
+  // PIN unlock handler
   const handlePinUnlock = async () => {
     if (!pinInput || pinInput.length !== 4) {
       setPinError('PIN must be 4 digits');
       return;
     }
 
+    // Rate limiting
+    const rateLimitCheck = await checkRateLimit('pin_unlock', 5, 300000);
+    if (!rateLimitCheck.allowed) {
+      setPinError('Too many unlock attempts. Please wait 5 minutes.');
+      await logSecurityEvent('pin_unlock_rate_limited', {
+        terminal_id: currentTerminalId,
+        business_id: auth.selectedBusinessId
+      }, 'high');
+      return;
+    }
+
     try {
+      await logSecurityEvent('pin_unlock_attempted', {
+        business_id: auth.selectedBusinessId,
+        terminal_id: currentTerminalId,
+        logged_in_user: effectiveUserId
+      }, 'medium');
+      
       const { data: userRoles, error: rolesError } = await supabase
         .from('user_roles')
         .select('user_id, role')
@@ -224,6 +359,11 @@ const POSRegister = () => {
         .eq('active', true);
 
       if (rolesError) {
+        await logSecurityEvent('pin_unlock_roles_error', {
+          error: rolesError.message,
+          business_id: auth.selectedBusinessId
+        }, 'high');
+        
         setPinError('Error validating PIN. Please try again.');
         return;
       }
@@ -234,23 +374,36 @@ const POSRegister = () => {
         .map(ur => ur.user_id);
 
       if (authorizedUserIds.length === 0) {
+        await logSecurityEvent('pin_unlock_no_authorized_users', {
+          business_id: auth.selectedBusinessId,
+          terminal_id: currentTerminalId
+        }, 'high');
+        
         setPinError('No authorized users found');
         return;
       }
 
-      const { data: staffMembers, error: staffError } = await supabase
-        .from('users')
-        .select('id, full_name, email, pin')
-        .in('id', authorizedUserIds);
+      const { data: staffMembers, error: staffError } = await supabase.rpc(
+        'get_staff_pins_for_unlock',
+        { 
+          p_business_id: auth.selectedBusinessId,
+          business_user_ids: authorizedUserIds 
+        }
+      );
 
       if (staffError) {
+        await logSecurityEvent('pin_unlock_staff_error', {
+          error: staffError.message,
+          business_id: auth.selectedBusinessId
+        }, 'high');
+        
         setPinError('Error validating PIN. Please try again.');
         return;
       }
 
       let unlockingUser = null;
       let pinMatched = false;
-
+      
       for (const staff of staffMembers) {
         if (!staff.pin) continue;
         
@@ -272,20 +425,69 @@ const POSRegister = () => {
       }
 
       if (pinMatched && unlockingUser) {
+        const roleMap = new Map(userRoles.map((ur) => [ur.user_id, ur.role]));
+        const staffRole = roleMap.get(unlockingUser.id) || 'employee';
+        const displayName = unlockingUser.full_name || unlockingUser.email || 'POS Team Member';
+        const unlockingUserWithMeta = {
+          ...unlockingUser,
+          role: staffRole,
+          name: displayName,
+          business_id: auth.selectedBusinessId,
+          unlocked_at: Date.now()
+        };
+
         setRegisterLocked(false);
         setShowPinModal(false);
         setPinInput('');
         setPinError('');
         setFailedAttempts(0);
-        setCurrentUnlockingUser(unlockingUser);
+        setCurrentUnlockingUser(unlockingUserWithMeta);
+ 
+        try {
+          const activeUserPayload = {
+            id: unlockingUser.id,
+            role: staffRole,
+            full_name: unlockingUser.full_name || null,
+            first_name: unlockingUser.first_name || null,
+            last_name: unlockingUser.last_name || null,
+            email: unlockingUser.email || null,
+            name: displayName,
+            business_id: auth.selectedBusinessId,
+            unlocked_at: Date.now(),
+            source: 'register_pin'
+          };
+
+          localStorage.setItem('posActiveUser', JSON.stringify(activeUserPayload));
+          localStorage.setItem('posLastUnlockedBy', JSON.stringify(activeUserPayload));
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('pos-active-user-changed'));
+          }
+        } catch (syncError) {
+          console.warn('Unable to update active POS user after register unlock:', syncError?.message || syncError);
+        }
+ 
+        await logSecurityEvent('register_unlocked', {
+          unlocked_by_id: unlockingUser.id,
+          unlocked_by_name: unlockingUser.full_name || unlockingUser.email,
+          unlock_method: 'pin',
+          terminal_id: currentTerminalId,
+          previous_failed_attempts: failedAttempts,
+          logged_in_user_id: unlockingUser.id,
+          business_id: auth.selectedBusinessId
+        }, 'medium');
 
         await logPOS('register_unlocked', {
           unlocked_by_id: unlockingUser.id,
           unlocked_by_name: unlockingUser.full_name || unlockingUser.email,
           unlock_method: 'pin',
           terminal_id: currentTerminalId,
-          previous_failed_attempts: failedAttempts
+          previous_failed_attempts: failedAttempts,
+          logged_in_user_id: unlockingUser.id
         });
+
+        await recordAction('register_unlocked', { 
+          unlocked_by: unlockingUser.full_name || unlockingUser.email 
+        }, true);
 
         showToast(`Register unlocked by ${unlockingUser.full_name || unlockingUser.email}`, 'success');
 
@@ -293,6 +495,13 @@ const POSRegister = () => {
         const newFailedCount = failedAttempts + 1;
         setFailedAttempts(newFailedCount);
         setPinInput('');
+
+        await logSecurityEvent('failed_register_unlock', {
+          attempt_number: newFailedCount,
+          terminal_id: currentTerminalId,
+          pin_length: pinInput.length,
+          business_id: auth.selectedBusinessId
+        }, 'high');
 
         await logSecurity('failed_register_unlock', {
           attempt_number: newFailedCount,
@@ -303,6 +512,14 @@ const POSRegister = () => {
 
         if (newFailedCount >= 3) {
           setPinError('Too many failed attempts. Contact a manager.');
+          
+          await logSecurityEvent('register_lockout_triggered', {
+            type: 'PIN brute force attempt',
+            total_attempts: newFailedCount,
+            terminal_id: currentTerminalId,
+            lockout_duration: '5_minutes',
+            business_id: auth.selectedBusinessId
+          }, 'critical');
           
           await logSecurity('register_lockout_triggered', {
             type: 'PIN brute force attempt',
@@ -315,38 +532,71 @@ const POSRegister = () => {
         }
       }
     } catch (error) {
-      console.error('PIN Unlock: Exception:', error);
+      await logSecurityEvent('pin_unlock_exception', {
+        error: error.message,
+        terminal_id: currentTerminalId,
+        business_id: auth.selectedBusinessId
+      }, 'critical');
+      
       setPinError('Error validating PIN. Please try again.');
     }
   };
 
-  // Drawer event handlers
-  const handleDrawerOpened = (drawer) => {
+  // Drawer handlers
+  const handleDrawerOpened = async (drawer) => {
+    if (!canAccessDrawer) {
+      showToast('You do not have permission to access the cash drawer', 'error');
+      return;
+    }
+
+    await logSecurityEvent('cash_drawer_opened', {
+      terminal_id: currentTerminalId,
+      drawer_id: drawer?.id,
+      opened_by: effectiveUserId,
+      opened_by_name: effectiveUserName,
+      business_id: auth.selectedBusinessId
+    }, 'medium');
+
     logPOS('cash_drawer_opened', {
       terminal_id: currentTerminalId,
       drawer_id: drawer?.id,
-      opened_by: auth.authUser?.id,
-      opened_by_name: employeeName
+      opened_by: effectiveUserId,
+      opened_by_name: effectiveUserName
     });
+
+    await recordAction('cash_drawer_opened', { drawer_id: drawer?.id }, true);
     
     showToast('Cash drawer opened successfully', 'success');
   };
 
-  const handleDrawerClosed = (drawer) => {
+  const handleDrawerClosed = async (drawer) => {
+    await logSecurityEvent('cash_drawer_closed', {
+      terminal_id: currentTerminalId,
+      drawer_id: drawer?.id,
+      closed_by: effectiveUserId,
+      closed_by_name: effectiveUserName,
+      expected_amount: drawer?.expected_amount,
+      actual_amount: drawer?.actual_amount,
+      variance: drawer?.variance,
+      business_id: auth.selectedBusinessId
+    }, 'medium');
+
     logPOS('cash_drawer_closed', {
       terminal_id: currentTerminalId,
       drawer_id: drawer?.id,
-      closed_by: auth.authUser?.id,
-      closed_by_name: employeeName,
+      closed_by: effectiveUserId,
+      closed_by_name: effectiveUserName,
       expected_amount: drawer?.expected_amount,
       actual_amount: drawer?.actual_amount,
       variance: drawer?.variance
     });
+
+    await recordAction('cash_drawer_closed', { drawer_id: drawer?.id }, true);
     
     showToast('Cash drawer closed successfully', 'success');
   };
 
-  // Handle cart resumption and tab data
+  // Cart resumption and tab handling
   useEffect(() => {
     if (location.state?.activeTab) {
       const tab = location.state.activeTab;
@@ -412,9 +662,7 @@ const POSRegister = () => {
 
   // Session storage for cart persistence
   useEffect(() => {
-    if (!cartInitialized || isTabMode || !auth.selectedBusinessId) {
-      return;
-    }
+    if (!cartInitialized || isTabMode || !auth.selectedBusinessId) return;
 
     const sessionKey = `pos_cart_${auth.selectedBusinessId}`;
     
@@ -430,17 +678,15 @@ const POSRegister = () => {
             }
           }
         } catch (err) {
-          console.warn('Failed to restore cart from session:', err);
+          // Silent fail for cart restoration
         }
       }
     }
   }, [cartInitialized, isTabMode, auth.selectedBusinessId]);
 
-  // Save to session storage when cart changes
+  // Save to session storage
   useEffect(() => {
-    if (!cartInitialized || isTabMode || !auth.selectedBusinessId) {
-      return;
-    }
+    if (!cartInitialized || isTabMode || !auth.selectedBusinessId) return;
 
     const sessionKey = `pos_cart_${auth.selectedBusinessId}`;
     const cartData = {
@@ -452,15 +698,27 @@ const POSRegister = () => {
     sessionStorage.setItem(sessionKey, JSON.stringify(cartData));
   }, [cartItems, currentCustomer, auth.selectedBusinessId, isTabMode, cartInitialized]);
 
-  // Save cart manually function
+  // Save cart manually
   const saveCartManually = async (cartName) => {
+    if (!canSaveCart) {
+      showToast('You do not have permission to save carts', 'error');
+      return;
+    }
+
     if (!cartItems.length) {
       showToast('No items in cart to save', 'error');
       return;
     }
 
-    if (!cartName || !cartName.trim()) {
-      showToast('Please enter a cart name', 'error');
+    const nameValidation = validateInput(cartName, 'text', 'cart_name');
+    if (!nameValidation.valid || !cartName.trim()) {
+      showToast('Please enter a valid cart name', 'error');
+      return;
+    }
+
+    const rateLimitCheck = await checkRateLimit('save_cart', 10, 60000);
+    if (!rateLimitCheck.allowed) {
+      showToast('Too many cart save attempts. Please wait a moment.', 'error');
       return;
     }
 
@@ -490,7 +748,7 @@ const POSRegister = () => {
         .from('pos_saved_orders')
         .insert({
           business_id: auth.selectedBusinessId,
-          saved_by: auth.authUser.id,
+          saved_by: effectiveUserId,
           order_name: cartName.trim(),
           cart_data: cartData,
           subtotal: subtotal.toFixed(2),
@@ -501,27 +759,43 @@ const POSRegister = () => {
           save_reason: 'manual'
         });
 
-      if (error) {
-        showToast('Error saving cart: ' + error.message, 'error');
-      } else {
-        logPOS('cart_saved_manually', {
-          cart_name: cartName.trim(),
-          item_count: cartItems.length,
-          total_amount: total.toFixed(2),
-          has_customer: !!currentCustomer,
-          terminal_id: currentTerminalId
-        });
-        
-        showToast('Cart saved successfully!', 'success');
-        setShowSaveCartModal(false);
-        clearCurrentCart();
-      }
+      if (error) throw error;
+
+      await logSecurityEvent('cart_saved_manually', {
+        cart_name: cartName.trim(),
+        item_count: cartItems.length,
+        total_amount: total.toFixed(2),
+        has_customer: !!currentCustomer,
+        terminal_id: currentTerminalId,
+        business_id: auth.selectedBusinessId,
+        saved_by: effectiveUserId
+      }, 'low');
+
+      logPOS('cart_saved_manually', {
+        cart_name: cartName.trim(),
+        item_count: cartItems.length,
+        total_amount: total.toFixed(2),
+        has_customer: !!currentCustomer,
+        terminal_id: currentTerminalId
+      });
+
+      await recordAction('cart_saved', { cart_name: cartName.trim() }, true);
+      
+      showToast('Cart saved successfully!', 'success');
+      setShowSaveCartModal(false);
+      clearCurrentCart();
     } catch (err) {
+      await logSecurityEvent('cart_save_error', {
+        error: err.message,
+        cart_name: cartName,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       showToast('Error saving cart: ' + err.message, 'error');
     }
   };
 
-  // Save and Exit handler
+  // Save and exit
   const handleSaveAndExit = () => {
     if (isLocked || registerLocked) return;
     
@@ -542,8 +816,13 @@ const POSRegister = () => {
     }
   };
 
-  // Cart deletion handlers
+  // Delete cart
   const handleDeleteCart = async (cartId) => {
+    if (!canSaveCart) {
+      showToast('You do not have permission to delete carts', 'error');
+      return;
+    }
+
     try {
       const { error } = await supabase
         .from('pos_saved_orders')
@@ -551,21 +830,33 @@ const POSRegister = () => {
         .eq('id', cartId)
         .eq('business_id', auth.selectedBusinessId);
 
-      if (error) {
-        throw new Error(`Database error: ${error.message}`);
-      }
+      if (error) throw error;
+
+      await logSecurityEvent('saved_cart_deleted', {
+        cart_id: cartId,
+        deleted_by: effectiveUserId,
+        terminal_id: currentTerminalId,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
 
       logPOS('saved_cart_deleted', {
         cart_id: cartId,
-        deleted_by: auth.authUser?.id,
+        deleted_by: effectiveUserId,
         terminal_id: currentTerminalId
       });
+
+      await recordAction('cart_deleted', { cart_id: cartId }, true);
 
       showToast('Saved cart deleted successfully', 'success');
       clearCurrentCart();
       
     } catch (error) {
-      console.error('Error deleting saved cart:', error);
+      await logSecurityEvent('cart_delete_error', {
+        error: error.message,
+        cart_id: cartId,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       showToast(`Error deleting cart: ${error.message}`, 'error');
     }
   };
@@ -586,6 +877,17 @@ const POSRegister = () => {
     setCurrentCustomer(null);
     setSavedCartId(null);
     setIsFromSavedCarts(false);
+    
+    // Clear cart data in localStorage for customer display
+    localStorage.removeItem('tavari_customer_display_cart');
+    
+    // Also dispatch event for same-window components
+    const cartClearEvent = new CustomEvent('tavari-cart-clear', {
+      detail: {
+        businessId: auth.selectedBusinessId
+      }
+    });
+    window.dispatchEvent(cartClearEvent);
     
     if (auth.selectedBusinessId && !isTabMode) {
       const sessionKey = `pos_cart_${auth.selectedBusinessId}`;
@@ -608,7 +910,11 @@ const POSRegister = () => {
         setCurrentCustomer(data);
       }
     } catch (err) {
-      console.error('Error loading tab customer:', err);
+      await logSecurityEvent('tab_customer_load_error', {
+        error: err.message,
+        loyalty_customer_id: loyaltyCustomerId,
+        business_id: auth.selectedBusinessId
+      }, 'low');
     }
   };
 
@@ -637,7 +943,11 @@ const POSRegister = () => {
         setCartItems(convertedItems);
       }
     } catch (err) {
-      console.error('Error loading tab items:', err);
+      await logSecurityEvent('tab_items_load_error', {
+        error: err.message,
+        tab_id: tabId,
+        business_id: auth.selectedBusinessId
+      }, 'low');
     }
   };
 
@@ -649,10 +959,15 @@ const POSRegister = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch user and business info
+  // Fetch user info
   useEffect(() => {
     const fetchUserInfo = async () => {
       if (!auth.authUser || !auth.selectedBusinessId) return;
+
+      const activeUser = getActivePosUserFromStorage();
+      if (activeUser && activeUser.business_id === auth.selectedBusinessId) {
+        return;
+      }
 
       try {
         const [userResult, businessResult] = await Promise.all([
@@ -668,7 +983,10 @@ const POSRegister = () => {
           setBusinessName(businessResult.data.name);
         }
       } catch (err) {
-        console.error('Error fetching user info:', err);
+        await logSecurityEvent('user_info_fetch_error', {
+          error: err.message,
+          business_id: auth.selectedBusinessId
+        }, 'low');
       }
     };
     
@@ -693,7 +1011,10 @@ const POSRegister = () => {
           setCategories(data || []);
         }
       } catch (err) {
-        console.error("Categories fetch error:", err);
+        await logSecurityEvent('categories_fetch_error', {
+          error: err.message,
+          business_id: auth.selectedBusinessId
+        }, 'low');
       }
     };
 
@@ -759,7 +1080,10 @@ const POSRegister = () => {
           setProducts(data || []);
         }
       } catch (err) {
-        console.error("Products fetch error:", err);
+        await logSecurityEvent('products_fetch_error', {
+          error: err.message,
+          business_id: auth.selectedBusinessId
+        }, 'low');
       }
     };
 
@@ -782,9 +1106,23 @@ const POSRegister = () => {
     ? products.filter((p) => p.category_id === activeCategory)
     : products;
 
-  // Fast cart operations
-  const handleAddToCart = (product) => {
+  // Cart operations
+  const handleAddToCart = async (product) => {
     if (isLocked || registerLocked) return;
+    if (!canOperateRegister) {
+      showToast('You do not have permission to operate the register', 'error');
+      return;
+    }
+    
+    await logSecurityEvent('product_added_to_cart', {
+      product_id: product.id,
+      product_name: product.name,
+      product_price: product.price,
+      cart_mode: isTabMode ? 'tab' : 'normal',
+      terminal_id: currentTerminalId,
+      business_id: auth.selectedBusinessId,
+      added_by: effectiveUserId
+    }, 'low');
     
     logPOS('product_added_to_cart', {
       product_id: product.id,
@@ -804,22 +1142,60 @@ const POSRegister = () => {
             JSON.stringify(item.modifiers || []) === JSON.stringify(product.modifiers || [])
         );
 
+        let newCartItems;
         if (existing) {
-          return prev.map((item) =>
+          newCartItems = prev.map((item) =>
             item.id === product.id &&
             JSON.stringify(item.modifiers || []) === JSON.stringify(product.modifiers || [])
               ? { ...item, quantity: item.quantity + 1 }
               : item
           );
+        } else {
+          newCartItems = [...prev, { ...product, quantity: 1 }];
         }
 
-        return [...prev, { ...product, quantity: 1 }];
+        // Store cart data in localStorage for customer display
+        console.log('🚀 POS Register: Storing cart data in localStorage:', {
+          cartItems: newCartItems,
+          businessId: auth.selectedBusinessId,
+          itemCount: newCartItems.length
+        });
+        
+        const cartData = {
+          cartItems: newCartItems,
+          businessId: auth.selectedBusinessId,
+          timestamp: Date.now()
+        };
+        
+        localStorage.setItem('tavari_customer_display_cart', JSON.stringify(cartData));
+        
+        // Also dispatch event for same-window components
+        const cartUpdateEvent = new CustomEvent('tavari-cart-update', {
+          detail: cartData
+        });
+        window.dispatchEvent(cartUpdateEvent);
+        
+        console.log('✅ POS Register: Cart data stored in localStorage successfully');
+
+        return newCartItems;
       });
     }
   };
 
-  const handleRemoveFromCart = (productId) => {
+  const handleRemoveFromCart = async (productId) => {
     if (isLocked || registerLocked) return;
+    if (!canOperateRegister) {
+      showToast('You do not have permission to operate the register', 'error');
+      return;
+    }
+    
+    await logSecurityEvent('product_removed_from_cart', {
+      product_id: productId,
+      cart_mode: isTabMode ? 'tab' : 'normal',
+      terminal_id: currentTerminalId,
+      business_id: auth.selectedBusinessId,
+      removed_by: effectiveUserId
+    }, 'low');
     
     logPOS('product_removed_from_cart', {
       product_id: productId,
@@ -830,13 +1206,45 @@ const POSRegister = () => {
     if (isTabMode && activeTab) {
       removeItemFromTab(productId);
     } else {
-      setCartItems((prev) => prev.filter((item) => item.id !== productId));
+      setCartItems((prev) => {
+        const newCartItems = prev.filter((item) => item.id !== productId);
+        
+        // Store cart data in localStorage for customer display
+        const cartData = {
+          cartItems: newCartItems,
+          businessId: auth.selectedBusinessId,
+          timestamp: Date.now()
+        };
+        localStorage.setItem('tavari_customer_display_cart', JSON.stringify(cartData));
+        
+        // Also dispatch event for same-window components
+        const cartUpdateEvent = new CustomEvent('tavari-cart-update', {
+          detail: cartData
+        });
+        window.dispatchEvent(cartUpdateEvent);
+        
+        return newCartItems;
+      });
     }
   };
 
-  const handleUpdateQty = (productId, qty) => {
+  const handleUpdateQty = async (productId, qty) => {
     if (isLocked || registerLocked) return;
+    if (!canOperateRegister) {
+      showToast('You do not have permission to operate the register', 'error');
+      return;
+    }
+    
     if (qty <= 0) return handleRemoveFromCart(productId);
+    
+    await logSecurityEvent('product_quantity_updated', {
+      product_id: productId,
+      new_quantity: qty,
+      cart_mode: isTabMode ? 'tab' : 'normal',
+      terminal_id: currentTerminalId,
+      business_id: auth.selectedBusinessId,
+      updated_by: effectiveUserId
+    }, 'low');
     
     logPOS('product_quantity_updated', {
       product_id: productId,
@@ -848,9 +1256,25 @@ const POSRegister = () => {
     if (isTabMode && activeTab) {
       updateTabItemQty(productId, qty);
     } else {
-      setCartItems((prev) => 
-        prev.map((item) => (item.id === productId ? { ...item, quantity: qty } : item))
-      );
+      setCartItems((prev) => {
+        const newCartItems = prev.map((item) => (item.id === productId ? { ...item, quantity: qty } : item));
+        
+        // Store cart data in localStorage for customer display
+        const cartData = {
+          cartItems: newCartItems,
+          businessId: auth.selectedBusinessId,
+          timestamp: Date.now()
+        };
+        localStorage.setItem('tavari_customer_display_cart', JSON.stringify(cartData));
+        
+        // Also dispatch event for same-window components
+        const cartUpdateEvent = new CustomEvent('tavari-cart-update', {
+          detail: cartData
+        });
+        window.dispatchEvent(cartUpdateEvent);
+        
+        return newCartItems;
+      });
     }
   };
 
@@ -904,7 +1328,7 @@ const POSRegister = () => {
           modifiers: [],
           category_id: product.category_id,
           item_tax_overrides: product.item_tax_overrides,
-          added_by: auth.authUser.id
+          added_by: effectiveUserId
         };
 
         const { data: newTabItem, error } = await supabase
@@ -927,6 +1351,13 @@ const POSRegister = () => {
 
       showToast(`Added ${product.name} to tab`, 'success');
     } catch (err) {
+      await logSecurityEvent('tab_item_add_error', {
+        error: err.message,
+        product_id: product.id,
+        tab_id: activeTab.id,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       showToast('Error adding item to tab: ' + err.message, 'error');
     }
   };
@@ -946,6 +1377,12 @@ const POSRegister = () => {
         setTabItems(prev => prev.filter(item => item.id !== productId));
       }
     } catch (err) {
+      await logSecurityEvent('tab_item_remove_error', {
+        error: err.message,
+        product_id: productId,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       showToast('Error removing item from tab', 'error');
     }
   };
@@ -978,13 +1415,31 @@ const POSRegister = () => {
         );
       }
     } catch (err) {
+      await logSecurityEvent('tab_item_update_error', {
+        error: err.message,
+        product_id: productId,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       showToast('Error updating quantity', 'error');
     }
   };
 
   // Barcode scanning
-  const handleBarcodeScan = (code) => {
+  const handleBarcodeScan = async (code) => {
     if (isLocked || registerLocked) return;
+    if (!canOperateRegister) {
+      showToast('You do not have permission to scan items', 'error');
+      return;
+    }
+    
+    await logSecurityEvent('barcode_scanned', {
+      scanned_code: code,
+      scan_type: 'product_or_customer',
+      terminal_id: currentTerminalId,
+      business_id: auth.selectedBusinessId,
+      scanned_by: effectiveUserId
+    }, 'low');
     
     logPOS('barcode_scanned', {
       scanned_code: code,
@@ -1002,6 +1457,14 @@ const POSRegister = () => {
       handleAddToCart(foundProduct);
       showToast(`Added ${foundProduct.name} to cart`, 'success');
       
+      await logSecurityEvent('barcode_scan_success', {
+        scanned_code: code,
+        product_id: foundProduct.id,
+        product_name: foundProduct.name,
+        terminal_id: currentTerminalId,
+        business_id: auth.selectedBusinessId
+      }, 'low');
+      
       logPOS('barcode_scan_success', {
         scanned_code: code,
         product_id: foundProduct.id,
@@ -1017,6 +1480,10 @@ const POSRegister = () => {
   // Customer attachment
   const handleCustomerScan = async (customerId) => {
     if (isLocked || registerLocked || !auth.selectedBusinessId) return;
+    if (!canAttachCustomer) {
+      showToast('You do not have permission to attach customers', 'error');
+      return;
+    }
     
     try {
       const { data, error } = await supabase
@@ -1030,6 +1497,13 @@ const POSRegister = () => {
       if (error || !data) {
         showToast('Customer not found or inactive', 'error');
         
+        await logSecurityEvent('customer_scan_failed', {
+          scanned_code: customerId,
+          error: error?.message || 'Customer not found',
+          terminal_id: currentTerminalId,
+          business_id: auth.selectedBusinessId
+        }, 'low');
+        
         logPOS('customer_scan_failed', {
           scanned_code: customerId,
           error: error?.message || 'Customer not found',
@@ -1041,6 +1515,16 @@ const POSRegister = () => {
       setCurrentCustomer(data);
       showToast(`Customer attached: ${data.customer_name}`, 'success');
 
+      await logSecurityEvent('customer_attached', {
+        customer_id: data.id,
+        customer_name: data.customer_name,
+        customer_balance: data.balance,
+        attachment_method: 'qr_scan',
+        terminal_id: currentTerminalId,
+        business_id: auth.selectedBusinessId,
+        attached_by: effectiveUserId
+      }, 'low');
+
       logPOS('customer_attached', {
         customer_id: data.id,
         customer_name: data.customer_name,
@@ -1050,13 +1534,26 @@ const POSRegister = () => {
       });
 
     } catch (err) {
-      console.error('Error scanning customer QR code:', err);
+      await logSecurityEvent('customer_scan_error', {
+        error: err.message,
+        scanned_code: customerId,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       showToast('Error scanning customer QR code', 'error');
     }
   };
 
   const handleDetachCustomer = async () => {
     if (currentCustomer) {
+      await logSecurityEvent('customer_detached', {
+        customer_id: currentCustomer.id,
+        customer_name: currentCustomer.customer_name,
+        terminal_id: currentTerminalId,
+        business_id: auth.selectedBusinessId,
+        detached_by: effectiveUserId
+      }, 'low');
+      
       logPOS('customer_detached', {
         customer_id: currentCustomer.id,
         customer_name: currentCustomer.customer_name,
@@ -1095,11 +1592,24 @@ const POSRegister = () => {
     }, 3000);
   };
 
-  // ✅ FIXED: Checkout handler - NO FUNCTION IN STATE
-  const handleCheckout = (checkoutData) => {
+  // Checkout handler
+  const handleCheckout = async (checkoutData) => {
     if (isLocked || registerLocked) return;
+    if (!canOperateRegister) {
+      showToast('You do not have permission to process checkouts', 'error');
+      return;
+    }
     
-    console.log('Checkout initiated with data:', checkoutData);
+    await logSecurityEvent('checkout_initiated', {
+      item_count: cartItems.length,
+      subtotal: checkoutData.subtotal || 0,
+      total: checkoutData.total || 0,
+      has_customer: !!currentCustomer,
+      cart_mode: isTabMode ? 'tab' : 'normal',
+      terminal_id: currentTerminalId,
+      business_id: auth.selectedBusinessId,
+      initiated_by: effectiveUserId
+    }, 'medium');
     
     logPOS('checkout_initiated', {
       item_count: cartItems.length,
@@ -1116,7 +1626,6 @@ const POSRegister = () => {
     }
     
     if (isTabMode && activeTab) {
-      // Tab mode - go to payment
       const cleanSaleData = {
         items: cartItems.map(item => ({
           id: item.id,
@@ -1146,16 +1655,17 @@ const POSRegister = () => {
         subtotal: checkoutData.subtotal || 0,
         total_amount: checkoutData.total || 0,
         tax_amount: checkoutData.tax || 0,
-        // ✅ NO onSaleComplete - will be handled by payment screen
         lock_after_sale: posSettings.lock_after_sale,
         pin_required: posSettings.pin_required
       };
       
       navigate('/dashboard/pos/payment', {
-        state: { saleData: cleanSaleData }
+        state: { 
+          saleData: cleanSaleData,
+          from: 'register'
+        }
       });
     } else {
-      // Normal mode - go to sale review
       const cleanCheckoutData = {
         items: cartItems.map(item => ({
           id: item.id,
@@ -1184,37 +1694,57 @@ const POSRegister = () => {
         aggregated_taxes: checkoutData.aggregated_taxes || {},
         aggregated_rebates: checkoutData.aggregated_rebates || {},
         item_tax_details: checkoutData.itemTaxDetails || [],
-        // ✅ NO onSaleComplete - will be handled by sale review screen
         lock_after_sale: posSettings.lock_after_sale,
         pin_required: posSettings.pin_required
       };
       
-      console.log('Navigating to sale-review with clean data:', cleanCheckoutData);
-      
       navigate('/dashboard/pos/sale-review', {
-        state: { checkoutData: cleanCheckoutData }
+        state: { 
+          checkoutData: cleanCheckoutData,
+          from: 'register'
+        }
       });
     }
   };
 
   // Header action handlers
   const handleSaveCartClick = () => {
+    if (!canSaveCart) {
+      showToast('You do not have permission to save carts', 'error');
+      return;
+    }
     setShowSaveCartModal(true);
   };
 
   const handleDrawerManagerClick = () => {
+    if (!canAccessDrawer) {
+      showToast('You do not have permission to access the cash drawer', 'error');
+      return;
+    }
     setShowDrawerManager(true);
   };
 
   const handleNavigateToRefunds = () => {
+    if (!canViewRefunds) {
+      showToast('You do not have permission to view refunds', 'error');
+      return;
+    }
     navigate('/dashboard/pos/refunds');
   };
 
   const handleNavigateToSavedCarts = () => {
+    if (!canSaveCart) {
+      showToast('You do not have permission to view saved carts', 'error');
+      return;
+    }
     navigate('/dashboard/pos/saved-carts');
   };
 
   const handleNavigateToTabs = () => {
+    if (!canManageTabs) {
+      showToast('You do not have permission to manage tabs', 'error');
+      return;
+    }
     navigate('/dashboard/pos/tabs');
   };
 
@@ -1267,126 +1797,167 @@ const POSRegister = () => {
     productGridContainer: {
       flex: 1,
       overflow: 'hidden'
+    },
+
+    noAccessContainer: {
+      padding: TavariStyles.spacing['3xl'],
+      textAlign: 'center'
+    },
+
+    noAccessText: {
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600,
+      margin: 0
     }
   };
 
-  return (
-    <POSAuthWrapper
-      requiredRoles={['employee', 'cashier', 'manager', 'owner']}
-      requireBusiness={true}
-      componentName="POS Register"
-    >
-      <div style={styles.container}>
-        {!!warningSeconds && !isLocked && (
-          <div style={styles.warning}>
-            Auto-lock in <b>{warningSeconds}s</b>
+  // Check overall access permission
+  if (!permissionsLoading && !canOperateRegister) {
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="POS Register"
+        >
+          <div style={styles.container}>
+            <div style={styles.noAccessContainer}>
+              <h3 style={{ color: TavariStyles.colors.danger }}>Access Denied</h3>
+              <p style={styles.noAccessText}>
+                You do not have permission to operate the POS register.
+              </p>
+            </div>
           </div>
-        )}
+        </POSAuthWrapper>
+      </SecurityWrapper>
+    );
+  }
 
-        <RegisterHeader
-          businessName={businessName}
-          employeeName={employeeName}
-          currentUnlockingUser={currentUnlockingUser}
-          authUser={auth.authUser}
-          time={time}
-          isTabMode={isTabMode}
-          cartItems={cartItems}
-          isLocked={isLocked}
-          registerLocked={registerLocked}
-          onSaveCart={handleSaveCartClick}
-          onDrawerManager={handleDrawerManagerClick}
-          onNavigateToRefunds={handleNavigateToRefunds}
-          onNavigateToSavedCarts={handleNavigateToSavedCarts}
-          onNavigateToTabs={handleNavigateToTabs}
-        />
+  return (
+    <SecurityWrapper>
+      <POSAuthWrapper
+        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="POS Register"
+      >
+        <div style={styles.container}>
+          {!!warningSeconds && !isLocked && (
+            <div style={styles.warning}>
+              Auto-lock in <b>{warningSeconds}s</b>
+            </div>
+          )}
 
-        <div style={styles.mainContent}>
-          <div style={styles.productsSection}>
-            <CategorySelector
-              categories={categories}
-              activeCategory={activeCategory}
-              onCategorySelect={setActiveCategory}
-              registerLocked={registerLocked}
-            />
+          <RegisterHeader
+            businessName={businessName}
+            employeeName={employeeName}
+            currentUnlockingUser={currentUnlockingUser}
+            authUser={auth.authUser}
+            time={time}
+            isTabMode={isTabMode}
+            cartItems={cartItems}
+            isLocked={isLocked}
+            registerLocked={registerLocked}
+            onSaveCart={handleSaveCartClick}
+            onDrawerManager={handleDrawerManagerClick}
+            onNavigateToRefunds={handleNavigateToRefunds}
+            onNavigateToSavedCarts={handleNavigateToSavedCarts}
+            onNavigateToTabs={handleNavigateToTabs}
+            canAccessDrawer={canAccessDrawer}
+            canSaveCart={canSaveCart}
+            canViewRefunds={canViewRefunds}
+            canManageTabs={canManageTabs}
+          />
 
-            <div style={styles.productGridContainer}>
-              <POSProductGrid 
-                products={filteredProducts} 
-                onAddToCart={handleAddToCart}
-                disabled={registerLocked}
+          <div style={styles.mainContent}>
+            <div style={styles.productsSection}>
+              <CategorySelector
+                categories={categories}
+                activeCategory={activeCategory}
+                onCategorySelect={setActiveCategory}
+                registerLocked={registerLocked}
+              />
+
+              <div style={styles.productGridContainer}>
+                <POSProductGrid 
+                  products={filteredProducts} 
+                  onAddToCart={handleAddToCart}
+                  disabled={registerLocked}
+                />
+              </div>
+            </div>
+
+            <div style={styles.cartSection}>
+              <POSCartPanel
+                cartItems={cartItems}
+                onRemoveItem={handleRemoveFromCart}
+                onUpdateQty={handleUpdateQty}
+                onCheckout={handleCheckout}
+                onSaveAndExit={handleSaveAndExit}
+                sessionLocked={isLocked || registerLocked}
+                attachedCustomer={currentCustomer}
+                tabMode={isTabMode}
+                activeTab={activeTab}
+                loyaltyCustomer={currentCustomer}
+                businessSettings={businessSettings}
+                currentEmployee={{ id: effectiveUserId, name: effectiveUserName }}
+                businessId={auth.selectedBusinessId}
+                taxCategories={taxCategories}
+                categoryTaxAssignments={categoryTaxAssignments}
+                categories={categories}
+                savedCartId={savedCartId}
+                isFromSavedCarts={isFromSavedCarts}
+                onDeleteCart={handleDeleteCart}
+                onClearCart={handleClearCart}
+                onCustomerAttach={handleCustomerScan}
+                onCustomerDetach={handleDetachCustomer}
               />
             </div>
           </div>
 
-          <div style={styles.cartSection}>
-            <POSCartPanel
-              cartItems={cartItems}
-              onRemoveItem={handleRemoveFromCart}
-              onUpdateQty={handleUpdateQty}
-              onCheckout={handleCheckout}
-              onSaveAndExit={handleSaveAndExit}
-              sessionLocked={isLocked || registerLocked}
-              attachedCustomer={currentCustomer}
-              tabMode={isTabMode}
-              activeTab={activeTab}
-              loyaltyCustomer={currentCustomer}
-              businessSettings={businessSettings}
-              currentEmployee={{ id: auth.authUser?.id, name: employeeName }}
-              businessId={auth.selectedBusinessId}
-              taxCategories={taxCategories}
-              categoryTaxAssignments={categoryTaxAssignments}
-              categories={categories}
-              savedCartId={savedCartId}
-              isFromSavedCarts={isFromSavedCarts}
-              onDeleteCart={handleDeleteCart}
-              onClearCart={handleClearCart}
-              onCustomerAttach={handleCustomerScan}
-              onCustomerDetach={handleDetachCustomer}
+          <BarcodeScanHandler onScan={handleBarcodeScan} />
+          
+          {isLocked && (
+            <SessionLockModal
+              visible={isLocked}
+              onSubmitPin={unlockWithPin}
+              onManagerOverride={managerOverride}
+              pinAttempts={pinAttempts}
+              lockedUntil={lockedUntil}
+              warningSeconds={warningSeconds}
+              overrideActive={isOverrideActive()}
             />
-          </div>
-        </div>
+          )}
 
-        <BarcodeScanHandler onScan={handleBarcodeScan} />
-        
-        {isLocked && (
-          <SessionLockModal
-            visible={isLocked}
-            onSubmitPin={unlockWithPin}
-            onManagerOverride={managerOverride}
-            pinAttempts={pinAttempts}
-            lockedUntil={lockedUntil}
-            warningSeconds={warningSeconds}
-            overrideActive={isOverrideActive()}
+          {canAccessDrawer && (
+            <POSDrawerComponent
+              businessId={auth.selectedBusinessId}
+              currentTerminalId={currentTerminalId}
+              visible={showDrawerManager}
+              onClose={() => setShowDrawerManager(false)}
+              onDrawerOpened={handleDrawerOpened}
+              onDrawerClosed={handleDrawerClosed}
+            />
+          )}
+
+          <PinModal
+            showPinModal={showPinModal}
+            pinInput={pinInput}
+            setPinInput={setPinInput}
+            pinError={pinError}
+            setPinError={setPinError}
+            failedAttempts={failedAttempts}
+            currentUnlockingUser={currentUnlockingUser}
+            onPinUnlock={handlePinUnlock}
           />
-        )}
 
-        <POSDrawerComponent
-          businessId={auth.selectedBusinessId}
-          currentTerminalId={currentTerminalId}
-          visible={showDrawerManager}
-          onClose={() => setShowDrawerManager(false)}
-          onDrawerOpened={handleDrawerOpened}
-          onDrawerClosed={handleDrawerClosed}
-        />
-
-        <PinModal
-          showPinModal={showPinModal}
-          pinInput={pinInput}
-          setPinInput={setPinInput}
-          pinError={pinError}
-          setPinError={setPinError}
-          failedAttempts={failedAttempts}
-          currentUnlockingUser={currentUnlockingUser}
-          onPinUnlock={handlePinUnlock}
-        />
-
-        <SaveCartModal
-          showSaveCartModal={showSaveCartModal}
-          onSaveCart={saveCartManually}
-          onClose={() => setShowSaveCartModal(false)}
-        />
-      </div>
-    </POSAuthWrapper>
+          <SaveCartModal
+            showSaveCartModal={showSaveCartModal}
+            onSaveCart={saveCartManually}
+            onClose={() => setShowSaveCartModal(false)}
+          />
+        </div>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

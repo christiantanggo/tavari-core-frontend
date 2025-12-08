@@ -5,7 +5,14 @@ export const EETRT_detectPaymentFrequency = (entries) => {
     return { frequency: null, confidence: 0, analysis: 'Insufficient data' };
   }
 
-  const sortedEntries = [...entries].sort((a, b) => 
+  // Filter out synthetic entries for frequency detection
+  const realEntries = entries.filter(e => !e.is_synthetic);
+  
+  if (realEntries.length < 3) {
+    return { frequency: 'bi_weekly', confidence: 50, analysis: 'Defaulting to bi-weekly (insufficient real entries)' };
+  }
+
+  const sortedEntries = [...realEntries].sort((a, b) => 
     new Date(a.hrpayroll_runs.pay_date) - new Date(b.hrpayroll_runs.pay_date)
   );
 
@@ -18,7 +25,7 @@ export const EETRT_detectPaymentFrequency = (entries) => {
   }
 
   if (gaps.length === 0) {
-    return { frequency: null, confidence: 0, analysis: 'No gaps to analyze' };
+    return { frequency: 'bi_weekly', confidence: 0, analysis: 'No gaps to analyze' };
   }
 
   const avgGap = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
@@ -109,7 +116,8 @@ export const EETRT_calculateROEData = (entries) => {
     payPeriods: last53Periods.length,
     firstPayPeriodStart: firstPayPeriod?.hrpayroll_runs.pay_period_start,
     lastPayPeriodEnd: lastPayPeriod?.hrpayroll_runs.pay_period_end,
-    averageWeeklyEarnings: totalInsurableEarnings / Math.max(last53Periods.length, 1)
+    averageWeeklyEarnings: totalInsurableEarnings / Math.max(last53Periods.length, 1),
+    syntheticPeriodsUsed: last53Periods.filter(e => e.is_synthetic).length
   };
 };
 
@@ -186,7 +194,7 @@ export const EETRT_processPayrollForROE = (entries) => {
         }
       });
     } catch (e) {
-      console.warn('Error parsing premiums for ROE:', e);
+      // Premium parsing failed
     }
 
     const totalEarnings = grossPay + vacationPay + premiumPay;
@@ -206,7 +214,8 @@ export const EETRT_processPayrollForROE = (entries) => {
         payDate: payDate.toISOString().split('T')[0],
         hours: 0, regularHours: 0, overtimeHours: 0, lieuHours: 0,
         grossEarnings: 0, insurableEarnings: 0, vacationPay: 0, premiumPay: 0,
-        entries: []
+        entries: [],
+        isSynthetic: entry.is_synthetic || false
       };
     }
 

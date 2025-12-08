@@ -1,5 +1,5 @@
 // hooks/usePOSAuth.js - Standardized Authentication Hook for POS Components
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 
@@ -26,9 +26,25 @@ export const usePOSAuth = (options = {}) => {
   const [authUser, setAuthUser] = useState(null);
   const [selectedBusinessId, setSelectedBusinessId] = useState(null);
   const [userRole, setUserRole] = useState(null);
+  const [loginUserRole, setLoginUserRole] = useState(null);
   const [businessData, setBusinessData] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState(null);
+  const [activePOSUser, setActivePOSUser] = useState(null);
+
+  const getActivePosUser = useCallback((businessId = null) => {
+    try {
+      const raw = localStorage.getItem('posActiveUser');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (businessId && parsed?.business_id !== businessId) {
+        return null;
+      }
+      return parsed;
+    } catch (err) {
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     initializeAuth();
@@ -36,25 +52,19 @@ export const usePOSAuth = (options = {}) => {
 
   const initializeAuth = async () => {
     try {
-      console.log(`${componentName}: Initializing authentication...`);
-      
       // Check current session
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      console.log(`${componentName}: Session check result:`, { session: !!session, error: sessionError });
 
       if (sessionError || !session?.user) {
-        console.error(`${componentName}: No valid session, redirecting to login`);
         navigate('/login');
         return;
       }
 
       setAuthUser(session.user);
-      console.log(`${componentName}: Authenticated as:`, session.user.email);
 
       // Get business context if required
       if (requireBusiness) {
         const currentBusinessId = localStorage.getItem('currentBusinessId');
-        console.log(`${componentName}: Business ID from localStorage:`, currentBusinessId);
 
         if (!currentBusinessId) {
           setAuthError('No business selected. Please select a business from the dashboard.');
@@ -65,27 +75,68 @@ export const usePOSAuth = (options = {}) => {
         setSelectedBusinessId(currentBusinessId);
 
         // Verify user has access to this business and get role
-        const { data: userRoles, error: roleError } = await supabase
-          .from('user_roles')
-          .select('role, active')
-          .eq('user_id', session.user.id)
-          .eq('business_id', currentBusinessId)
-          .eq('active', true);
+        // Try user_roles first, fallback to business_users if it fails
+        let primaryRole = null;
+        
+        try {
+          const { data: userRoles, error: roleError } = await supabase
+            .from('user_roles')
+            .select('role, active')
+            .eq('user_id', session.user.id)
+            .eq('business_id', currentBusinessId)
+            .eq('active', true)
+            .maybeSingle();
 
-        if (roleError || !userRoles || userRoles.length === 0) {
-          console.error(`${componentName}: User not authorized for this business:`, roleError);
-          setAuthError('Not authorized for this business. Please contact your administrator.');
-          setAuthLoading(false);
-          return;
+          // Check for 406 Not Acceptable or other errors
+          if (roleError) {
+            // 406 means the query format isn't accepted - likely RLS or table structure issue
+            if (roleError.code === 'PGRST116' || roleError.message?.includes('406')) {
+              // Silently fall back to business_users
+              console.warn('user_roles query not accepted, using business_users fallback');
+            } else {
+              // Other errors - log but continue
+              console.warn('user_roles query error:', roleError.message);
+            }
+          } else if (userRoles) {
+            primaryRole = userRoles.role;
+          }
+        } catch (err) {
+          // user_roles table may not exist or have issues - silently continue
+          console.warn('user_roles table not available, using business_users fallback');
         }
 
-        const primaryRole = userRoles[0].role;
-        setUserRole(primaryRole);
-        console.log(`${componentName}: User role verified:`, primaryRole);
+        // Fallback to business_users table if user_roles didn't work
+        if (!primaryRole) {
+          const { data: businessAccess, error: accessError } = await supabase
+            .from('business_users')
+            .select('role')
+            .eq('user_id', session.user.id)
+            .eq('business_id', currentBusinessId)
+            .maybeSingle();
+
+          if (businessAccess?.role) {
+            primaryRole = businessAccess.role;
+          }
+        }
+
+        // If still no role, default to employee
+        if (!primaryRole) {
+          primaryRole = 'employee';
+        }
+
+        setLoginUserRole(primaryRole);
+
+        const activeUserOverride = getActivePosUser(currentBusinessId);
+        if (activeUserOverride) {
+          setActivePOSUser(activeUserOverride);
+          setUserRole(activeUserOverride.role || primaryRole);
+        } else {
+          setActivePOSUser(null);
+          setUserRole(primaryRole);
+        }
 
         // Check if user has required role
         if (requiredRoles && requiredRoles.length > 0 && !requiredRoles.includes(primaryRole)) {
-          console.error(`${componentName}: Insufficient permissions. Required: ${requiredRoles.join(', ')}, Has: ${primaryRole}`);
           setAuthError(`Insufficient permissions. This feature requires: ${requiredRoles.join(' or ')}`);
           setAuthLoading(false);
           return;
@@ -100,25 +151,54 @@ export const usePOSAuth = (options = {}) => {
             .single();
 
           if (businessError) {
-            console.warn(`${componentName}: Could not load business data:`, businessError);
+            // Silent error handling
           } else {
             setBusinessData(business);
-            console.log(`${componentName}: Business data loaded:`, business.name);
           }
         } catch (businessErr) {
-          console.warn(`${componentName}: Business data fetch failed:`, businessErr);
+          // Silent error handling
         }
       }
 
       setAuthLoading(false);
-      console.log(`${componentName}: Authentication completed successfully`);
 
     } catch (err) {
-      console.error(`${componentName}: Authentication error:`, err);
       setAuthError(err.message || 'An unexpected authentication error occurred');
       setAuthLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!requireBusiness) return;
+
+    const handleActiveUserChange = () => {
+      if (!selectedBusinessId) return;
+      const activeUser = getActivePosUser(selectedBusinessId);
+      if (activeUser) {
+        setActivePOSUser(activeUser);
+        setUserRole(activeUser.role || loginUserRole || userRole);
+      } else {
+        setActivePOSUser(null);
+        setUserRole(loginUserRole || userRole);
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pos-active-user-changed', handleActiveUserChange);
+      const storageHandler = (event) => {
+        if (event.key === 'posActiveUser') {
+          handleActiveUserChange();
+        }
+      };
+      window.addEventListener('storage', storageHandler);
+      return () => {
+        window.removeEventListener('pos-active-user-changed', handleActiveUserChange);
+        window.removeEventListener('storage', storageHandler);
+      };
+    }
+
+    return undefined;
+  }, [selectedBusinessId, getActivePosUser, loginUserRole, requireBusiness, userRole]);
 
   /**
    * Check if user has specific role
@@ -155,17 +235,14 @@ export const usePOSAuth = (options = {}) => {
    */
   const validateManagerPin = async (pin) => {
     if (!authUser || !selectedBusinessId) {
-      console.log(`${componentName}: No authenticated user or business for PIN validation`);
       return false;
     }
 
     if (!isManager()) {
-      console.log(`${componentName}: User is not a manager for PIN validation`);
       return false;
     }
 
     try {
-      console.log(`${componentName}: Validating PIN for user:`, authUser.id);
 
       // Get user's PIN from database
       const { data: userData, error: userError } = await supabase
@@ -175,7 +252,6 @@ export const usePOSAuth = (options = {}) => {
         .single();
 
       if (userError || !userData?.pin) {
-        console.error(`${componentName}: PIN lookup error:`, userError);
         return false;
       }
 
@@ -186,20 +262,16 @@ export const usePOSAuth = (options = {}) => {
         try {
           const bcrypt = await import('bcryptjs');
           const isValid = await bcrypt.compare(pin, storedPin);
-          console.log(`${componentName}: Bcrypt PIN validation result:`, isValid);
           return isValid;
         } catch (bcryptError) {
-          console.warn(`${componentName}: Bcrypt not available, using plain comparison:`, bcryptError);
           return String(pin) === String(storedPin);
         }
       } else {
         // Plain text PIN comparison
-        console.log(`${componentName}: Using plain text PIN validation`);
         return String(pin) === String(storedPin);
       }
       
     } catch (err) {
-      console.error(`${componentName}: PIN validation error:`, err);
       return false;
     }
   };
@@ -238,6 +310,7 @@ export const usePOSAuth = (options = {}) => {
     authUser,
     selectedBusinessId,
     userRole,
+    activePOSUser,
     businessData,
     authLoading,
     authError,
@@ -263,6 +336,7 @@ export const usePOSAuth = (options = {}) => {
       authUser,
       selectedBusinessId,
       userRole,
+      activePOSUser,
       businessData
     }
   };

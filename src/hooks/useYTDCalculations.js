@@ -31,29 +31,32 @@ export const useYTDCalculations = (businessId) => {
     securityLevel: 'critical'
   });
 
-  // Authentication context
+  // Authentication context - Allow all roles including employees for YTD calculations
+  // Employees need to see their own YTD data
   const {
-    selectedBusinessId,
+    selectedBusinessId: authSelectedBusinessId,
     authUser,
     userRole,
     businessData
   } = usePOSAuth({
-    requiredRoles: ['owner', 'manager', 'hr_admin'],
+    requiredRoles: null, // Allow all roles - employees need YTD too
     requireBusiness: true,
     componentName: 'useYTDCalculations'
   });
 
   /**
    * Load YTD data when businessId changes
+   * Use passed businessId parameter OR authSelectedBusinessId from usePOSAuth
    */
   useEffect(() => {
-    if (businessId) {
-      loadYTDData(businessId);
+    const effectiveBusinessId = businessId || authSelectedBusinessId;
+    if (effectiveBusinessId) {
+      loadYTDData(effectiveBusinessId);
     } else {
       setYTDData({});
       setLoading(false);
     }
-  }, [businessId]);
+  }, [businessId, authSelectedBusinessId]);
 
   /**
    * Load existing YTD data from database
@@ -103,8 +106,25 @@ export const useYTDCalculations = (businessId) => {
    * Calculate YTD totals for a specific employee up to a specific date
    * FIXED: Corrected database schema and field references
    */
-  const calculateEmployeeYTD = useCallback(async (userId, upToDate = null) => {
-    if (!businessId) return null;
+  const calculateEmployeeYTD = useCallback(async (userId, upToDate = null, businessIdOverride = null) => {
+    // Use businessIdOverride (explicitly passed) OR passed businessId parameter OR authSelectedBusinessId from usePOSAuth
+    const effectiveBusinessId = businessIdOverride || businessId || authSelectedBusinessId;
+    if (!effectiveBusinessId) {
+      console.error('[YTD Calculation] No business ID available', {
+        businessIdOverride,
+        businessId,
+        authSelectedBusinessId,
+        userId,
+        upToDate
+      });
+      return null;
+    }
+    
+    console.log('[YTD Calculation] Using business ID:', effectiveBusinessId, {
+      source: businessIdOverride ? 'override' : (businessId ? 'parameter' : 'auth'),
+      userId,
+      upToDate
+    });
 
     try {
       const targetDate = upToDate ? new Date(upToDate) : new Date();
@@ -132,11 +152,26 @@ export const useYTDCalculations = (businessId) => {
         last_updated: yearStart.toISOString()
       };
 
-      // Get any payroll entries since last YTD update
+      // ORIGINAL WORKING LOGIC: Use stored YTD as base, add entries since last update
+      // This preserves migration data that's already in storedYTD
       const lastUpdated = new Date(storedYTD.last_updated || yearStart);
       
-      // FIXED: Proper database query with correct relationships
-      const { data: recentEntries, error } = await supabase
+      // CRITICAL: If stored YTD is empty (all zeros), it means no data was stored yet
+      // In this case, we need to calculate from year start, not from lastUpdated
+      const hasStoredData = storedYTD.gross_pay > 0 || storedYTD.net_pay > 0 || storedYTD.federal_tax > 0;
+      const calculateFromDate = (hasStoredData && lastUpdated > yearStart) ? lastUpdated : yearStart;
+      
+      console.log(`[YTD Calculation] Calculating YTD for user ${userId} from ${calculateFromDate.toISOString().split('T')[0]} to ${targetDate.toISOString().split('T')[0]}`);
+      console.log(`[YTD Calculation] Stored YTD last_updated: ${lastUpdated.toISOString().split('T')[0]}`);
+      console.log(`[YTD Calculation] Has stored data: ${hasStoredData}, Using stored YTD as base:`, {
+        gross_pay: storedYTD.gross_pay,
+        net_pay: storedYTD.net_pay,
+        federal_tax: storedYTD.federal_tax
+      });
+      
+      // Query entries since last update (stored YTD already includes everything before this)
+      // If stored YTD is empty, query from year start to get ALL entries including migration
+      const { data: regularEntries, error } = await supabase
         .from('hrpayroll_entries')
         .select(`
           *,
@@ -146,40 +181,154 @@ export const useYTDCalculations = (businessId) => {
           )
         `)
         .eq('user_id', userId)
-        .eq('hrpayroll_runs.business_id', businessId)
-        .gte('hrpayroll_runs.pay_date', lastUpdated.toISOString().split('T')[0])
+        .eq('hrpayroll_runs.business_id', effectiveBusinessId)
+        .gte('hrpayroll_runs.pay_date', calculateFromDate.toISOString().split('T')[0])
         .lte('hrpayroll_runs.pay_date', targetDate.toISOString().split('T')[0]);
+      
+      // CRITICAL: Migration entries represent data from the old payroll system
+      // They don't have hrpayroll_runs (payroll_run_id is null), so they're NOT included in the regular query above
+      // We MUST query them separately and include them in the calculation
+      // 
+      // Logic:
+      // - If stored YTD is empty: Calculate from year start, include ALL migration entries (they're historical data)
+      //   In this case, query ALL migration entries for the year, regardless of pay_date (some might not have it set)
+      // - If stored YTD has data: Query migration entries since last update
+      let migrationEntries = [];
+      
+      if (!hasStoredData) {
+        // When stored YTD is empty, get ALL migration entries (they might not all have pay_date set correctly)
+        // We'll filter by date in JavaScript after fetching
+        console.log(`[YTD Calculation] Querying ALL migration entries (stored YTD is empty - will filter by date after fetch)`);
+        console.log(`[YTD Calculation] Query params: userId=${userId}, businessId=${effectiveBusinessId}, is_migration_entry=true`);
+        
+        const { data: migEntries, error: migError } = await supabase
+          .from('hrpayroll_entries')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('business_id', effectiveBusinessId)
+          .eq('is_migration_entry', true);
+        
+        if (migError) {
+          console.error('[YTD Calculation] Migration entries query error:', migError);
+          migrationEntries = [];
+        } else {
+          console.log(`[YTD Calculation] Raw migration entries query returned: ${migEntries?.length || 0} entries`);
+          
+          // Filter by date in JavaScript (handles null pay_date)
+          migrationEntries = (migEntries || []).filter(entry => {
+            if (!entry.pay_date) {
+              // If no pay_date, include it (might be old migration data)
+              console.log(`[YTD Calculation] Including migration entry ${entry.id} with NULL pay_date`);
+              return true;
+            }
+            const entryDate = new Date(entry.pay_date);
+            const inRange = entryDate >= yearStart && entryDate <= targetDate;
+            if (!inRange) {
+              console.log(`[YTD Calculation] Excluding migration entry ${entry.id} - pay_date ${entry.pay_date} is outside range ${yearStart.toISOString().split('T')[0]} to ${targetDate.toISOString().split('T')[0]}`);
+            }
+            return inRange;
+          });
+          console.log(`[YTD Calculation] Found ${migrationEntries.length} migration entries (from ${migEntries?.length || 0} total) for year ${currentYear}`);
+          
+          // Debug: Log sample migration entries if found
+          if (migrationEntries.length > 0) {
+            console.log(`[YTD Calculation] Sample migration entry:`, {
+              id: migrationEntries[0].id,
+              pay_date: migrationEntries[0].pay_date,
+              gross_pay: migrationEntries[0].gross_pay,
+              is_migration_entry: migrationEntries[0].is_migration_entry
+            });
+          }
+        }
+      } else {
+        // When stored YTD has data, only get migration entries since last update
+        // CRITICAL: Migration entries might have NULL pay_date, so we need to handle that
+        console.log(`[YTD Calculation] Querying migration entries from ${calculateFromDate.toISOString().split('T')[0]} to ${targetDate.toISOString().split('T')[0]}`);
+        
+        // Query ALL migration entries first (because some might have NULL pay_date)
+        const { data: migEntries, error: migError } = await supabase
+          .from('hrpayroll_entries')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('business_id', effectiveBusinessId)
+          .eq('is_migration_entry', true);
+        
+        if (migError) {
+          console.error('[YTD Calculation] Migration entries query error:', migError);
+          migrationEntries = [];
+        } else {
+          // Filter by date in JavaScript (handles NULL pay_date)
+          // Include entries with NULL pay_date OR entries within the date range
+          migrationEntries = (migEntries || []).filter(entry => {
+            if (!entry.pay_date) {
+              // If no pay_date, include it (migration data might not have dates set)
+              // But only if we're calculating from year start (meaning stored YTD might be incomplete)
+              return calculateFromDate <= yearStart;
+            }
+            const entryDate = new Date(entry.pay_date);
+            return entryDate >= calculateFromDate && entryDate <= targetDate;
+          });
+          console.log(`[YTD Calculation] Found ${migrationEntries.length} migration entries since last update (from ${migEntries?.length || 0} total)`);
+        }
+      }
+      
+      if (migrationEntries.length > 0) {
+        console.log(`[YTD Calculation] ✅ Including ${migrationEntries.length} migration entries in YTD calculation`);
+      } else {
+        console.log(`[YTD Calculation] ⚠️ No migration entries found - this might be expected if migration data was already stored in hrpayroll_ytd_data`);
+      }
+      
+      // Combine regular and migration entries
+      const recentEntries = [
+        ...(regularEntries || []),
+        ...(migrationEntries || [])
+      ];
+      
+      if (error) {
+        console.error('[YTD Calculation] Query error:', error);
+        throw error;
+      }
 
-      if (error) throw error;
+      console.log(`[YTD Calculation] Found ${recentEntries?.length || 0} new payroll entries since last update`);
 
       // Get employee wage info separately to avoid complex joins
+      // FIXED: Remove hourly_wage (doesn't exist), only query wage
       const { data: employeeData, error: empError } = await supabase
         .from('user_roles')
         .select(`
           users!inner (
             id,
-            hourly_wage,
             wage
           )
         `)
         .eq('user_id', userId)
-        .eq('business_id', businessId)
+        .eq('business_id', effectiveBusinessId)
         .eq('active', true)
-        .single();
+        .maybeSingle();
 
       if (empError) {
         console.warn('Could not get employee wage data:', empError);
       }
 
-      // Use hourly_wage if available, fallback to wage, default to 0
-      const employeeWage = parseFloat(
-        employeeData?.users?.hourly_wage || 
-        employeeData?.users?.wage || 
-        0
-      );
+      // Use wage from user_roles query, or try business_users as fallback
+      let employeeWage = parseFloat(employeeData?.users?.wage || 0);
+      
+      // Fallback: try business_users table if user_roles doesn't have wage
+      if (!employeeWage) {
+        const { data: buData } = await supabase
+          .from('business_users')
+          .select('users!inner(wage)')
+          .eq('user_id', userId)
+          .eq('business_id', effectiveBusinessId)
+          .maybeSingle();
+        
+        employeeWage = parseFloat(buData?.users?.wage || 0);
+      }
 
-      // Start with stored YTD totals
-      const ytdTotals = {
+      // ORIGINAL WORKING LOGIC: Start with stored YTD totals, add recent entries on top
+      // This preserves migration data and historical YTD that's already calculated
+      // BUT: If stored YTD is empty, start from zeros and calculate from ALL entries
+      const ytdTotals = hasStoredData ? {
         regular_hours: parseFloat(storedYTD.regular_hours || 0),
         overtime_hours: parseFloat(storedYTD.overtime_hours || 0),
         lieu_hours: parseFloat(storedYTD.lieu_hours || 0),
@@ -201,9 +350,52 @@ export const useYTDCalculations = (businessId) => {
         additional_tax: parseFloat(storedYTD.additional_tax || 0),
         gross_pay: parseFloat(storedYTD.gross_pay || 0),
         net_pay: parseFloat(storedYTD.net_pay || 0)
+      } : {
+        regular_hours: 0,
+        overtime_hours: 0,
+        lieu_hours: 0,
+        stat_hours: 0,
+        holiday_hours: 0,
+        hours_worked: 0,
+        regular_income: 0,
+        overtime_income: 0,
+        lieu_income: 0,
+        vacation_pay: 0,
+        shift_premiums: 0,
+        stat_earnings: 0,
+        holiday_earnings: 0,
+        bonus: 0,
+        federal_tax: 0,
+        provincial_tax: 0,
+        cpp_deduction: 0,
+        ei_deduction: 0,
+        additional_tax: 0,
+        gross_pay: 0,
+        net_pay: 0
       };
 
-      // Add recent entries to YTD totals
+      console.log(`[YTD Calculation] Found ${recentEntries?.length || 0} total entries to process (${regularEntries?.length || 0} regular, ${migrationEntries?.length || 0} migration)`);
+
+      // If no new entries found, return stored YTD (which includes migration data)
+      // BUT: If stored YTD is empty and we have no entries, something is wrong
+      if (!recentEntries || recentEntries.length === 0) {
+        if (!hasStoredData) {
+          console.warn(`[YTD Calculation] No entries found and stored YTD is empty for user ${userId}. This might indicate missing migration data.`);
+        }
+        console.log('[YTD Calculation] No new entries - returning stored YTD totals');
+        return {
+          ...ytdTotals,
+          user_id: userId,
+          business_id: effectiveBusinessId,
+          tax_year: currentYear,
+          calculation_date: targetDate.toISOString(),
+          entries_included: 0,
+          last_stored_update: storedYTD.last_updated,
+          is_current: true
+        };
+      }
+
+      // Add recent entries to stored YTD totals (preserves migration data)
       recentEntries.forEach(entry => {
         // Hours
         const regularHours = parseFloat(entry.regular_hours || 0);
@@ -250,10 +442,10 @@ export const useYTDCalculations = (businessId) => {
         ytdTotals.net_pay += parseFloat(entry.net_pay || 0);
       });
 
-      return {
+      const result = {
         ...ytdTotals,
         user_id: userId,
-        business_id: businessId,
+        business_id: effectiveBusinessId,
         tax_year: currentYear,
         calculation_date: targetDate.toISOString(),
         entries_included: recentEntries.length,
@@ -261,16 +453,26 @@ export const useYTDCalculations = (businessId) => {
         is_current: recentEntries.length === 0
       };
 
+      console.log('[YTD Calculation] Final YTD totals:', {
+        gross_pay: result.gross_pay,
+        net_pay: result.net_pay,
+        federal_tax: result.federal_tax,
+        entries_included: result.entries_included
+      });
+
+      return result;
+
     } catch (error) {
       console.error('Error calculating employee YTD:', error);
+      const effectiveBusinessId = businessId || authSelectedBusinessId;
       await logSecurityEvent('ytd_calculation_error', {
-        business_id: businessId,
+        business_id: effectiveBusinessId,
         user_id: userId,
         error: error.message
       }, 'high');
       return null;
     }
-  }, [businessId, ytdData, logSecurityEvent]);
+  }, [businessId, authSelectedBusinessId, ytdData, logSecurityEvent]);
 
   /**
    * Update YTD totals after a payroll run is finalized

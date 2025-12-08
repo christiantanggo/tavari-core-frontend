@@ -1,6 +1,16 @@
 import React from "react";
+import { useNavigate } from "react-router-dom";
 
 export default function Footer() {
+  const navigate = useNavigate();
+
+  const handleAdminPortalClick = () => {
+    navigate('/employeeportal');
+  };
+
+  const handleEmployeePortalClick = () => {
+    navigate('/login');
+  };
   return (
     <footer style={{
       background: "#fff",
@@ -85,11 +95,79 @@ export default function Footer() {
         </div>
       </div>
 
+      {/* Portal Links Section */}
+      <div style={{
+        maxWidth: 1200,
+        margin: "0 auto",
+        padding: "20px 24px",
+        borderTop: "1px solid #e5e5e5",
+        display: "flex",
+        justifyContent: "center",
+        gap: 16,
+        flexWrap: "wrap"
+      }}>
+        <button
+          onClick={handleAdminPortalClick}
+          style={{
+            background: "transparent",
+            border: "2px solid #008080",
+            color: "#008080",
+            padding: "10px 24px",
+            borderRadius: 8,
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: "pointer",
+            transition: "all 0.3s ease",
+            fontFamily: "inherit"
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "#008080";
+            e.currentTarget.style.color = "#fff";
+            e.currentTarget.style.transform = "translateY(-2px)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "#008080";
+            e.currentTarget.style.transform = "translateY(0)";
+          }}
+        >
+          Admin Portal
+        </button>
+        
+        <button
+          onClick={handleEmployeePortalClick}
+          style={{
+            background: "transparent",
+            border: "2px solid #008080",
+            color: "#008080",
+            padding: "10px 24px",
+            borderRadius: 8,
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: "pointer",
+            transition: "all 0.3s ease",
+            fontFamily: "inherit"
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "#008080";
+            e.currentTarget.style.color = "#fff";
+            e.currentTarget.style.transform = "translateY(-2px)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "#008080";
+            e.currentTarget.style.transform = "translateY(0)";
+          }}
+        >
+          Employee Portal
+        </button>
+      </div>
+
       <div style={{
         textAlign: "center",
         color: "#888",
         fontSize: 14,
-        marginTop: 30,
+        marginTop: 0,
         background: "#f7f7f7",
         padding: "14px 0",
         borderRadius: "0 0 12px 12px"

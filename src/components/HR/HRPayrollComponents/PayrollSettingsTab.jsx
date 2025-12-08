@@ -1,4 +1,4 @@
-// components/HR/HRPayrollComponents/PayrollSettingsTab.jsx - FIXED for Actual Database Schema
+// components/HR/HRPayrollComponents/PayrollSettingsTab.jsx - FIXED: Added onConflict to upsert
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../../supabaseClient';
 import { SecurityWrapper } from '../../../Security';
@@ -270,7 +270,7 @@ const PayrollSettingsTab = ({
     };
   };
 
-  // Save settings to both tables
+  // ✅ FIXED: Save settings with onConflict parameter
   const saveSettings = async () => {
     if (!selectedBusinessId) return;
 
@@ -302,7 +302,7 @@ const PayrollSettingsTab = ({
     try {
       await recordAction('payroll_settings_save_attempt', true);
 
-      // Save to hrpayroll_settings table
+      // ✅ FIXED: Save to hrpayroll_settings table with onConflict
       const { error: basicError } = await supabase
         .from('hrpayroll_settings')
         .upsert({
@@ -319,11 +319,13 @@ const PayrollSettingsTab = ({
           default_claim_code: basicSettings.default_claim_code,
           tax_year: basicSettings.tax_year,
           updated_at: new Date().toISOString()
+        }, {
+          onConflict: 'business_id'  // ✅ ADDED THIS
         });
 
       if (basicError) throw basicError;
 
-      // Save to hrpayroll_tax_settings table  
+      // ✅ FIXED: Save to hrpayroll_tax_settings table with onConflict
       const { error: taxError } = await supabase
         .from('hrpayroll_tax_settings')
         .upsert({
@@ -334,6 +336,8 @@ const PayrollSettingsTab = ({
           use_cra_tables: taxSettings.use_cra_tables,
           tax_year: taxSettings.tax_year,
           last_updated: new Date().toISOString()
+        }, {
+          onConflict: 'business_id'  // ✅ ADDED THIS
         });
 
       if (taxError) throw taxError;
@@ -491,14 +495,13 @@ const PayrollSettingsTab = ({
     secondaryButton: {
       padding: '12px 20px',
       borderRadius: '6px',
-      border: 'none',
+      border: `1px solid ${TavariStyles.colors.gray300}`,
       fontSize: TavariStyles.typography.fontSize.sm,
       fontWeight: TavariStyles.typography.fontWeight.semibold,
       cursor: 'pointer',
       transition: 'all 0.2s ease',
       backgroundColor: TavariStyles.colors.gray100,
-      color: TavariStyles.colors.gray700,
-      border: `1px solid ${TavariStyles.colors.gray300}`
+      color: TavariStyles.colors.gray700
     },
     disabledButton: {
       opacity: 0.6,
@@ -542,8 +545,8 @@ const PayrollSettingsTab = ({
                   onChange={(e) => handleBasicSettingChange('pay_frequency', e.target.value)}
                 >
                   <option value="weekly">Weekly (52 pay periods)</option>
-                  <option value="bi-weekly">Bi-weekly (26 pay periods)</option>
-                  <option value="semi-monthly">Semi-monthly (24 pay periods)</option>
+                  <option value="bi_weekly">Bi-weekly (26 pay periods)</option>
+                  <option value="semi_monthly">Semi-monthly (24 pay periods)</option>
                   <option value="monthly">Monthly (12 pay periods)</option>
                 </select>
                 <div style={styles.description}>
@@ -629,59 +632,22 @@ const PayrollSettingsTab = ({
                   onChange={(e) => handleBasicSettingChange('default_claim_code', parseInt(e.target.value))}
                 >
                   {Array.from({length: 11}, (_, i) => (
-                    <option key={i} value={i}>
-                      CC {i} - {i === 0 ? 'No exemptions' : 
-                               i === 1 ? 'Basic personal amount' : 
-                               i === 2 ? 'Basic + spouse' : 
-                               i === 3 ? 'Basic + eligible dependant' :
-                               `Additional exemptions (${i})`}
-                    </option>
+                    <option key={i} value={i}>Claim Code {i}</option>
                   ))}
                 </select>
                 {validationErrors.default_claim_code && (
                   <div style={styles.errorText}>{validationErrors.default_claim_code}</div>
                 )}
                 <div style={styles.description}>
-                  Default claim code for new employees (from TD1 form)
-                </div>
-              </div>
-
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Tax Year</label>
-                <select
-                  style={styles.select}
-                  value={basicSettings.tax_year}
-                  onChange={(e) => handleBasicSettingChange('tax_year', parseInt(e.target.value))}
-                >
-                  <option value="2025">2025</option>
-                  <option value="2024">2024</option>
-                  <option value="2023">2023</option>
-                </select>
-                <div style={styles.description}>
-                  Tax year for CRA table lookups (current year recommended)
+                  Default federal tax claim code for new employees
                 </div>
               </div>
             </div>
-          </div>
 
-          {/* Fallback Tax Rates (only when CRA tables disabled) */}
-          {!basicSettings.use_cra_tax_tables && (
-            <div style={styles.section}>
-              <h3 style={styles.sectionTitle}>Fallback Tax Rates (CRA Tables Disabled)</h3>
-              <div style={{
-                padding: TavariStyles.spacing.md,
-                backgroundColor: TavariStyles.colors.warningBg,
-                color: TavariStyles.colors.warningText,
-                borderRadius: '6px',
-                marginBottom: TavariStyles.spacing.lg,
-                fontWeight: TavariStyles.typography.fontWeight.medium
-              }}>
-                ⚠️ Warning: These simplified rates are not CRA T4127 compliant and should only be used for testing.
-              </div>
-              
+            {!basicSettings.use_cra_tax_tables && (
               <div style={styles.formGrid}>
                 <div style={styles.formGroup}>
-                  <label style={styles.label}>Federal Tax % (CORRECTED)</label>
+                  <label style={styles.label}>Federal Tax % (Simplified)</label>
                   <input
                     type="number"
                     step="0.01"
@@ -728,7 +694,7 @@ const PayrollSettingsTab = ({
                     style={{
                       ...styles.input,
                       ...(validationErrors.ei_percent ? styles.inputError : {}),
-                      backgroundColor: basicSettings.ei_percent === 1.64 ? TavariStyles.colors.successBg : TavariStyles.colors.white
+                      backgroundColor: basicSettings.ei_percent === 1.64 ? '#dcfce7' : TavariStyles.colors.white
                     }}
                     value={basicSettings.ei_percent}
                     onChange={(e) => handleBasicSettingChange('ei_percent', parseFloat(e.target.value) || 0)}
@@ -737,7 +703,7 @@ const PayrollSettingsTab = ({
                     <div style={styles.errorText}>{validationErrors.ei_percent}</div>
                   )}
                   <div style={styles.description}>
-                    ✅ Correct CRA rate for 2025 is 1.64% (was 1.58%)
+                    ✅ Correct CRA rate for 2025 is 1.64%
                   </div>
                 </div>
 
@@ -760,8 +726,8 @@ const PayrollSettingsTab = ({
                   )}
                 </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Preview Section */}
           <div style={styles.section}>
@@ -835,55 +801,22 @@ const PayrollSettingsTab = ({
                   <span>Overtime Hours ({preview.overtimeHours}h @ 1.5x):</span>
                   <span>${formatTaxAmount ? formatTaxAmount(preview.overtimePay) : preview.overtimePay.toFixed(2)}</span>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: TavariStyles.spacing.xs, padding: TavariStyles.spacing.xs + ' 0' }}>
-                  <span>Gross Pay:</span>
-                  <span>${formatTaxAmount ? formatTaxAmount(preview.totalGrossPay) : preview.totalGrossPay.toFixed(2)}</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: TavariStyles.spacing.xs, padding: TavariStyles.spacing.xs + ' 0', borderTop: `1px solid ${TavariStyles.colors.gray200}`, paddingTop: TavariStyles.spacing.sm }}>
+                  <span><strong>Gross Pay:</strong></span>
+                  <span><strong>${formatTaxAmount ? formatTaxAmount(preview.grossWithVacation) : preview.grossWithVacation.toFixed(2)}</strong></span>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: TavariStyles.spacing.xs, padding: TavariStyles.spacing.xs + ' 0' }}>
-                  <span>Vacation Pay ({basicSettings.default_vacation_percent}%):</span>
-                  <span>+${formatTaxAmount ? formatTaxAmount(preview.vacationPay) : preview.vacationPay.toFixed(2)}</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: TavariStyles.spacing.xs, padding: TavariStyles.spacing.xs + ' 0', color: TavariStyles.colors.danger }}>
+                  <span>Total Deductions:</span>
+                  <span>-${formatTaxAmount ? formatTaxAmount(preview.totalDeductions) : preview.totalDeductions.toFixed(2)}</span>
                 </div>
-                
-                <hr style={{ margin: `${TavariStyles.spacing.sm} 0`, border: 'none', borderTop: `1px solid ${TavariStyles.colors.gray300}` }} />
-                
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: TavariStyles.spacing.xs, padding: TavariStyles.spacing.xs + ' 0' }}>
-                  <span>Federal Tax {preview.calculationMethod === 'cra_compliant' ? '(CRA Table)' : `(${basicSettings.federal_tax_percent}%)`}:</span>
-                  <span>-${formatTaxAmount ? formatTaxAmount(preview.federalTax) : preview.federalTax.toFixed(2)}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: TavariStyles.spacing.xs, padding: TavariStyles.spacing.xs + ' 0' }}>
-                  <span>Provincial Tax {preview.calculationMethod === 'cra_compliant' ? '(CRA Table)' : `(${basicSettings.provincial_tax_percent}%)`}:</span>
-                  <span>-${formatTaxAmount ? formatTaxAmount(preview.provincialTax) : preview.provincialTax.toFixed(2)}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: TavariStyles.spacing.xs, padding: TavariStyles.spacing.xs + ' 0' }}>
-                  <span>EI {preview.calculationMethod === 'cra_compliant' ? '(CRA Table)' : `(${basicSettings.ei_percent}%)`}:</span>
-                  <span>-${formatTaxAmount ? formatTaxAmount(preview.ei) : preview.ei.toFixed(2)}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: TavariStyles.spacing.xs, padding: TavariStyles.spacing.xs + ' 0' }}>
-                  <span>CPP {preview.calculationMethod === 'cra_compliant' ? '(CRA Table)' : `(${basicSettings.cpp_percent}%)`}:</span>
-                  <span>-${formatTaxAmount ? formatTaxAmount(preview.cpp) : preview.cpp.toFixed(2)}</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: TavariStyles.spacing.xs + ' 0', borderTop: `2px solid ${TavariStyles.colors.gray300}`, paddingTop: TavariStyles.spacing.sm }}>
+                  <span style={{ fontSize: TavariStyles.typography.fontSize.lg, fontWeight: TavariStyles.typography.fontWeight.bold }}>Net Pay:</span>
+                  <span style={{ fontSize: TavariStyles.typography.fontSize.lg, fontWeight: TavariStyles.typography.fontWeight.bold, color: TavariStyles.colors.success }}>
+                    ${formatTaxAmount ? formatTaxAmount(preview.netPay) : preview.netPay.toFixed(2)}
+                  </span>
                 </div>
                 
-                <hr style={{ margin: `${TavariStyles.spacing.sm} 0`, border: 'none', borderTop: `2px solid ${TavariStyles.colors.primary}30` }} />
-                
-                <div style={{
-                  display: 'flex', 
-                  justifyContent: 'space-between', 
-                  fontSize: TavariStyles.typography.fontSize.md,
-                  fontWeight: TavariStyles.typography.fontWeight.bold,
-                  color: TavariStyles.colors.primary,
-                  paddingTop: TavariStyles.spacing.sm,
-                  marginTop: TavariStyles.spacing.sm
-                }}>
-                  <span>Net Pay:</span>
-                  <span>${formatTaxAmount ? formatTaxAmount(preview.netPay) : preview.netPay.toFixed(2)}</span>
-                </div>
-                
-                <div style={{
-                  marginTop: TavariStyles.spacing.md,
-                  fontSize: TavariStyles.typography.fontSize.xs,
-                  color: TavariStyles.colors.gray600,
-                  textAlign: 'center'
-                }}>
+                <div style={{ marginTop: TavariStyles.spacing.md, fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray600 }}>
                   Hourly Rate: ${formatTaxAmount ? formatTaxAmount(previewEmployee.grossPay / previewEmployee.hoursWorked) : (previewEmployee.grossPay / previewEmployee.hoursWorked).toFixed(2)}/hr | 
                   Effective Tax Rate: {((preview.totalDeductions / preview.grossWithVacation) * 100).toFixed(1)}% |
                   Method: {preview.calculationMethod === 'cra_compliant' ? 'CRA T4127 Compliant' : 'Simplified (Non-Compliant)'}

@@ -1,4 +1,4 @@
-// screens/Mail/PerformanceMonitoringScreen.jsx - Performance Monitoring & Alerts with Pause Protection
+// screens/Mail/PerformanceMonitoringScreen.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
@@ -7,21 +7,68 @@ import systemTests from '../../helpers/Mail/systemTests';
 import {
   FiActivity, FiAlertTriangle, FiCheckCircle, FiClock, FiTrendingUp, 
   FiTrendingDown, FiZap, FiSettings, FiRefreshCw, FiBell, FiMail,
-  FiShield, FiBarChart2, FiTarget, FiGlobe, FiX, FiEye
+  FiShield, FiBarChart2, FiTarget, FiGlobe, FiX, FiEye, FiAlertCircle
 } from 'react-icons/fi';
+
+// Permission System Imports
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import toast from 'react-hot-toast';
 
 const PerformanceMonitoringScreen = () => {
   const { business } = useBusiness();
+  
+  // Security context for performance monitoring
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'PerformanceMonitoring',
+    sensitiveComponent: false,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Authentication using standardized hook
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin'],
+    requireBusiness: true,
+    componentName: 'PerformanceMonitoring'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   const [performanceData, setPerformanceData] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [monitoring, setMonitoring] = useState(false);
   const [thresholds, setThresholds] = useState({
-    minThroughput: 1.0, // emails per second
-    maxQueueTime: 5000, // milliseconds
-    maxProcessTime: 3000, // milliseconds
-    maxErrorRate: 5, // percentage
-    alertCooldown: 300 // seconds between same alerts
+    minThroughput: 1.0,
+    maxQueueTime: 5000,
+    maxProcessTime: 3000,
+    maxErrorRate: 5,
+    alertCooldown: 300
   });
   const [realtimeStats, setRealtimeStats] = useState({
     currentThroughput: 0,
@@ -32,20 +79,40 @@ const PerformanceMonitoringScreen = () => {
   });
   const [showSettings, setShowSettings] = useState(false);
 
-  const businessId = business?.id;
+  const businessId = selectedBusinessId || business?.id;
+
+  // Permission checks
+  const canViewPerformance = hasAnyPermission([
+    'mail.campaigns.view',
+    'mail.contacts.view'
+  ]) || hasElevatedPrivileges();
+  
+  const canRunBenchmarks = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
+  const canModifyThresholds = hasElevatedPrivileges(); // Only elevated users
+  const canAcknowledgeAlerts = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !authLoading && !canViewPerformance) {
+      toast.error('You do not have permission to view performance monitoring');
+      navigate('/dashboard/mail');
+    }
+  }, [permissionsLoading, authLoading, canViewPerformance]);
 
   // Create performance metrics table if it doesn't exist
   const createPerformanceTable = useCallback(async () => {
+    if (!businessId || !canViewPerformance) return;
+
     try {
       await supabase.rpc('execute_sql', {
         query: `
           CREATE TABLE IF NOT EXISTS mail_performance_metrics (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,
-            metric_type TEXT NOT NULL, -- throughput, queue_time, process_time, error_rate
+            metric_type TEXT NOT NULL,
             metric_value DECIMAL(10,4) NOT NULL,
             threshold_value DECIMAL(10,4),
-            status TEXT DEFAULT 'normal', -- normal, warning, critical
+            status TEXT DEFAULT 'normal',
             recorded_at TIMESTAMP DEFAULT timezone('utc'::text, now()),
             metadata JSONB DEFAULT '{}'
           );
@@ -57,8 +124,8 @@ const PerformanceMonitoringScreen = () => {
           CREATE TABLE IF NOT EXISTS mail_performance_alerts (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,
-            alert_type TEXT NOT NULL, -- throughput_low, queue_high, process_slow, error_spike
-            severity TEXT DEFAULT 'warning', -- info, warning, critical
+            alert_type TEXT NOT NULL,
+            severity TEXT DEFAULT 'warning',
             message TEXT NOT NULL,
             current_value DECIMAL(10,4),
             threshold_value DECIMAL(10,4),
@@ -71,7 +138,6 @@ const PerformanceMonitoringScreen = () => {
         `
       });
 
-      // Add RLS policies
       await supabase.rpc('execute_sql', {
         query: `
           ALTER TABLE mail_performance_metrics ENABLE ROW LEVEL SECURITY;
@@ -91,14 +157,26 @@ const PerformanceMonitoringScreen = () => {
     } catch (error) {
       console.error('Error creating performance tables:', error);
     }
-  }, []);
+  }, [businessId, canViewPerformance]);
 
   // Load performance data and alerts
   const loadPerformanceData = useCallback(async () => {
-    if (!businessId) return;
+    if (!businessId || !canViewPerformance) return;
+
+    // Rate limiting
+    if (!checkRateLimit('load_performance', 20, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
     
     try {
       setLoading(true);
+
+      await logSecurityEvent('performance_monitoring_access', {
+        action: 'load_performance_data',
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
 
       // Load recent performance metrics (last 24 hours)
       const { data: metrics, error: metricsError } = await supabase
@@ -126,7 +204,7 @@ const PerformanceMonitoringScreen = () => {
 
       // Calculate current stats
       if (metrics && metrics.length > 0) {
-        const recent = metrics.slice(0, 20); // Last 20 data points
+        const recent = metrics.slice(0, 20);
         const currentThroughput = recent.find(m => m.metric_type === 'throughput')?.metric_value || 0;
         const avgQueueTime = recent.filter(m => m.metric_type === 'queue_time')
           .reduce((sum, m) => sum + m.metric_value, 0) / Math.max(1, recent.filter(m => m.metric_type === 'queue_time').length);
@@ -142,12 +220,15 @@ const PerformanceMonitoringScreen = () => {
           lastUpdated: new Date()
         });
       }
+
+      await recordAction('performance_data_loaded', true, businessId);
     } catch (error) {
       console.error('Error loading performance data:', error);
+      await recordAction('performance_data_loaded', false, businessId);
     } finally {
       setLoading(false);
     }
-  }, [businessId]);
+  }, [businessId, canViewPerformance, authLoading, permissionsLoading]);
 
   // Record performance metric
   const recordMetric = useCallback(async (type, value, thresholdValue = null, status = 'normal', metadata = {}) => {
@@ -198,21 +279,38 @@ const PerformanceMonitoringScreen = () => {
           threshold_value: thresholdValue
         });
 
-      // Reload alerts
       loadPerformanceData();
     } catch (error) {
       console.error('Error creating alert:', error);
     }
   }, [businessId, thresholds.alertCooldown, loadPerformanceData]);
 
-  // Run performance benchmark and record metrics - WITH PAUSE PROTECTION
+  // Run performance benchmark - WITH PERMISSIONS AND PAUSE PROTECTION
   const runPerformanceBenchmark = useCallback(async () => {
+    // Permission check
+    if (!canRunBenchmarks) {
+      toast.error('You do not have permission to run performance benchmarks');
+      return;
+    }
+
     if (blockEmailSendIfPaused('Performance benchmark')) return;
     if (!businessId) return;
+
+    // Rate limiting
+    if (!checkRateLimit('run_benchmark', 5, 300000)) { // 5 per 5 minutes
+      toast.error('Too many benchmark requests. Please wait before running another benchmark.');
+      return;
+    }
 
     try {
       setMonitoring(true);
       console.log('Running performance benchmark...');
+
+      await logSecurityEvent('performance_benchmark', {
+        action: 'run_performance_benchmark',
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
 
       const benchmarkResult = await systemTests.performanceBenchmark(businessId, 50);
       
@@ -247,44 +345,91 @@ const PerformanceMonitoringScreen = () => {
         }
 
         console.log('Performance benchmark completed:', benchmarkResult.metrics);
+        toast.success('Performance benchmark completed successfully');
+        await recordAction('benchmark_completed', true, businessId);
       } else {
-        // Record error rate metric
         await recordMetric('error_rate', 100, thresholds.maxErrorRate, 'critical');
         await createAlert('benchmark_failed', 'critical',
           'Performance benchmark failed completely', 100, 0);
+        toast.error('Performance benchmark failed');
+        await recordAction('benchmark_completed', false, businessId);
       }
 
-      // Reload data to show new metrics
       loadPerformanceData();
     } catch (error) {
       console.error('Error running performance benchmark:', error);
       await createAlert('benchmark_error', 'critical',
         `Performance monitoring error: ${error.message}`, 0, 0);
+      toast.error('Performance benchmark error');
+      await recordAction('benchmark_completed', false, businessId);
     } finally {
       setMonitoring(false);
     }
-  }, [businessId, thresholds, recordMetric, createAlert, loadPerformanceData]);
+  }, [businessId, thresholds, recordMetric, createAlert, loadPerformanceData, canRunBenchmarks]);
 
   // Acknowledge alert
   const acknowledgeAlert = async (alertId) => {
+    // Permission check
+    if (!canAcknowledgeAlerts) {
+      toast.error('You do not have permission to acknowledge alerts');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('acknowledge_alert', 20, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
     try {
+      await logSecurityEvent('acknowledge_alert', {
+        action: 'acknowledge_performance_alert',
+        alert_id: alertId,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
+
       await supabase
         .from('mail_performance_alerts')
         .update({
           acknowledged: true,
+          acknowledged_by: authUser?.id,
           acknowledged_at: new Date().toISOString()
         })
         .eq('id', alertId);
 
+      toast.success('Alert acknowledged');
+      await recordAction('alert_acknowledged', true, alertId);
       loadPerformanceData();
     } catch (error) {
       console.error('Error acknowledging alert:', error);
+      toast.error('Failed to acknowledge alert');
+      await recordAction('alert_acknowledged', false, alertId);
     }
   };
 
   // Resolve alert
   const resolveAlert = async (alertId) => {
+    // Permission check
+    if (!canAcknowledgeAlerts) {
+      toast.error('You do not have permission to resolve alerts');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('resolve_alert', 20, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
     try {
+      await logSecurityEvent('resolve_alert', {
+        action: 'resolve_performance_alert',
+        alert_id: alertId,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
+
       await supabase
         .from('mail_performance_alerts')
         .update({
@@ -292,22 +437,49 @@ const PerformanceMonitoringScreen = () => {
         })
         .eq('id', alertId);
 
+      toast.success('Alert resolved');
+      await recordAction('alert_resolved', true, alertId);
       loadPerformanceData();
     } catch (error) {
       console.error('Error resolving alert:', error);
+      toast.error('Failed to resolve alert');
+      await recordAction('alert_resolved', false, alertId);
     }
   };
 
   // Update monitoring thresholds
   const updateThresholds = async (newThresholds) => {
-    setThresholds(newThresholds);
-    setShowSettings(false);
-    
-    // Save to business settings or local storage
+    // Permission check
+    if (!canModifyThresholds) {
+      toast.error('You do not have permission to modify performance thresholds. Only owners and admins can change thresholds.');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('update_thresholds', 5, 60000)) {
+      toast.error('Too many threshold update requests. Please wait a moment.');
+      return;
+    }
+
     try {
+      await logSecurityEvent('update_performance_thresholds', {
+        action: 'update_thresholds',
+        old_thresholds: thresholds,
+        new_thresholds: newThresholds,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
+
+      setThresholds(newThresholds);
+      setShowSettings(false);
+      
       localStorage.setItem(`mail_performance_thresholds_${businessId}`, JSON.stringify(newThresholds));
+      toast.success('Performance thresholds updated');
+      await recordAction('thresholds_updated', true, businessId);
     } catch (error) {
       console.error('Error saving thresholds:', error);
+      toast.error('Failed to save thresholds');
+      await recordAction('thresholds_updated', false, businessId);
     }
   };
 
@@ -327,17 +499,20 @@ const PerformanceMonitoringScreen = () => {
 
   // Initialize and load data
   useEffect(() => {
-    if (businessId) {
+    if (businessId && !authLoading && !permissionsLoading && canViewPerformance) {
       createPerformanceTable();
       loadPerformanceData();
     }
-  }, [businessId, createPerformanceTable, loadPerformanceData]);
+  }, [businessId, createPerformanceTable, loadPerformanceData, authLoading, permissionsLoading, canViewPerformance]);
 
-  // Auto-refresh every 5 minutes - WITH PAUSE CHECK
+  const autoBenchmarkEnabled = import.meta.env.VITE_ENABLE_MAIL_AUTO_BENCHMARK === 'true';
+
+  // Auto-refresh every 5 minutes - now gated behind explicit env flag
   useEffect(() => {
+    if (!canRunBenchmarks || !autoBenchmarkEnabled) return; // Require permission and explicit opt-in
+
     const interval = setInterval(() => {
       if (businessId && !monitoring) {
-        // Check if paused before auto-running benchmark
         const stored = localStorage.getItem('EMAIL_SENDING_PAUSED');
         const isPaused = stored ? JSON.parse(stored) : true;
         
@@ -345,10 +520,10 @@ const PerformanceMonitoringScreen = () => {
           runPerformanceBenchmark();
         }
       }
-    }, 5 * 60 * 1000); // 5 minutes
+    }, 5 * 60 * 1000);
 
     return () => clearInterval(interval);
-  }, [businessId, monitoring, runPerformanceBenchmark]);
+  }, [businessId, monitoring, runPerformanceBenchmark, canRunBenchmarks, autoBenchmarkEnabled]);
 
   const getAlertIcon = (severity) => {
     switch (severity) {
@@ -377,328 +552,406 @@ const PerformanceMonitoringScreen = () => {
     }
   };
 
-  if (loading) {
+  if (authLoading || permissionsLoading || loading) {
     return (
-      <div style={styles.container}>
-        <div style={styles.loading}>
-          <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
-          <div>Loading performance data...</div>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.loading}>
+            <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
+            <div>Loading performance data...</div>
+          </div>
         </div>
-      </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  if (authError) {
+    return (
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.errorState}>
+            <FiAlertCircle style={styles.errorIcon} />
+            <h2>Authentication Error</h2>
+            <p>{authError}</p>
+          </div>
+        </div>
+      </POSAuthWrapper>
     );
   }
 
   return (
-    <div style={styles.container}>
-      {/* Email Pause Banner */}
-      <EmailPauseBanner 
-        customMessage="Performance benchmarks that send test emails are paused. Monitoring and alerts remain active."
-      />
+    <POSAuthWrapper>
+      <SecurityWrapper>
+        <div style={styles.container}>
+          {/* Email Pause Banner */}
+          <EmailPauseBanner 
+            customMessage="Performance benchmarks that send test emails are paused. Monitoring and alerts remain active."
+          />
 
-      {/* Header */}
-      <div style={styles.header}>
-        <div style={styles.headerLeft}>
-          <h1 style={styles.title}>Performance Monitoring</h1>
-          <p style={styles.subtitle}>Real-time email system performance and alerts</p>
-        </div>
-        <div style={styles.headerActions}>
-          <button 
-            style={styles.secondaryButton}
-            onClick={() => setShowSettings(true)}
-          >
-            <FiSettings style={styles.buttonIcon} />
-            Thresholds
-          </button>
-          <button 
-            style={styles.secondaryButton}
-            onClick={loadPerformanceData}
-          >
-            <FiRefreshCw style={styles.buttonIcon} />
-            Refresh
-          </button>
-          <button 
-            style={styles.primaryButton}
-            onClick={runPerformanceBenchmark}
-            disabled={monitoring}
-          >
-            <FiZap style={styles.buttonIcon} />
-            {monitoring ? 'Running...' : 'Run Benchmark'}
-          </button>
-        </div>
-      </div>
+          {/* Header */}
+          <div style={styles.header}>
+            <div style={styles.headerLeft}>
+              <h1 style={styles.title}>Performance Monitoring</h1>
+              <p style={styles.subtitle}>Real-time email system performance and alerts</p>
+              {!canRunBenchmarks && (
+                <div style={styles.limitedAccessBadge}>
+                  <FiAlertCircle style={styles.badgeIcon} />
+                  <span>View-Only - Cannot run benchmarks</span>
+                </div>
+              )}
+            </div>
+            <div style={styles.headerActions}>
+              <PermissionGate requireElevated>
+                <button 
+                  style={styles.secondaryButton}
+                  onClick={() => setShowSettings(true)}
+                >
+                  <FiSettings style={styles.buttonIcon} />
+                  Thresholds
+                </button>
+              </PermissionGate>
+              
+              <button 
+                style={styles.secondaryButton}
+                onClick={loadPerformanceData}
+              >
+                <FiRefreshCw style={styles.buttonIcon} />
+                Refresh
+              </button>
+              
+              <PermissionGate 
+                permission="mail.campaigns.send"
+                fallback={
+                  <button 
+                    style={styles.disabledButton}
+                    disabled
+                    title="You don't have permission to run benchmarks"
+                  >
+                    <FiZap style={styles.buttonIcon} />
+                    Run Benchmark
+                    <span style={styles.disabledLabel}>No Permission</span>
+                  </button>
+                }
+              >
+                <button 
+                  style={styles.primaryButton}
+                  onClick={runPerformanceBenchmark}
+                  disabled={monitoring}
+                >
+                  <FiZap style={styles.buttonIcon} />
+                  {monitoring ? 'Running...' : 'Run Benchmark'}
+                </button>
+              </PermissionGate>
+            </div>
+          </div>
 
-      {/* Active Alerts */}
-      {alerts.length > 0 && (
-        <div style={styles.alertsSection}>
-          <h3 style={styles.sectionTitle}>
-            <FiBell style={styles.sectionIcon} />
-            Active Alerts ({alerts.length})
-          </h3>
-          <div style={styles.alertsList}>
-            {alerts.map(alert => (
-              <div key={alert.id} style={styles.alertCard}>
-                <div style={styles.alertHeader}>
-                  {getAlertIcon(alert.severity)}
-                  <span style={styles.alertMessage}>{alert.message}</span>
-                  <div style={styles.alertActions}>
-                    {!alert.acknowledged && (
+          {/* Active Alerts */}
+          {alerts.length > 0 && (
+            <div style={styles.alertsSection}>
+              <h3 style={styles.sectionTitle}>
+                <FiBell style={styles.sectionIcon} />
+                Active Alerts ({alerts.length})
+              </h3>
+              <div style={styles.alertsList}>
+                {alerts.map(alert => (
+                  <div key={alert.id} style={styles.alertCard}>
+                    <div style={styles.alertHeader}>
+                      {getAlertIcon(alert.severity)}
+                      <span style={styles.alertMessage}>{alert.message}</span>
+                      <PermissionGate permission="mail.campaigns.view">
+                        <div style={styles.alertActions}>
+                          {!alert.acknowledged && (
+                            <button 
+                              style={styles.alertActionButton}
+                              onClick={() => acknowledgeAlert(alert.id)}
+                              title="Acknowledge"
+                            >
+                              <FiCheckCircle />
+                            </button>
+                          )}
+                          <button 
+                            style={styles.alertActionButton}
+                            onClick={() => resolveAlert(alert.id)}
+                            title="Resolve"
+                          >
+                            <FiX />
+                          </button>
+                        </div>
+                      </PermissionGate>
+                    </div>
+                    <div style={styles.alertDetails}>
+                      <span style={styles.alertTimestamp}>
+                        {new Date(alert.created_at).toLocaleString()}
+                      </span>
+                      {alert.current_value && alert.threshold_value && (
+                        <span style={styles.alertValues}>
+                          Current: {alert.current_value} | Threshold: {alert.threshold_value}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Real-time Stats */}
+          <div style={styles.statsSection}>
+            <h3 style={styles.sectionTitle}>
+              <FiActivity style={styles.sectionIcon} />
+              Current Performance
+            </h3>
+            <div style={styles.statsGrid}>
+              <div style={styles.statCard}>
+                <div style={styles.statHeader}>
+                  <FiZap style={styles.statIcon} />
+                  <span style={styles.statLabel}>Throughput</span>
+                </div>
+                <div style={styles.statValue}>
+                  {formatMetric(realtimeStats.currentThroughput, 'throughput')}
+                </div>
+                <div style={styles.statThreshold}>
+                  Threshold: {formatMetric(thresholds.minThroughput, 'throughput')}
+                </div>
+              </div>
+
+              <div style={styles.statCard}>
+                <div style={styles.statHeader}>
+                  <FiClock style={styles.statIcon} />
+                  <span style={styles.statLabel}>Queue Time</span>
+                </div>
+                <div style={styles.statValue}>
+                  {formatMetric(realtimeStats.avgQueueTime, 'queue_time')}
+                </div>
+                <div style={styles.statThreshold}>
+                  Threshold: {formatMetric(thresholds.maxQueueTime, 'queue_time')}
+                </div>
+              </div>
+
+              <div style={styles.statCard}>
+                <div style={styles.statHeader}>
+                  <FiBarChart2 style={styles.statIcon} />
+                  <span style={styles.statLabel}>Process Time</span>
+                </div>
+                <div style={styles.statValue}>
+                  {formatMetric(realtimeStats.avgProcessTime, 'process_time')}
+                </div>
+                <div style={styles.statThreshold}>
+                  Threshold: {formatMetric(thresholds.maxProcessTime, 'process_time')}
+                </div>
+              </div>
+
+              <div style={styles.statCard}>
+                <div style={styles.statHeader}>
+                  <FiAlertTriangle style={styles.statIcon} />
+                  <span style={styles.statLabel}>Error Rate</span>
+                </div>
+                <div style={styles.statValue}>
+                  {formatMetric(realtimeStats.errorRate, 'error_rate')}
+                </div>
+                <div style={styles.statThreshold}>
+                  Threshold: {formatMetric(thresholds.maxErrorRate, 'error_rate')}
+                </div>
+              </div>
+            </div>
+            
+            {realtimeStats.lastUpdated && (
+              <div style={styles.lastUpdated}>
+                Last updated: {realtimeStats.lastUpdated.toLocaleString()}
+              </div>
+            )}
+          </div>
+
+          {/* Performance History */}
+          <div style={styles.historySection}>
+            <h3 style={styles.sectionTitle}>
+              <FiTrendingUp style={styles.sectionIcon} />
+              Recent Performance History
+            </h3>
+            
+            {performanceData && performanceData.length > 0 ? (
+              <div style={styles.historyTable}>
+                <table style={styles.table}>
+                  <thead>
+                    <tr style={styles.tableHeader}>
+                      <th style={styles.tableHeaderCell}>Time</th>
+                      <th style={styles.tableHeaderCell}>Metric</th>
+                      <th style={styles.tableHeaderCell}>Value</th>
+                      <th style={styles.tableHeaderCell}>Threshold</th>
+                      <th style={styles.tableHeaderCell}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {performanceData.slice(0, 20).map(metric => (
+                      <tr key={metric.id} style={styles.tableRow}>
+                        <td style={styles.tableCell}>
+                          {new Date(metric.recorded_at).toLocaleString()}
+                        </td>
+                        <td style={styles.tableCell}>
+                          {metric.metric_type.replace('_', ' ')}
+                        </td>
+                        <td style={styles.tableCell}>
+                          {formatMetric(metric.metric_value, metric.metric_type)}
+                        </td>
+                        <td style={styles.tableCell}>
+                          {metric.threshold_value ? formatMetric(metric.threshold_value, metric.metric_type) : 'N/A'}
+                        </td>
+                        <td style={styles.tableCell}>
+                          <span style={{
+                            ...styles.statusBadge,
+                            backgroundColor: getStatusColor(metric.status) + '20',
+                            color: getStatusColor(metric.status)
+                          }}>
+                            {metric.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={styles.emptyState}>
+                <FiBarChart2 style={styles.emptyIcon} />
+                <p style={styles.emptyText}>No performance data available. Run a benchmark to start monitoring.</p>
+              </div>
+            )}
+          </div>
+
+          {/* Settings Modal */}
+          {showSettings && (
+            <PermissionGate
+              requireElevated
+              fallback={
+                <div style={styles.modalOverlay}>
+                  <div style={styles.modal}>
+                    <div style={styles.modalHeader}>
+                      <h2 style={styles.modalTitle}>Performance Thresholds</h2>
                       <button 
-                        style={styles.alertActionButton}
-                        onClick={() => acknowledgeAlert(alert.id)}
-                        title="Acknowledge"
+                        style={styles.closeButton}
+                        onClick={() => setShowSettings(false)}
                       >
-                        <FiCheckCircle />
+                        <FiX />
                       </button>
-                    )}
+                    </div>
+                    <div style={styles.modalContent}>
+                      <div style={styles.permissionDenied}>
+                        <FiAlertCircle style={styles.permissionIcon} />
+                        <p>Only owners and administrators can modify performance thresholds</p>
+                      </div>
+                      <button 
+                        style={styles.cancelButton}
+                        onClick={() => setShowSettings(false)}
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              }
+            >
+              <div style={styles.modalOverlay}>
+                <div style={styles.modal}>
+                  <div style={styles.modalHeader}>
+                    <h2 style={styles.modalTitle}>Performance Thresholds</h2>
                     <button 
-                      style={styles.alertActionButton}
-                      onClick={() => resolveAlert(alert.id)}
-                      title="Resolve"
+                      style={styles.closeButton}
+                      onClick={() => setShowSettings(false)}
                     >
                       <FiX />
                     </button>
                   </div>
-                </div>
-                <div style={styles.alertDetails}>
-                  <span style={styles.alertTimestamp}>
-                    {new Date(alert.created_at).toLocaleString()}
-                  </span>
-                  {alert.current_value && alert.threshold_value && (
-                    <span style={styles.alertValues}>
-                      Current: {alert.current_value} | Threshold: {alert.threshold_value}
-                    </span>
-                  )}
+                  <div style={styles.modalContent}>
+                    <form onSubmit={(e) => {
+                      e.preventDefault();
+                      const formData = new FormData(e.target);
+                      updateThresholds({
+                        minThroughput: parseFloat(formData.get('minThroughput')),
+                        maxQueueTime: parseInt(formData.get('maxQueueTime')),
+                        maxProcessTime: parseInt(formData.get('maxProcessTime')),
+                        maxErrorRate: parseFloat(formData.get('maxErrorRate')),
+                        alertCooldown: parseInt(formData.get('alertCooldown'))
+                      });
+                    }}>
+                      <div style={styles.formGroup}>
+                        <label style={styles.formLabel}>Minimum Throughput (emails/sec)</label>
+                        <input 
+                          type="number" 
+                          name="minThroughput"
+                          step="0.1"
+                          min="0.1"
+                          defaultValue={thresholds.minThroughput}
+                          style={styles.formInput}
+                        />
+                      </div>
+                      
+                      <div style={styles.formGroup}>
+                        <label style={styles.formLabel}>Maximum Queue Time (ms)</label>
+                        <input 
+                          type="number" 
+                          name="maxQueueTime"
+                          min="100"
+                          defaultValue={thresholds.maxQueueTime}
+                          style={styles.formInput}
+                        />
+                      </div>
+                      
+                      <div style={styles.formGroup}>
+                        <label style={styles.formLabel}>Maximum Process Time (ms)</label>
+                        <input 
+                          type="number" 
+                          name="maxProcessTime"
+                          min="100"
+                          defaultValue={thresholds.maxProcessTime}
+                          style={styles.formInput}
+                        />
+                      </div>
+                      
+                      <div style={styles.formGroup}>
+                        <label style={styles.formLabel}>Maximum Error Rate (%)</label>
+                        <input 
+                          type="number" 
+                          name="maxErrorRate"
+                          step="0.1"
+                          min="0"
+                          max="100"
+                          defaultValue={thresholds.maxErrorRate}
+                          style={styles.formInput}
+                        />
+                      </div>
+                      
+                      <div style={styles.formGroup}>
+                        <label style={styles.formLabel}>Alert Cooldown (seconds)</label>
+                        <input 
+                          type="number" 
+                          name="alertCooldown"
+                          min="60"
+                          defaultValue={thresholds.alertCooldown}
+                          style={styles.formInput}
+                        />
+                      </div>
+                      
+                      <div style={styles.formActions}>
+                        <button 
+                          type="button"
+                          style={styles.cancelButton}
+                          onClick={() => setShowSettings(false)}
+                        >
+                          Cancel
+                        </button>
+                        <button type="submit" style={styles.saveButton}>
+                          Save Thresholds
+                        </button>
+                      </div>
+                    </form>
+                  </div>
                 </div>
               </div>
-            ))}
-          </div>
+            </PermissionGate>
+          )}
         </div>
-      )}
-
-      {/* Real-time Stats */}
-      <div style={styles.statsSection}>
-        <h3 style={styles.sectionTitle}>
-          <FiActivity style={styles.sectionIcon} />
-          Current Performance
-        </h3>
-        <div style={styles.statsGrid}>
-          <div style={styles.statCard}>
-            <div style={styles.statHeader}>
-              <FiZap style={styles.statIcon} />
-              <span style={styles.statLabel}>Throughput</span>
-            </div>
-            <div style={styles.statValue}>
-              {formatMetric(realtimeStats.currentThroughput, 'throughput')}
-            </div>
-            <div style={styles.statThreshold}>
-              Threshold: {formatMetric(thresholds.minThroughput, 'throughput')}
-            </div>
-          </div>
-
-          <div style={styles.statCard}>
-            <div style={styles.statHeader}>
-              <FiClock style={styles.statIcon} />
-              <span style={styles.statLabel}>Queue Time</span>
-            </div>
-            <div style={styles.statValue}>
-              {formatMetric(realtimeStats.avgQueueTime, 'queue_time')}
-            </div>
-            <div style={styles.statThreshold}>
-              Threshold: {formatMetric(thresholds.maxQueueTime, 'queue_time')}
-            </div>
-          </div>
-
-          <div style={styles.statCard}>
-            <div style={styles.statHeader}>
-              <FiBarChart2 style={styles.statIcon} />
-              <span style={styles.statLabel}>Process Time</span>
-            </div>
-            <div style={styles.statValue}>
-              {formatMetric(realtimeStats.avgProcessTime, 'process_time')}
-            </div>
-            <div style={styles.statThreshold}>
-              Threshold: {formatMetric(thresholds.maxProcessTime, 'process_time')}
-            </div>
-          </div>
-
-          <div style={styles.statCard}>
-            <div style={styles.statHeader}>
-              <FiAlertTriangle style={styles.statIcon} />
-              <span style={styles.statLabel}>Error Rate</span>
-            </div>
-            <div style={styles.statValue}>
-              {formatMetric(realtimeStats.errorRate, 'error_rate')}
-            </div>
-            <div style={styles.statThreshold}>
-              Threshold: {formatMetric(thresholds.maxErrorRate, 'error_rate')}
-            </div>
-          </div>
-        </div>
-        
-        {realtimeStats.lastUpdated && (
-          <div style={styles.lastUpdated}>
-            Last updated: {realtimeStats.lastUpdated.toLocaleString()}
-          </div>
-        )}
-      </div>
-
-      {/* Performance History */}
-      <div style={styles.historySection}>
-        <h3 style={styles.sectionTitle}>
-          <FiTrendingUp style={styles.sectionIcon} />
-          Recent Performance History
-        </h3>
-        
-        {performanceData && performanceData.length > 0 ? (
-          <div style={styles.historyTable}>
-            <table style={styles.table}>
-              <thead>
-                <tr style={styles.tableHeader}>
-                  <th style={styles.tableHeaderCell}>Time</th>
-                  <th style={styles.tableHeaderCell}>Metric</th>
-                  <th style={styles.tableHeaderCell}>Value</th>
-                  <th style={styles.tableHeaderCell}>Threshold</th>
-                  <th style={styles.tableHeaderCell}>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {performanceData.slice(0, 20).map(metric => (
-                  <tr key={metric.id} style={styles.tableRow}>
-                    <td style={styles.tableCell}>
-                      {new Date(metric.recorded_at).toLocaleString()}
-                    </td>
-                    <td style={styles.tableCell}>
-                      {metric.metric_type.replace('_', ' ')}
-                    </td>
-                    <td style={styles.tableCell}>
-                      {formatMetric(metric.metric_value, metric.metric_type)}
-                    </td>
-                    <td style={styles.tableCell}>
-                      {metric.threshold_value ? formatMetric(metric.threshold_value, metric.metric_type) : 'N/A'}
-                    </td>
-                    <td style={styles.tableCell}>
-                      <span style={{
-                        ...styles.statusBadge,
-                        backgroundColor: getStatusColor(metric.status) + '20',
-                        color: getStatusColor(metric.status)
-                      }}>
-                        {metric.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div style={styles.emptyState}>
-            <FiBarChart2 style={styles.emptyIcon} />
-            <p style={styles.emptyText}>No performance data available. Run a benchmark to start monitoring.</p>
-          </div>
-        )}
-      </div>
-
-      {/* Settings Modal */}
-      {showSettings && (
-        <div style={styles.modalOverlay}>
-          <div style={styles.modal}>
-            <div style={styles.modalHeader}>
-              <h2 style={styles.modalTitle}>Performance Thresholds</h2>
-              <button 
-                style={styles.closeButton}
-                onClick={() => setShowSettings(false)}
-              >
-                <FiX />
-              </button>
-            </div>
-            <div style={styles.modalContent}>
-              <form onSubmit={(e) => {
-                e.preventDefault();
-                const formData = new FormData(e.target);
-                updateThresholds({
-                  minThroughput: parseFloat(formData.get('minThroughput')),
-                  maxQueueTime: parseInt(formData.get('maxQueueTime')),
-                  maxProcessTime: parseInt(formData.get('maxProcessTime')),
-                  maxErrorRate: parseFloat(formData.get('maxErrorRate')),
-                  alertCooldown: parseInt(formData.get('alertCooldown'))
-                });
-              }}>
-                <div style={styles.formGroup}>
-                  <label style={styles.formLabel}>Minimum Throughput (emails/sec)</label>
-                  <input 
-                    type="number" 
-                    name="minThroughput"
-                    step="0.1"
-                    min="0.1"
-                    defaultValue={thresholds.minThroughput}
-                    style={styles.formInput}
-                  />
-                </div>
-                
-                <div style={styles.formGroup}>
-                  <label style={styles.formLabel}>Maximum Queue Time (ms)</label>
-                  <input 
-                    type="number" 
-                    name="maxQueueTime"
-                    min="100"
-                    defaultValue={thresholds.maxQueueTime}
-                    style={styles.formInput}
-                  />
-                </div>
-                
-                <div style={styles.formGroup}>
-                  <label style={styles.formLabel}>Maximum Process Time (ms)</label>
-                  <input 
-                    type="number" 
-                    name="maxProcessTime"
-                    min="100"
-                    defaultValue={thresholds.maxProcessTime}
-                    style={styles.formInput}
-                  />
-                </div>
-                
-                <div style={styles.formGroup}>
-                  <label style={styles.formLabel}>Maximum Error Rate (%)</label>
-                  <input 
-                    type="number" 
-                    name="maxErrorRate"
-                    step="0.1"
-                    min="0"
-                    max="100"
-                    defaultValue={thresholds.maxErrorRate}
-                    style={styles.formInput}
-                  />
-                </div>
-                
-                <div style={styles.formGroup}>
-                  <label style={styles.formLabel}>Alert Cooldown (seconds)</label>
-                  <input 
-                    type="number" 
-                    name="alertCooldown"
-                    min="60"
-                    defaultValue={thresholds.alertCooldown}
-                    style={styles.formInput}
-                  />
-                </div>
-                
-                <div style={styles.formActions}>
-                  <button 
-                    type="button"
-                    style={styles.cancelButton}
-                    onClick={() => setShowSettings(false)}
-                  >
-                    Cancel
-                  </button>
-                  <button type="submit" style={styles.saveButton}>
-                    Save Thresholds
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 
@@ -709,6 +962,54 @@ const styles = {
     margin: '0 auto',
     backgroundColor: '#f8f8f8',
     minHeight: '100vh',
+  },
+  limitedAccessBadge: {
+    marginTop: '10px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '6px 12px',
+    backgroundColor: '#fff3cd',
+    border: '1px solid #f39c12',
+    borderRadius: '6px',
+    color: '#856404',
+    fontSize: '12px',
+    fontWeight: 'bold',
+  },
+  badgeIcon: {
+    fontSize: '14px',
+  },
+  permissionDenied: {
+    backgroundColor: '#fff3cd',
+    border: '2px solid #f39c12',
+    borderRadius: '8px',
+    padding: '30px',
+    textAlign: 'center',
+    color: '#856404',
+    marginBottom: '20px',
+  },
+  permissionIcon: {
+    fontSize: '48px',
+    marginBottom: '16px',
+  },
+  disabledButton: {
+    backgroundColor: '#f5f5f5',
+    color: '#999',
+    border: '2px solid #ddd',
+    borderRadius: '8px',
+    padding: '12px 20px',
+    fontSize: '14px',
+    fontWeight: 'bold',
+    cursor: 'not-allowed',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    opacity: 0.6,
+    position: 'relative',
+  },
+  disabledLabel: {
+    fontSize: '11px',
+    fontStyle: 'italic',
   },
   header: {
     display: 'flex',
@@ -776,6 +1077,18 @@ const styles = {
     fontSize: '48px',
     marginBottom: '20px',
     color: 'teal',
+  },
+  errorState: {
+    textAlign: 'center',
+    padding: '60px 20px',
+    backgroundColor: 'white',
+    borderRadius: '8px',
+    border: '1px solid #ddd',
+  },
+  errorIcon: {
+    fontSize: '48px',
+    color: '#f44336',
+    marginBottom: '20px',
   },
   alertsSection: {
     backgroundColor: 'white',

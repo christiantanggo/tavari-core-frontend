@@ -1,428 +1,559 @@
-// components/SidebarNav.jsx - Updated with auto-collapse functionality
-import React, { useState } from 'react';
+// components/SidebarNav.jsx - Fixed items at top, then activated modules
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FiHome, FiUsers, FiUser, FiBarChart2, FiMusic, FiMail, FiChevronDown, FiChevronRight, FiClipboard, FiPieChart } from 'react-icons/fi';
+import { FiHome, FiUsers, FiUser, FiBarChart2, FiMusic, FiMail, FiInbox, FiChevronDown, FiChevronRight, FiClipboard, FiPieChart, FiShoppingBag, FiPackage, FiDollarSign, FiSmartphone, FiSettings, FiFileText, FiSearch, FiUpload, FiMonitor, FiCalendar } from 'react-icons/fi';
 import { TavariStyles } from '../utils/TavariStyles';
 import { usePOSAuth } from '../hooks/usePOSAuth';
-import PageLockModal from './PageLockModal';
+import { useBusiness } from '../contexts/BusinessContext';
+import { usePermissions } from '../hooks/usePermissions';
+import { useModulesEnabled } from '../hooks/useModuleEnabled';
+import { useModuleCatalog } from '../hooks/useModuleCatalog';
+import ModuleCatalogService from '../services/ModuleCatalogService';
 
 const SidebarNav = ({ onNavigate }) => {
   // Single state to track which category is expanded (only one at a time)
   const [expandedCategory, setExpandedCategory] = useState(null);
+  const [isReady, setIsReady] = useState(false);
   const navigate = useNavigate();
 
-  // PIN protection state
-  const [showPinModal, setShowPinModal] = useState(false);
-  const [pendingNavigation, setPendingNavigation] = useState(null);
-  const [pinModalTitle, setPinModalTitle] = useState('');
+  // Get business context first
+  const { business } = useBusiness();
 
-  // Get user role for access control
-  const { userRole, isManager, isOwner } = usePOSAuth({
+  // Get user role for access control - only after business is set
+  const { userRole, isManager, isOwner, authLoading, selectedBusinessId } = usePOSAuth({
     requiredRoles: null, // Allow any authenticated user to see sidebar
     requireBusiness: true,
     componentName: 'SidebarNav'
   });
 
-  // Check if user can access employee management (manager, admin, owner only)
-  const canAccessEmployees = userRole === 'manager' || userRole === 'admin' || userRole === 'owner' || isManager || isOwner;
+  // Get permissions - use role from permissions hook for accuracy
+  const { hasPermission, permissionsLoading, userRole: permissionsUserRole, userPermissions } = usePermissions();
+  // Use role from permissions system if available, fallback to auth role
+  const effectiveRole = permissionsUserRole || userRole;
 
-  // List of pages that require PIN protection
-  const protectedPages = [
-    '/dashboard/employees',
-    '/dashboard/pos/inventory',
-    '/dashboard/pos/categories',
-    '/dashboard/pos/modifiers',
-    '/dashboard/pos/stations',
-    '/dashboard/pos/discounts',
-    '/dashboard/pos/settings',
-    '/dashboard/pos/loyalty-settings',
-    '/dashboard/music/dashboard',
-    '/dashboard/music/upload',
-    '/dashboard/music/library',
-    '/dashboard/music/playlists',
-    '/dashboard/music/schedules',
-    '/dashboard/music/ads/dashboard',
-    '/dashboard/music/settings',
-    '/dashboard/mail/dashboard',
-    '/dashboard/mail/campaigns',
-    '/dashboard/mail/contacts',
-    '/dashboard/mail/builder',
-    '/dashboard/mail/templates',
-    '/dashboard/mail/compliance',
-    '/dashboard/mail/billing',
-    '/dashboard/mail/settings',
-    '/dashboard/hr/dashboard',
-    '/dashboard/hr/payroll',
-    '/dashboard/hr/employees',
-    '/dashboard/hr/contracts',
-    '/dashboard/hr/onboarding',
-    '/dashboard/hr/writeups',
-    '/dashboard/hr/policies',
-    '/dashboard/hr/settings',
-    '/dashboard/reports',
-    '/dashboard/reports/automation',
-    '/dashboard/audit-logs'
+  // Check which modules are enabled for this business
+  const { modules: enabledModules, loading: modulesLoading } = useModulesEnabled([
+    'pos', 'music', 'mail', 'hr', 'recipe_builder', 'scheduling', 'loyalty', 'digital_signage',
+    'dining', 'bookings', 'liquor', 'inbox', 'appbuilder', 'waivers'
+  ]);
+
+  // Get activated modules for dynamic sidebar rendering
+  // Use both useModuleCatalog (for marketplace data) and useModulesEnabled (for enabled check)
+  // This ensures we have the most accurate module status
+  const { activatedModules: rawActivatedModules, loading: catalogLoading } = useModuleCatalog();
+  
+  // Also get enabled modules from the old method as a fallback/verification
+  // This ensures compatibility with existing module activation system
+
+  // Define module display order (as specified by user)
+  const moduleDisplayOrder = [
+    'pos',              // Tavari POS
+    'dining',           // Tavari Dining
+    'inbox',            // Tavari Inbox
+    'waivers',          // Tavari Waivers
+    'bookings',         // Tavari Bookings
+    'scheduling',       // Tavari Scheduling
+    'hr',               // Tavari HR
+    // Note: Payroll is shown as separate navigation item after HR (not a module)
+    'mail',             // Tavari Mail
+    'appbuilder',       // Tavari App Builder
+    'music',            // Tavari Music
+    'recipe_builder',   // Tavari Recipe Manager
+    'liquor',           // Tavari Liquor Management
+    'digital_signage',  // Digital Signage (if not in list, add at end)
+    'loyalty'           // Loyalty (if not in list, add at end)
   ];
 
-  // Get page title for PIN modal
-  const getPageTitle = (path) => {
-    const titles = {
-      '/dashboard/employees': 'Employee Directory Access',
-      '/dashboard/pos/inventory': 'POS Inventory Access',
-      '/dashboard/pos/categories': 'Category Management Access',
-      '/dashboard/pos/modifiers': 'Modifiers Management Access',
-      '/dashboard/pos/stations': 'Station Management Access',
-      '/dashboard/pos/discounts': 'Discount Management Access',
-      '/dashboard/pos/settings': 'POS Settings Access',
-      '/dashboard/pos/loyalty-settings': 'Loyalty Settings Access',
-      '/dashboard/music/dashboard': 'Music Dashboard Access',
-      '/dashboard/music/upload': 'Music Upload Access',
-      '/dashboard/music/library': 'Music Library Access',
-      '/dashboard/music/playlists': 'Playlists Access',
-      '/dashboard/music/schedules': 'Schedule Management Access',
-      '/dashboard/music/ads/dashboard': 'Ad Manager Access',
-      '/dashboard/music/settings': 'Music Settings Access',
-      '/dashboard/mail/dashboard': 'Mail Dashboard Access',
-      '/dashboard/mail/campaigns': 'Campaign Management Access',
-      '/dashboard/mail/contacts': 'Contact Management Access',
-      '/dashboard/mail/builder': 'Campaign Builder Access',
-      '/dashboard/mail/templates': 'Template Management Access',
-      '/dashboard/mail/compliance': 'Compliance Center Access',
-      '/dashboard/mail/billing': 'Billing & Usage Access',
-      '/dashboard/mail/settings': 'Mail Settings Access',
-      '/dashboard/hr/dashboard': 'HR Dashboard Access',
-      '/dashboard/hr/payroll': 'Payroll Management Access',
-      '/dashboard/hr/employees': 'Employee Profiles Access',
-      '/dashboard/hr/contracts': 'Contract Management Access',
-      '/dashboard/hr/onboarding': 'Onboarding Center Access',
-      '/dashboard/hr/writeups': 'Disciplinary Actions Access',
-      '/dashboard/hr/policies': 'Policy Center Access',
-      '/dashboard/hr/settings': 'HR Settings Access',
-      '/dashboard/reports': 'Reports Dashboard Access',
-      '/dashboard/reports/automation': 'Report Automation Access',
-      '/dashboard/audit-logs': 'Audit Log Viewer Access'
+  // Sort activated modules according to display order
+  const activatedModules = React.useMemo(() => {
+    if (!rawActivatedModules || rawActivatedModules.length === 0) {
+      return [];
+    }
+    
+    // Filter out System Settings and Reports - they're already fixed items at the top
+    const filteredModules = rawActivatedModules.filter(m => {
+      const key = (m.module_key || '').toLowerCase();
+      const name = (m.module_name || '').toLowerCase();
+      
+      // Filter by module_key - be very explicit
+      if (key === 'settings' || 
+          key === 'system_settings' || 
+          key === 'system-settings' ||
+          key === 'reports' ||
+          key === 'system') {
+        return false;
+      }
+      
+      // Also filter by module_name to catch any variations
+      // Match "System Settings", "Settings", but NOT "Module Settings" or similar
+      if (name.includes('system settings') || 
+          (name.includes('settings') && !name.includes('module') && !name.includes('app'))) {
+        return false;
+      }
+      
+      return true;
+    });
+    
+    // Create a map for quick lookup
+    const moduleMap = new Map(filteredModules.map(m => [m.module_key, m]));
+    
+    // Sort according to display order, then by usage count for modules not in order list
+    const ordered = [];
+    const unordered = [];
+    
+    // First, add modules in specified order
+    moduleDisplayOrder.forEach(key => {
+      if (moduleMap.has(key)) {
+        ordered.push(moduleMap.get(key));
+        moduleMap.delete(key);
+      }
+    });
+    
+    // Then add any remaining modules (not in order list) sorted by usage
+    moduleMap.forEach(module => {
+      unordered.push(module);
+    });
+    
+    // Sort unordered modules by usage count (descending), then by last used
+    unordered.sort((a, b) => {
+      if (b.usageCount !== a.usageCount) {
+        return b.usageCount - a.usageCount;
+      }
+      if (b.lastUsed && a.lastUsed) {
+        return new Date(b.lastUsed) - new Date(a.lastUsed);
+      }
+      if (b.lastUsed && !a.lastUsed) return -1;
+      if (a.lastUsed && !b.lastUsed) return 1;
+      return a.module_name.localeCompare(b.module_name);
+    });
+    
+    return [...ordered, ...unordered];
+  }, [rawActivatedModules]);
+  
+  // Also filter out settings/reports from fallback modules
+  const filteredFallbackModules = React.useMemo(() => {
+    if (!enabledModules) return [];
+    
+    const knownModules = {
+      'dining': { name: 'Tavari Dining', route: '/dashboard/dining/dashboard', icon: 'FiShoppingBag' },
+      'bookings': { name: 'Tavari Bookings', route: '/dashboard/bookings', icon: 'FiCalendar' },
+      'liquor': { name: 'Tavari Liquor Management', route: '/dashboard/liquor/inventory', icon: 'FiPackage' },
+      'inbox': { name: 'Tavari Inbox', route: '/dashboard/inbox', icon: 'FiInbox' },
+      'appbuilder': { name: 'Tavari App Builder', route: '/dashboard/appbuilder', icon: 'FiSmartphone' },
+      'waivers': { name: 'Tavari Waivers', route: '/dashboard/waivers', icon: 'FiFileText' }
     };
-    return titles[path] || 'Protected Page Access';
+    
+    // Get enabled modules that aren't already rendered, excluding fixed items
+    return moduleDisplayOrder
+      .filter(key => {
+        if (!enabledModules[key]) return false;
+        // Exclude fixed items (settings, reports, etc.)
+        if (key === 'settings' || key === 'system_settings' || key === 'reports') return false;
+        // Check if this module is already rendered in activatedModules
+        return !activatedModules?.some(m => m.module_key === key);
+      })
+      .map(key => ({
+        key,
+        ...knownModules[key]
+      }))
+      .filter(m => m.name); // Only include known modules
+  }, [enabledModules, activatedModules, moduleDisplayOrder]);
+
+  // Wait for business context and auth to be ready
+  useEffect(() => {
+    if (business?.id && !authLoading && !permissionsLoading && !modulesLoading && !catalogLoading && selectedBusinessId) {
+      setIsReady(true);
+    } else {
+      setIsReady(false);
+    }
+  }, [business?.id, authLoading, permissionsLoading, modulesLoading, catalogLoading, selectedBusinessId]);
+
+  // Check if user can access employee management (manager, admin, owner only)
+  const canAccessEmployees = isReady && (userRole === 'manager' || userRole === 'admin' || userRole === 'owner' || isManager || isOwner);
+
+  // Permission check helper - returns true if page should be visible
+  const canViewPage = (permissionKey) => {
+    if (!isReady || permissionsLoading) return false;
+    if (!permissionKey) return false;
+    
+    // For employees specifically, STRICTLY check permissions only
+    if (effectiveRole === 'employee') {
+      return hasPermission(permissionKey);
+    }
+    
+    // For owners/admins/managers, they can see everything (legacy behavior)
+    if (effectiveRole === 'owner' || effectiveRole === 'admin' || effectiveRole === 'manager') {
+      return true;
+    }
+    
+    // For all other roles, strictly check permissions
+    return hasPermission(permissionKey);
   };
 
   // Handle category expansion with auto-collapse
   const handleCategoryToggle = (categoryName) => {
     if (expandedCategory === categoryName) {
-      // If clicking on already expanded category, collapse it
       setExpandedCategory(null);
     } else {
-      // If clicking on a different category, expand it (auto-collapses others)
       setExpandedCategory(categoryName);
     }
   };
 
-  // Handle navigation with PIN protection
+  // Handle navigation - permissions system controls access, no PIN required
   const handleNavigation = (path) => {
-    if (protectedPages.includes(path)) {
-      // Show PIN modal for protected pages
-      setPendingNavigation(path);
-      setPinModalTitle(getPageTitle(path));
-      setShowPinModal(true);
-    } else {
-      // Direct navigation for non-protected pages
-      go(path);
-    }
-  };
-
-  // Handle PIN unlock
-  const handlePinUnlock = () => {
-    setShowPinModal(false);
-    if (pendingNavigation) {
-      go(pendingNavigation);
-      setPendingNavigation(null);
-      setPinModalTitle('');
-    }
-  };
-
-  // Handle PIN modal cancel/close
-  const handlePinCancel = () => {
-    setShowPinModal(false);
-    setPendingNavigation(null);
-    setPinModalTitle('');
-    // Always redirect to dashboard on cancel to prevent users from getting stuck
-    go('/dashboard/home');
+    go(path);
   };
 
   // Fallback: use internal navigate if parent doesn't pass onNavigate
   const go = (path) => (onNavigate ? onNavigate(path) : navigate(path));
 
-  return (
-    <>
-      {/* PIN Protection Modal */}
-      <PageLockModal
-        isOpen={showPinModal}
-        onUnlock={handlePinUnlock}
-        onCancel={handlePinCancel}
-        title={pinModalTitle}
-        subtitle="Enter your manager PIN to access this feature"
-        maxAttempts={3}
-        redirectPath="/dashboard/home"
-        pageName={pinModalTitle}
-      />
+  // Track module usage when navigating to module
+  const handleModuleNavigation = async (moduleKey, path) => {
+    if (selectedBusinessId) {
+      ModuleCatalogService.setBusinessId(selectedBusinessId);
+      await ModuleCatalogService.trackModuleUsage(moduleKey);
+    }
+    go(path);
+  };
 
-      <div style={styles.sidebar}>
-        {/* Home */}
-        <div style={styles.button} onClick={() => go('/dashboard/home')}>
-          <span style={styles.icon}><FiHome /></span>
-          <span>Home</span>
+  // Get module icon component
+  const getModuleIcon = (iconName) => {
+    const iconMap = {
+      'FiMail': <FiMail />,
+      'FiMusic': <FiMusic />,
+      'FiMonitor': <FiMonitor />,
+      'FiUsers': <FiUsers />,
+      'FiShoppingCart': <FiBarChart2 />,
+      'FiPackage': <FiPackage />,
+      'FiStar': <FiBarChart2 />,
+      'FiCalendar': <FiCalendar />,
+      'FiShoppingBag': <FiShoppingBag />,
+      'FiInbox': <FiInbox />,
+      'FiSmartphone': <FiSmartphone />,
+      'FiFileText': <FiFileText />
+    };
+    return iconMap[iconName] || <FiPackage />;
+  };
+
+  // Render module navigation based on module key
+  const renderModuleNavigation = (module) => {
+    const moduleKey = module.module_key;
+    
+    // Don't render System Settings or Reports as modules - they're fixed items
+    if (moduleKey === 'settings' || moduleKey === 'system_settings' || moduleKey === 'reports') {
+      return null;
+    }
+    
+    // Also check by name
+    const moduleName = (module.module_name || '').toLowerCase();
+    if (moduleName.includes('system settings') || (moduleName.includes('settings') && !moduleName.includes('module'))) {
+      return null;
+    }
+    
+    const dashboardRoute = ModuleCatalogService.getModuleDashboardRoute(moduleKey);
+
+    // Special handling for modules with sub-navigation
+    if (moduleKey === 'pos' && enabledModules['pos']) {
+      return (
+        <>
+          <div style={styles.button} onClick={() => handleCategoryToggle('pos')}>
+            <span style={styles.icon}>{getModuleIcon(module.icon)}</span>
+            <span style={{ flex: 1 }}>{module.module_name}</span>
+            <span>{expandedCategory === 'pos' ? <FiChevronDown /> : <FiChevronRight />}</span>
+          </div>
+          {expandedCategory === 'pos' && (
+            <>
+              {canViewPage('pos.register.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('pos', '/dashboard/pos/register')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Register</span>
+                </div>
+              )}
+              {canViewPage('pos.inventory.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('pos', '/dashboard/pos/inventory')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Inventory</span>
+                </div>
+              )}
+              {canViewPage('pos.categories.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('pos', '/dashboard/pos/categories')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Categories</span>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      );
+    }
+
+    // HR module - show HR dashboard, but also show Payroll as separate if enabled
+    if (moduleKey === 'hr' && enabledModules['hr']) {
+      return (
+        <>
+          <div style={styles.button} onClick={() => handleCategoryToggle('hr')}>
+            <span style={styles.icon}>{getModuleIcon(module.icon)}</span>
+            <span style={{ flex: 1 }}>{module.module_name}</span>
+            <span>{expandedCategory === 'hr' ? <FiChevronDown /> : <FiChevronRight />}</span>
+          </div>
+          {expandedCategory === 'hr' && (
+            <>
+              {canViewPage('hr.employees.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('hr', '/dashboard/hr/dashboard')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>HR Dashboard</span>
+                </div>
+              )}
+              {canViewPage('hr.employees.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('hr', '/dashboard/hr/employees')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Employee Profiles</span>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      );
+    }
+
+    // Payroll - show as separate item if it's a separate module
+    if (moduleKey === 'payroll') {
+      return (
+        <div style={styles.button} onClick={() => handleModuleNavigation('payroll', '/dashboard/hr/payroll')}>
+          <span style={styles.icon}><FiDollarSign /></span>
+          <span>Tavari Payroll</span>
         </div>
+      );
+    }
 
-        {/* Employees Expandable - Only show for manager, admin, owner */}
-        {canAccessEmployees && (
-          <>
-            <div style={styles.button} onClick={() => handleCategoryToggle('employees')}>
-              <span style={styles.icon}><FiUsers /></span>
-              <span style={{ flex: 1 }}>Employees</span>
-              <span>{expandedCategory === 'employees' ? <FiChevronDown /> : <FiChevronRight />}</span>
-            </div>
+    // Digital Signage with sub-navigation
+    if (moduleKey === 'digital_signage' && enabledModules['digital_signage']) {
+      return (
+        <>
+          <div style={styles.button} onClick={() => handleCategoryToggle('digital_signage')}>
+            <span style={styles.icon}>{getModuleIcon(module.icon)}</span>
+            <span style={{ flex: 1 }}>{module.module_name}</span>
+            <span>{expandedCategory === 'digital_signage' ? <FiChevronDown /> : <FiChevronRight />}</span>
+          </div>
+          {expandedCategory === 'digital_signage' && (
+            <>
+              {canViewPage('digital_signage.dashboard.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('digital_signage', '/dashboard/digital-signage')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Dashboard</span>
+                </div>
+              )}
+              {canViewPage('digital_signage.screens.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('digital_signage', '/dashboard/digital-signage/screens')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Screens</span>
+                </div>
+              )}
+              {canViewPage('digital_signage.content.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('digital_signage', '/dashboard/digital-signage/content')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Content</span>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      );
+    }
 
-            {expandedCategory === 'employees' && (
-              <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/employees')}>
+    // Mail with sub-navigation
+    if (moduleKey === 'mail' && enabledModules['mail']) {
+      return (
+        <>
+          <div style={styles.button} onClick={() => handleCategoryToggle('mail')}>
+            <span style={styles.icon}>{getModuleIcon(module.icon)}</span>
+            <span style={{ flex: 1 }}>{module.module_name}</span>
+            <span>{expandedCategory === 'mail' ? <FiChevronDown /> : <FiChevronRight />}</span>
+          </div>
+          {expandedCategory === 'mail' && (
+            <>
+              {canViewPage('mail.dashboard.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('mail', '/dashboard/mail/dashboard')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Mail Dashboard</span>
+                </div>
+              )}
+              {canViewPage('mail.campaigns.view') && (
+                <div style={styles.subButton} onClick={() => handleModuleNavigation('mail', '/dashboard/mail/campaigns')}>
+                  <span style={styles.subIcon}>•</span>
+                  <span>Campaigns</span>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      );
+    }
+
+    // Waivers with sub-navigation
+    if (moduleKey === 'waivers' && enabledModules['waivers']) {
+      return (
+        <>
+          <div style={styles.button} onClick={() => handleCategoryToggle('waivers')}>
+            <span style={styles.icon}>{getModuleIcon(module.icon)}</span>
+            <span style={{ flex: 1 }}>{module.module_name}</span>
+            <span>{expandedCategory === 'waivers' ? <FiChevronDown /> : <FiChevronRight />}</span>
+          </div>
+          {expandedCategory === 'waivers' && (
+            <>
+              <div style={styles.subButton} onClick={() => handleModuleNavigation('waivers', '/dashboard/waivers')}>
                 <span style={styles.subIcon}>•</span>
-                <span>All Employees</span>
+                <span>Dashboard</span>
               </div>
-            )}
-          </>
-        )}
+              <div style={styles.subButton} onClick={() => handleModuleNavigation('waivers', '/dashboard/waivers/search')}>
+                <span style={styles.subIcon}>•</span>
+                <span>Search</span>
+              </div>
+            </>
+          )}
+        </>
+      );
+    }
 
-        {/* Customers - Fixed route */}
+    // Default: simple button navigation
+    return (
+      <div style={styles.button} onClick={() => handleModuleNavigation(moduleKey, dashboardRoute)}>
+        <span style={styles.icon}>{getModuleIcon(module.icon)}</span>
+        <span>{module.module_name}</span>
+      </div>
+    );
+  };
+
+  // Show loading state while auth initializes
+  if (!isReady) {
+    return (
+      <div style={styles.sidebar}>
+        <div style={styles.loadingState}>Loading...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.sidebar}>
+      {/* FIXED ITEMS - Always visible */}
+      {/* Home */}
+      <div style={styles.button} onClick={() => go('/dashboard/home')}>
+        <span style={styles.icon}><FiHome /></span>
+        <span>Home</span>
+      </div>
+
+      {/* Customers */}
+      {canViewPage('pos.customers.view') && (
         <div style={styles.button} onClick={() => go('/dashboard/pos/customers')}>
           <span style={styles.icon}><FiUser /></span>
           <span>Customers</span>
         </div>
-        
-        {/* Tavari POS */}
-        <div style={styles.button} onClick={() => handleCategoryToggle('pos')}>
-          <span style={styles.icon}><FiBarChart2 /></span>
-          <span style={{ flex: 1 }}>Tavari POS</span>
-          <span>{expandedCategory === 'pos' ? <FiChevronDown /> : <FiChevronRight />}</span>
+      )}
+
+      {/* Employees */}
+      {canViewPage('hr.employees.view') && (
+        <div style={styles.button} onClick={() => handleNavigation('/dashboard/employees')}>
+          <span style={styles.icon}><FiUsers /></span>
+          <span>Employees</span>
         </div>
+      )}
 
-        {expandedCategory === 'pos' && (
-          <>
-            <div style={styles.subButton} onClick={() => go('/dashboard/pos/register')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Register</span>
-            </div>
-            <div style={styles.subButton} onClick={() => go('/dashboard/pos/daily-deposit')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Daily Deposit</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/pos/inventory')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Inventory</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/pos/categories')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Categories</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/pos/modifiers')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Modifiers / Variants</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/pos/stations')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Station Management</span>
-            </div>
-            <div style={styles.subButton} onClick={() => go('/dashboard/pos/kitchen-display')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Kitchen Display</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/pos/discounts')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Discounts</span>
-            </div>
-            <div style={styles.subButton} onClick={() => go('/dashboard/pos/receipts')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Receipts</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/pos/settings')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Settings</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/pos/loyalty-settings')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Loyalty Settings</span>
-            </div>
-          </>
-        )}
-        
-        {/* Tavari Music */}
-        <div style={styles.button} onClick={() => handleCategoryToggle('music')}>
-          <span style={styles.icon}><FiMusic /></span>
-          <span style={{ flex: 1 }}>Tavari Music</span>
-          <span>{expandedCategory === 'music' ? <FiChevronDown /> : <FiChevronRight />}</span>
-        </div>
-
-        {expandedCategory === 'music' && (
-          <>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/music/dashboard')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Music Dashboard</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/music/upload')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Upload Music</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/music/library')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Music Library</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/music/playlists')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Playlists</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/music/schedules')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Schedules</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/music/ads/dashboard')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Ad Manager</span>
-            </div>
-			<div style={styles.subButton} onClick={() => handleNavigation('/dashboard/music/system-monitor')}>
- 			 <span style={styles.subIcon}>•</span>
- 			 <span>System Monitor</span>
-			</div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/music/settings')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Music Settings</span>
-            </div>
-          </>
-        )}
-
-        {/* Tavari Mail */}
-        <div style={styles.button} onClick={() => handleCategoryToggle('mail')}>
-          <span style={styles.icon}><FiMail /></span>
-          <span style={{ flex: 1 }}>Tavari Mail</span>
-          <span>{expandedCategory === 'mail' ? <FiChevronDown /> : <FiChevronRight />}</span>
-        </div>
-
-        {expandedCategory === 'mail' && (
-          <>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/mail/dashboard')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Mail Dashboard</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/mail/campaigns')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Campaigns</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/mail/contacts')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Contacts</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/mail/builder')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Campaign Builder</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/mail/templates')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Templates</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/mail/compliance')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Compliance Center</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/mail/billing')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Billing & Usage</span>
-            </div>
-            <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/mail/settings')}>
-              <span style={styles.subIcon}>•</span>
-              <span>Mail Settings</span>
-            </div>
-          </>
-        )}
-
-        {/* Tavari HR - Only show for manager, admin, owner */}
-        {canAccessEmployees && (
-          <>
-            <div style={styles.button} onClick={() => handleCategoryToggle('hr')}>
-              <span style={styles.icon}><FiClipboard /></span>
-              <span style={{ flex: 1 }}>Tavari HR</span>
-              <span>{expandedCategory === 'hr' ? <FiChevronDown /> : <FiChevronRight />}</span>
-            </div>
-
-            {expandedCategory === 'hr' && (
-              <>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/hr/dashboard')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>HR Dashboard</span>
-                </div>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/hr/payroll')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>Payroll Dashboard</span>
-                </div>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/hr/employees')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>Employee Profiles</span>
-                </div>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/hr/contracts')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>Contracts</span>
-                </div>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/hr/onboarding')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>Onboarding Center</span>
-                </div>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/hr/writeups')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>Disciplinary Actions</span>
-                </div>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/hr/policies')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>Policy Center</span>
-                </div>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/hr/settings')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>HR Settings</span>
-                </div>
-              </>
-            )}
-          </>
-        )}
-
-        {/* Reports & Analytics - Only show for manager, admin, owner */}
-        {canAccessEmployees && (
-          <>
-            <div style={styles.button} onClick={() => handleCategoryToggle('reports')}>
-              <span style={styles.icon}><FiPieChart /></span>
-              <span style={{ flex: 1 }}>Reports & Analytics</span>
-              <span>{expandedCategory === 'reports' ? <FiChevronDown /> : <FiChevronRight />}</span>
-            </div>
-
-            {expandedCategory === 'reports' && (
-              <>
+      {/* Reports & Analytics */}
+      {(canViewPage('reports.dashboard.view') || canViewPage('reports.pos.view') || canViewPage('reports.hr.view') || canViewPage('reports.music.view') || canViewPage('reports.mail.view') || canViewPage('reports.overview.view') || canViewPage('reports.automation.view')) && (
+        <>
+          <div style={styles.button} onClick={() => handleCategoryToggle('reports')}>
+            <span style={styles.icon}><FiPieChart /></span>
+            <span style={{ flex: 1 }}>Reports & Analytics</span>
+            <span>{expandedCategory === 'reports' ? <FiChevronDown /> : <FiChevronRight />}</span>
+          </div>
+          {expandedCategory === 'reports' && (
+            <>
+              {canViewPage('reports.dashboard.view') && (
                 <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/reports')}>
                   <span style={styles.subIcon}>•</span>
                   <span>Reports Dashboard</span>
                 </div>
+              )}
+              {canViewPage('reports.automation.view') && (
                 <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/reports/automation')}>
                   <span style={styles.subIcon}>•</span>
-                  <span>Report Automation Settings</span>
+                  <span>Report Automation</span>
                 </div>
-                <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/audit-logs')}>
-                  <span style={styles.subIcon}>•</span>
-                  <span>Audit Log Viewer</span>
-                </div>
-              </>
-            )}
-          </>
-        )}
-      </div>
-    </>
+              )}
+              <div style={styles.subButton} onClick={() => handleNavigation('/dashboard/audit-logs')}>
+                <span style={styles.subIcon}>•</span>
+                <span>Audit Log Viewer</span>
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {/* System Settings */}
+      {(canViewPage('settings.basic_info.view') || canViewPage('settings.operating_hours.view') || canViewPage('settings.holiday_hours.view') || canViewPage('settings.roles.view') || canViewPage('settings.branding.view') || canViewPage('settings.scheduling.view') || canViewPage('settings.payments.view') || canViewPage('settings.taxes.view') || canViewPage('settings.security.view')) && (
+        <div style={styles.button} onClick={() => handleNavigation('/dashboard/settings')}>
+          <span style={styles.icon}><FiSettings /></span>
+          <span>System Settings</span>
+        </div>
+      )}
+
+      {/* DIVIDER - Separator between fixed items and modules */}
+      {activatedModules && activatedModules.length > 0 && (
+        <div style={styles.divider} />
+      )}
+
+      {/* ACTIVATED MODULES - Dynamically rendered */}
+      {activatedModules && activatedModules.flatMap((module) => {
+        const moduleKey = module.module_key;
+        const moduleName = (module.module_name || '').toLowerCase();
+        
+        // Skip System Settings and Reports - they're fixed items
+        if (moduleKey === 'settings' || moduleKey === 'system_settings' || moduleKey === 'reports' ||
+            moduleName.includes('system settings') || (moduleName.includes('settings') && !moduleName.includes('module'))) {
+          return [];
+        }
+        
+        const result = [];
+        
+        // Render the module
+        const rendered = renderModuleNavigation(module);
+        if (!rendered) return []; // Skip if renderModuleNavigation returns null
+        
+        result.push(
+          <React.Fragment key={moduleKey}>
+            {rendered}
+          </React.Fragment>
+        );
+        
+        // Special case: If HR is enabled, show Payroll as separate item right after HR
+        if (moduleKey === 'hr' && enabledModules['hr'] && canViewPage('hr.payroll.view')) {
+          result.push(
+            <div key="payroll-separate" style={styles.button} onClick={() => handleModuleNavigation('hr', '/dashboard/hr/payroll')}>
+              <span style={styles.icon}><FiDollarSign /></span>
+              <span>Tavari Payroll</span>
+            </div>
+          );
+        }
+        
+        return result;
+      })}
+      
+      {/* FALLBACK: Render enabled modules that might not be in activatedModules from catalog */}
+      {/* This ensures modules like dining that are enabled but might not be in app_modules still show up */}
+      {/* Note: Fixed items like System Settings and Reports are excluded */}
+      {filteredFallbackModules && filteredFallbackModules.length > 0 && filteredFallbackModules.map(module => (
+        <div key={`fallback-${module.key}`} style={styles.button} onClick={() => handleModuleNavigation(module.key, module.route)}>
+          <span style={styles.icon}>{getModuleIcon(module.icon)}</span>
+          <span>{module.name}</span>
+        </div>
+      ))}
+    </div>
   );
 };
 
 const styles = {
   sidebar: {
-    width: '180px',
+    width: '240px',
     backgroundColor: '#f8f8f8',
     paddingTop: '60px',
     borderRight: '1px solid #ddd',
@@ -463,6 +594,18 @@ const styles = {
     width: '20px',
     textAlign: 'center',
   },
+  loadingState: {
+    padding: '20px',
+    textAlign: 'center',
+    color: '#666',
+    fontSize: '14px'
+  },
+  divider: {
+    height: '2px',
+    backgroundColor: '#ddd',
+    margin: '8px 16px',
+    borderRadius: '1px'
+  }
 };
 
 export default SidebarNav;

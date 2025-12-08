@@ -1,4 +1,4 @@
-// src/screens/POS/POSCategories.jsx - Updated with Foundation Components
+// src/screens/POS/POSCategories.jsx - Updated with Permissions and Clean Logging
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
@@ -11,6 +11,12 @@ import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 
+// Permission system integration
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
+import { FiLock, FiAlertCircle } from 'react-icons/fi';
+
 import CategoryModal from '../../components/CategoryModal';
 
 const POSCategories = () => {
@@ -19,9 +25,24 @@ const POSCategories = () => {
   // Use standardized authentication
   const auth = usePOSAuth({
     requireBusiness: true,
-    requiredRoles: ['manager', 'owner'], // Categories typically need management access
+    requiredRoles: ['manager', 'owner'],
     componentName: 'POSCategories'
   });
+
+  // Permission system integration
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewCategories = hasAnyPermission(['pos.inventory.view', 'pos.categories.manage']) || hasElevatedPrivileges();
+  const canManageCategories = hasPermission('pos.categories.manage') || hasElevatedPrivileges();
+  const canEditTaxSettings = hasPermission('pos.settings.edit') || isOwner();
 
   // Use standardized tax calculations
   const {
@@ -78,15 +99,23 @@ const POSCategories = () => {
     '🍔', '🍕', '🍟', '🌭', '🥪', '🗃', '🥖', '🥗', '🍝', '🍜',
     '🍺', '🍷', '🥤', '☕', '🧊', '🍰', '🧁', '🍪', '🍩', '🍫',
     '🥘', '🍛', '🍲', '🍣', '🍤', '🥟', '🌮', '🌯', '🥙', '🍱',
-    '🍎', '🥕', '🥬', '🧀', '🥔', '🍞', '🥖', '🥨', '🥯', '🥞'
+    '🎂', '🥕', '🥬', '🧀', '🥓', '🍞', '🥖', '🥨', '🥯', '🥞'
   ];
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewCategories) {
+      toast.error('You do not have permission to view categories');
+      navigate('/dashboard/pos');
+    }
+  }, [permissionsLoading, canViewCategories, navigate]);
 
   // Load categories when auth is ready
   useEffect(() => {
-    if (auth.selectedBusinessId && auth.isReady) {
+    if (auth.selectedBusinessId && auth.isReady && !permissionsLoading && canViewCategories) {
       fetchCategories();
     }
-  }, [auth.selectedBusinessId, auth.isReady]);
+  }, [auth.selectedBusinessId, auth.isReady, permissionsLoading, canViewCategories]);
 
   const fetchCategories = async () => {
     if (!auth.selectedBusinessId) return;
@@ -112,8 +141,8 @@ const POSCategories = () => {
       });
 
     } catch (err) {
-      console.error('Error fetching categories:', err);
       setError('Error fetching categories: ' + err.message);
+      toast.error('Failed to load categories');
     } finally {
       setLoading(false);
     }
@@ -130,7 +159,7 @@ const POSCategories = () => {
       category_id: categoryId,
       price: samplePrice,
       quantity: 1,
-      item_tax_overrides: [] // No item overrides for category preview
+      item_tax_overrides: []
     };
 
     try {
@@ -144,7 +173,6 @@ const POSCategories = () => {
         isExempt: result.isExempt
       };
     } catch (error) {
-      console.error('Tax preview calculation error:', error);
       return {
         success: false,
         error: error.message
@@ -153,6 +181,12 @@ const POSCategories = () => {
   };
 
   const handleCategoryModalSave = async (categoryData) => {
+    // Permission check
+    if (!canManageCategories) {
+      toast.error('You do not have permission to create categories');
+      return;
+    }
+
     if (!auth.selectedBusinessId) {
       setError('No business selected');
       return;
@@ -180,18 +214,22 @@ const POSCategories = () => {
 
       // Handle multiple tax assignments if provided
       if (categoryData.selectedTaxCategories && categoryData.selectedTaxCategories.length > 0) {
-        const assignments = categoryData.selectedTaxCategories.map(taxCategoryId => ({
-          business_id: auth.selectedBusinessId,
-          category_id: newCategory.id,
-          tax_category_id: taxCategoryId,
-          is_active: true
-        }));
+        if (!canEditTaxSettings) {
+          toast.warning('Tax settings not applied - missing permissions');
+        } else {
+          const assignments = categoryData.selectedTaxCategories.map(taxCategoryId => ({
+            business_id: auth.selectedBusinessId,
+            category_id: newCategory.id,
+            tax_category_id: taxCategoryId,
+            is_active: true
+          }));
 
-        const { error: assignmentError } = await supabase
-          .from('pos_category_tax_assignments')
-          .insert(assignments);
+          const { error: assignmentError } = await supabase
+            .from('pos_category_tax_assignments')
+            .insert(assignments);
 
-        if (assignmentError) throw assignmentError;
+          if (assignmentError) throw assignmentError;
+        }
       }
 
       await logAction({
@@ -207,16 +245,22 @@ const POSCategories = () => {
         business_id: auth.selectedBusinessId
       });
 
+      toast.success('Category created successfully');
       setShowCategoryModal(false);
       fetchCategories();
-      refreshTaxData(); // Refresh tax data to get updated assignments
+      refreshTaxData();
     } catch (err) {
-      console.error('Error adding category:', err);
       setError('Error adding category: ' + err.message);
+      toast.error('Failed to create category');
     }
   };
 
   const startEditCategory = (category) => {
+    if (!canManageCategories) {
+      toast.error('You do not have permission to edit categories');
+      return;
+    }
+
     setEditCategoryId(category.id);
     setEditCategoryName(category.name);
     setEditCategoryColor(category.color || TavariStyles.colors.primary);
@@ -232,6 +276,12 @@ const POSCategories = () => {
   };
 
   const saveEditCategory = async () => {
+    // Permission check
+    if (!canManageCategories) {
+      toast.error('You do not have permission to edit categories');
+      return;
+    }
+
     if (!editCategoryName.trim()) {
       setError('Category name is required');
       return;
@@ -264,15 +314,22 @@ const POSCategories = () => {
         business_id: auth.selectedBusinessId
       });
 
+      toast.success('Category updated successfully');
       cancelEdit();
       fetchCategories();
     } catch (err) {
-      console.error('Error updating category:', err);
       setError('Error updating category: ' + err.message);
+      toast.error('Failed to update category');
     }
   };
 
   const deleteCategory = async (id, name) => {
+    // Permission check
+    if (!canManageCategories) {
+      toast.error('You do not have permission to delete categories');
+      return;
+    }
+
     if (!window.confirm(`Are you sure you want to delete "${name}"? This action cannot be undone.`)) return;
     
     setError(null);
@@ -295,15 +352,22 @@ const POSCategories = () => {
         business_id: auth.selectedBusinessId
       });
 
+      toast.success('Category deleted successfully');
       fetchCategories();
-      refreshTaxData(); // Refresh tax data after deletion
+      refreshTaxData();
     } catch (err) {
-      console.error('Error deleting category:', err);
       setError('Error deleting category: ' + err.message);
+      toast.error('Failed to delete category');
     }
   };
 
   const moveCategory = async (id, direction) => {
+    // Permission check
+    if (!canManageCategories) {
+      toast.error('You do not have permission to reorder categories');
+      return;
+    }
+
     setError(null);
     try {
       const index = categories.findIndex(c => c.id === id);
@@ -346,8 +410,8 @@ const POSCategories = () => {
 
       fetchCategories();
     } catch (err) {
-      console.error('Error moving category:', err);
       setError('Error moving category: ' + err.message);
+      toast.error('Failed to reorder category');
     }
   };
 
@@ -357,6 +421,11 @@ const POSCategories = () => {
   };
 
   const openTaxModal = (category) => {
+    if (!canEditTaxSettings) {
+      toast.error('You do not have permission to edit tax settings');
+      return;
+    }
+
     setSelectedCategoryForTax(category);
     const assignments = getCategoryTaxAssignments(category.id);
     setSelectedTaxCategories(assignments.map(a => a.tax_category_id));
@@ -371,6 +440,11 @@ const POSCategories = () => {
   };
 
   const handleTaxCategoryToggle = (taxCategoryId) => {
+    if (!canEditTaxSettings) {
+      toast.error('You do not have permission to edit tax settings');
+      return;
+    }
+
     setSelectedTaxCategories(prev => 
       prev.includes(taxCategoryId)
         ? prev.filter(id => id !== taxCategoryId)
@@ -379,6 +453,12 @@ const POSCategories = () => {
   };
 
   const saveTaxAssignments = async () => {
+    // Permission check
+    if (!canEditTaxSettings) {
+      toast.error('You do not have permission to edit tax settings');
+      return;
+    }
+
     if (!selectedCategoryForTax) return;
 
     setError(null);
@@ -418,11 +498,12 @@ const POSCategories = () => {
         business_id: auth.selectedBusinessId
       });
 
-      refreshTaxData(); // Refresh tax data after assignments change
+      toast.success('Tax assignments updated successfully');
+      refreshTaxData();
       closeTaxModal();
     } catch (err) {
-      console.error('Error saving tax assignments:', err);
       setError('Error saving tax assignments: ' + err.message);
+      toast.error('Failed to save tax assignments');
     }
   };
 
@@ -449,11 +530,36 @@ const POSCategories = () => {
 
   // Main component content
   const renderContent = () => {
-    if (loading || taxLoading) {
+    // Show loading while permissions are being checked
+    if (permissionsLoading || loading || taxLoading) {
       return (
         <div style={styles.loading}>
           <div style={styles.spinner}></div>
-          <p>Loading categories and tax settings...</p>
+          <p>{permissionsLoading ? 'Loading permissions...' : 'Loading categories and tax settings...'}</p>
+        </div>
+      );
+    }
+
+    // Show access denied if no permission
+    if (!canViewCategories) {
+      return (
+        <div style={styles.container}>
+          <div style={styles.accessDenied}>
+            <FiLock size={64} style={styles.accessDeniedIcon} />
+            <h2 style={styles.accessDeniedTitle}>Access Denied</h2>
+            <p style={styles.accessDeniedText}>
+              You do not have permission to view categories.
+            </p>
+            <p style={styles.accessDeniedText}>
+              Contact your administrator to request access.
+            </p>
+            <button 
+              style={styles.backButton}
+              onClick={() => navigate('/dashboard/pos')}
+            >
+              Back to POS Dashboard
+            </button>
+          </div>
         </div>
       );
     }
@@ -463,12 +569,34 @@ const POSCategories = () => {
         <div style={styles.header}>
           <h2 style={styles.title}>Category Management</h2>
           <p style={styles.subtitle}>Organize inventory items with colors, visual identifiers, and tax settings</p>
-          <button 
-            style={styles.addButton}
-            onClick={() => setShowCategoryModal(true)}
+          
+          {!canManageCategories && (
+            <div style={styles.readOnlyBadge}>
+              <FiAlertCircle />
+              <span>View-Only Mode - Contact admin to make changes</span>
+            </div>
+          )}
+
+          <PermissionGate
+            permission="pos.categories.manage"
+            fallback={
+              <button 
+                style={styles.disabledButton}
+                disabled
+                title="You don't have permission to create categories"
+              >
+                <FiLock size={16} style={{ marginRight: '8px' }} />
+                Add New Category (Locked)
+              </button>
+            }
           >
-            Add New Category
-          </button>
+            <button 
+              style={styles.addButton}
+              onClick={() => setShowCategoryModal(true)}
+            >
+              Add New Category
+            </button>
+          </PermissionGate>
         </div>
 
         {(error || taxError) && (
@@ -572,7 +700,7 @@ const POSCategories = () => {
                           style={styles.emojiDisplay}
                           onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                         >
-                          {editCategoryEmoji || '🔍'}
+                          {editCategoryEmoji || '🔵'}
                         </div>
                         <input
                           type="text"
@@ -609,12 +737,25 @@ const POSCategories = () => {
                       <div style={styles.taxSummary}>
                         {getTaxSummary(category.id)}
                       </div>
-                      <button
-                        style={styles.taxButton}
-                        onClick={() => openTaxModal(category)}
+                      <PermissionGate
+                        requireOwner
+                        fallback={
+                          <button
+                            style={styles.disabledTaxButton}
+                            disabled
+                            title="Only owners can configure tax settings"
+                          >
+                            <FiLock size={12} />
+                          </button>
+                        }
                       >
-                        Configure
-                      </button>
+                        <button
+                          style={styles.taxButton}
+                          onClick={() => openTaxModal(category)}
+                        >
+                          Configure
+                        </button>
+                      </PermissionGate>
                     </div>
                   </td>
                   
@@ -622,18 +763,18 @@ const POSCategories = () => {
                     <div style={styles.orderControls}>
                       <button
                         onClick={() => moveCategory(category.id, -1)}
-                        disabled={i === 0}
+                        disabled={i === 0 || !canManageCategories}
                         style={styles.orderButton}
-                        title="Move Up"
+                        title={!canManageCategories ? "You don't have permission to reorder" : "Move Up"}
                       >
                         ↑
                       </button>
                       <span style={styles.orderNumber}>{i + 1}</span>
                       <button
                         onClick={() => moveCategory(category.id, 1)}
-                        disabled={i === categories.length - 1}
+                        disabled={i === categories.length - 1 || !canManageCategories}
                         style={styles.orderButton}
-                        title="Move Down"
+                        title={!canManageCategories ? "You don't have permission to reorder" : "Move Down"}
                       >
                         ↓
                       </button>
@@ -656,18 +797,45 @@ const POSCategories = () => {
                       </div>
                     ) : (
                       <div style={styles.actions}>
-                        <button 
-                          onClick={() => startEditCategory(category)} 
-                          style={styles.editButton}
+                        <PermissionGate
+                          permission="pos.categories.manage"
+                          fallback={
+                            <button 
+                              style={{...styles.editButton, opacity: 0.5}}
+                              disabled
+                              title="You don't have permission to edit"
+                            >
+                              <FiLock size={12} />
+                            </button>
+                          }
                         >
-                          Edit
-                        </button>
-                        <button 
-                          onClick={() => deleteCategory(category.id, category.name)} 
-                          style={styles.deleteButton}
+                          <button 
+                            onClick={() => startEditCategory(category)} 
+                            style={styles.editButton}
+                          >
+                            Edit
+                          </button>
+                        </PermissionGate>
+                        
+                        <PermissionGate
+                          permission="pos.categories.manage"
+                          fallback={
+                            <button 
+                              style={{...styles.deleteButton, opacity: 0.5}}
+                              disabled
+                              title="You don't have permission to delete"
+                            >
+                              <FiLock size={12} />
+                            </button>
+                          }
                         >
-                          Delete
-                        </button>
+                          <button 
+                            onClick={() => deleteCategory(category.id, category.name)} 
+                            style={styles.deleteButton}
+                          >
+                            Delete
+                          </button>
+                        </PermissionGate>
                       </div>
                     )}
                   </td>
@@ -723,6 +891,7 @@ const POSCategories = () => {
                             checked={isSelected}
                             onChange={() => handleTaxCategoryToggle(taxCategory.id)}
                             size="md"
+                            disabled={!canEditTaxSettings}
                           />
                           
                           <div style={styles.taxCategoryInfo}>
@@ -839,7 +1008,13 @@ const POSCategories = () => {
               
               <div style={styles.modalActions}>
                 <button style={styles.cancelButton} onClick={closeTaxModal}>Cancel</button>
-                <button style={styles.saveButton} onClick={saveTaxAssignments}>Save Tax Settings</button>
+                <button 
+                  style={canEditTaxSettings ? styles.saveButton : styles.disabledButton}
+                  onClick={saveTaxAssignments}
+                  disabled={!canEditTaxSettings}
+                >
+                  {canEditTaxSettings ? 'Save Tax Settings' : 'Save (Locked)'}
+                </button>
               </div>
             </div>
           </div>
@@ -854,7 +1029,7 @@ const POSCategories = () => {
       requiredRoles={['manager', 'owner']}
       componentName="Category Management"
       onAuthReady={(authState) => {
-        console.log('POSCategories: Auth ready with business:', authState.selectedBusinessId);
+        // Auth ready - no console logging
       }}
     >
       {renderContent()}
@@ -898,6 +1073,49 @@ const styles = {
     margin: 0,
     lineHeight: TavariStyles.typography.lineHeight.relaxed
   },
+
+  readOnlyBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: TavariStyles.spacing.sm,
+    padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.md}`,
+    backgroundColor: TavariStyles.colors.warningBg,
+    border: `2px solid ${TavariStyles.colors.warning}`,
+    borderRadius: TavariStyles.borderRadius.md,
+    color: TavariStyles.colors.warningText,
+    fontSize: TavariStyles.typography.fontSize.sm,
+    fontWeight: TavariStyles.typography.fontWeight.medium
+  },
+
+  accessDenied: {
+    ...TavariStyles.layout.card,
+    padding: TavariStyles.spacing['4xl'],
+    textAlign: 'center',
+    marginTop: TavariStyles.spacing['4xl']
+  },
+
+  accessDeniedIcon: {
+    color: TavariStyles.colors.danger,
+    marginBottom: TavariStyles.spacing.lg
+  },
+
+  accessDeniedTitle: {
+    fontSize: TavariStyles.typography.fontSize['2xl'],
+    fontWeight: TavariStyles.typography.fontWeight.bold,
+    color: TavariStyles.colors.gray800,
+    marginBottom: TavariStyles.spacing.md
+  },
+
+  accessDeniedText: {
+    fontSize: TavariStyles.typography.fontSize.md,
+    color: TavariStyles.colors.gray600,
+    marginBottom: TavariStyles.spacing.xl
+  },
+
+  backButton: {
+    ...TavariStyles.components.button.base,
+    ...TavariStyles.components.button.variants.primary
+  },
   
   errorBanner: {
     ...TavariStyles.components.banner.base,
@@ -919,6 +1137,18 @@ const styles = {
     ...TavariStyles.components.button.base,
     ...TavariStyles.components.button.variants.primary,
     ...TavariStyles.components.button.sizes.lg
+  },
+
+  disabledButton: {
+    ...TavariStyles.components.button.base,
+    ...TavariStyles.components.button.sizes.lg,
+    backgroundColor: TavariStyles.colors.gray300,
+    color: TavariStyles.colors.gray600,
+    cursor: 'not-allowed',
+    opacity: 0.6,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
   },
   
   tableContainer: TavariStyles.components.table.container,
@@ -1061,6 +1291,15 @@ const styles = {
     ...TavariStyles.components.button.base,
     ...TavariStyles.components.button.variants.warning,
     ...TavariStyles.components.button.sizes.sm
+  },
+
+  disabledTaxButton: {
+    ...TavariStyles.components.button.base,
+    ...TavariStyles.components.button.sizes.sm,
+    backgroundColor: TavariStyles.colors.gray300,
+    color: TavariStyles.colors.gray600,
+    cursor: 'not-allowed',
+    opacity: 0.5
   },
   
   orderControls: {

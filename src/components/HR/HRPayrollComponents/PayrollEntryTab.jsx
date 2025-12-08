@@ -1,11 +1,10 @@
-// components/HR/HRPayrollComponents/PayrollEntryTab.jsx - COMPLETE FULL-FEATURED VERSION
+// components/HR/HRPayrollComponents/PayrollEntryTab.jsx - PRODUCTION VERSION
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '../../../supabaseClient';
 import { SecurityWrapper } from '../../../Security';
 import { useSecurityContext } from '../../../Security';
 import { usePOSAuth } from '../../../hooks/usePOSAuth';
 import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
-import { useCanadianTaxCalculations } from '../../../hooks/useCanadianTaxCalculations';
 import { usePayrollCalculations } from '../../../hooks/usePayrollCalculations';
 import { useYTDCalculations } from '../../../hooks/useYTDCalculations';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
@@ -111,7 +110,7 @@ const PayrollEntryTab = ({
   const [showEmployeeModal, setShowEmployeeModal] = useState(false);
   const [showDraftLookup, setShowDraftLookup] = useState(false);
 
-  // FIXED: Simplified security context to prevent console errors
+  // Security context
   const {
     validateInput,
     checkRateLimit,
@@ -144,9 +143,8 @@ const PayrollEntryTab = ({
   // Tax calculations with error handling
   const { formatTaxAmount } = useTaxCalculations(effectiveBusinessId);
 
-  // RESTORED: Full payroll calculations with error handling
+  // Payroll calculations hook
   const payrollCalculations = usePayrollCalculations(effectiveBusinessId);
-  const canadianTax = useCanadianTaxCalculations(effectiveBusinessId);
   const ytd = useYTDCalculations(effectiveBusinessId);
 
   // Cleanup on unmount
@@ -161,10 +159,9 @@ const PayrollEntryTab = ({
     };
   }, []);
 
-  // RESTORED: Safe employee sorting with comprehensive error handling
+  // Safe employee sorting
   const sortedEmployees = useMemo(() => {
     if (!employees || !Array.isArray(employees)) {
-      console.warn('PayrollEntryTab: employees is not a valid array:', employees);
       return [];
     }
     
@@ -191,18 +188,19 @@ const PayrollEntryTab = ({
     }
   }, [employees]);
 
-  // RESTORED: Load employee data with comprehensive error handling
+  // Load employee data and premiums
   const loadEmployeeDataAndPremiums = useCallback(async () => {
     if (!effectiveBusinessId || !sortedEmployees || sortedEmployees.length === 0) {
       return;
     }
+
+    // REMOVED: Force refresh logic that was causing infinite reload loop
 
     try {
       setError(null);
       const employeeIds = sortedEmployees.map(emp => emp?.id).filter(Boolean);
       
       if (employeeIds.length === 0) {
-        console.warn('No valid employee IDs found');
         return;
       }
 
@@ -222,7 +220,6 @@ const PayrollEntryTab = ({
         .abortSignal(abortControllerRef.current.signal);
 
       if (allPremiumsError && allPremiumsError.name !== 'AbortError') {
-        console.error('Error loading premiums:', allPremiumsError);
         setAllPremiums([]);
       } else if (!allPremiumsError) {
         setAllPremiums(allPremiumsData || []);
@@ -277,7 +274,8 @@ const PayrollEntryTab = ({
               lieu_earned: 0,
               lieu_balance: emp.lieu_time_balance || 0,
               overtime_hours: 0,
-              premium_hours: {}
+              premium_hours: {},
+              wage_period_hours: []
             };
 
             initialAdditionalFedTax[emp.id] = 0;
@@ -285,7 +283,7 @@ const PayrollEntryTab = ({
             initialHolidayPay[emp.id] = 0;
             initialHolidayDetails[emp.id] = null;
 
-            // Initialize premium hours - ONLY for premiums assigned to this employee
+            // Initialize premium hours
             (allPremiumsData || []).forEach(premium => {
               if (premium && premium.name && premiumsByEmployee[emp.id]?.[premium.name]?.enabled) {
                 initialHours[emp.id].premium_hours[premium.name] = 0;
@@ -312,7 +310,7 @@ const PayrollEntryTab = ({
           }, 'low');
         }
       } catch (securityError) {
-        console.warn('Security logging failed:', securityError);
+        // Silent fail for security logging
       }
 
     } catch (error) {
@@ -328,7 +326,7 @@ const PayrollEntryTab = ({
             }, 'medium');
           }
         } catch (securityError) {
-          console.warn('Security logging failed:', securityError);
+          // Silent fail
         }
       }
     }
@@ -341,54 +339,12 @@ const PayrollEntryTab = ({
     }
   }, [loadEmployeeDataAndPremiums]);
 
-  // RESTORED: Safe lieu time calculation
-  const calculateLieuTimeLogic = useCallback((employee, totalHours, statHolidayHours = 0) => {
-    if (!employee) {
-      return {
-        regularHours: 0,
-        lieuEarned: 0,
-        lieuUsed: 0,
-        newLieuBalance: 0,
-        statHolidayHours: 0
-      };
-    }
-
-    const maxHours = parseFloat(employee.max_paid_hours_per_period || 0);
-    const currentLieuBalance = parseFloat(employee.lieu_time_balance || 0);
-    const lieuEnabled = employee.lieu_time_enabled;
-    
-    if (!lieuEnabled || maxHours <= 0) {
-      return {
-        regularHours: totalHours + statHolidayHours,
-        lieuEarned: 0,
-        lieuUsed: 0,
-        newLieuBalance: currentLieuBalance,
-        statHolidayHours: statHolidayHours
-      };
-    }
-
-    const totalCompensationHours = totalHours + statHolidayHours;
-    
-    if (totalCompensationHours > maxHours) {
-      const lieuEarned = totalCompensationHours - maxHours;
-      return {
-        regularHours: maxHours - statHolidayHours,
-        lieuEarned: lieuEarned,
-        lieuUsed: 0,
-        newLieuBalance: currentLieuBalance + lieuEarned,
-        statHolidayHours: statHolidayHours
-      };
-    } else {
-      const shortfall = maxHours - totalCompensationHours;
-      const lieuToUse = Math.min(shortfall, currentLieuBalance);
-      
-      return {
-        regularHours: totalHours + lieuToUse,
-        lieuEarned: 0,
-        lieuUsed: lieuToUse,
-        newLieuBalance: currentLieuBalance - lieuToUse,
-        statHolidayHours: statHolidayHours
-      };
+  // FORCE REFRESH: Manual refresh function to reload employee data
+  const forceRefreshEmployeeData = useCallback(async () => {
+    console.log('🔄 MANUAL REFRESH: Forcing employee data refresh...');
+    // Only reload when button is clicked, not automatically
+    if (confirm('This will refresh the page to fix vacation pay values. Continue?')) {
+      window.location.reload();
     }
   }, []);
 
@@ -397,7 +353,6 @@ const PayrollEntryTab = ({
     try {
       return employeePremiums[employeeId]?.[premiumName]?.enabled || false;
     } catch (error) {
-      console.warn('Error checking premium enabled:', error);
       return false;
     }
   }, [employeePremiums]);
@@ -407,7 +362,6 @@ const PayrollEntryTab = ({
       const premium = employeePremiums[employeeId]?.[premiumName];
       return premium ? (premium.rate || 0) : 0;
     } catch (error) {
-      console.warn('Error getting premium rate:', error);
       return 0;
     }
   }, [employeePremiums]);
@@ -417,12 +371,11 @@ const PayrollEntryTab = ({
       const premium = employeePremiums[employeeId]?.[premiumName];
       return premium ? (premium.rate_type || 'fixed_amount') : 'fixed_amount';
     } catch (error) {
-      console.warn('Error getting premium rate type:', error);
       return 'fixed_amount';
     }
   }, [employeePremiums]);
 
-  // RESTORED: Safe holiday pay change handler
+  // Holiday pay change handler
   const handleHolidayPayChange = useCallback(async (employeeId, holidayPayAmount, holidayDetails) => {
     if (!employeeId) return;
 
@@ -456,7 +409,7 @@ const PayrollEntryTab = ({
     }
   }, [recordAction, logSecurityEvent, effectiveBusinessId]);
 
-  // FIXED: Safe employee preview calculation with CORRECTED net pay calculation
+  // Employee preview calculation using payroll calculations hook
   const getEmployeePreview = useCallback(async (employeeId, hoursOverride = null, additionalFedTaxOverride = null, statHolidayOverride = null) => {
     const defaultPreview = {
       gross_pay: 0,
@@ -465,16 +418,21 @@ const PayrollEntryTab = ({
       net_pay: 0,
       total_hours: 0,
       regular_hours: 0,
+      regular_hours_paid: 0,
       lieu_earned: 0,
       lieu_used: 0,
       lieu_balance: 0,
+      lieu_balance_before: 0,
+      lieu_balance_after: 0,
       stat_holiday_hours: 0,
       federal_tax: 0,
       provincial_tax: 0,
       base_provincial_tax: 0,
       ontario_health_premium: 0,
       ei_deduction: 0,
+      ei_premium: 0,
       cpp_deduction: 0,
+      cpp_contribution: 0,
       premium_pay: 0,
       premium_details: {},
       additional_federal_tax: 0,
@@ -498,31 +456,33 @@ const PayrollEntryTab = ({
         return defaultPreview;
       }
 
-      // Calculate lieu time logic
-      const totalWorkedHours = parseFloat(hours.total_hours) || 0;
-      const lieuLogic = calculateLieuTimeLogic(employee, totalWorkedHours, statHolidayHours);
-      
-      // Try advanced calculation first
+      // Use advanced calculation with payroll hook
       if (payrollCalculations && payrollCalculations.calculateEmployeePay) {
         try {
+          const totalWorkedHours = parseFloat(hours.total_hours) || 0;
+          const overtimeHours = parseFloat(hours.overtime_hours) || 0;
+
           // Prepare hours object for payroll calculations
           const payrollHours = {
-            regular_hours: lieuLogic.regularHours,
-            overtime_hours: parseFloat(hours.overtime_hours) || 0,
-            lieu_hours: 0,
-            premiums: {}
+            total_hours: totalWorkedHours,
+            overtime_hours: overtimeHours,
+            stat_worked_hours: statHolidayHours,
+            premium_hours: hours.premium_hours || {},
+            premiums: {},
+            wage_period_hours: hours.wage_period_hours || []
           };
 
-          // Add premium hours
+          // Add premium data
           if (allPremiums && Array.isArray(allPremiums)) {
             allPremiums.forEach(premium => {
               if (premium && premium.name) {
                 const premiumHours = parseFloat(hours.premium_hours?.[premium.name]) || 0;
                 if (premiumHours > 0 && isEmployeePremiumEnabled(employeeId, premium.name)) {
-                  payrollHours.premiums[premium.id] = {
+                  payrollHours.premiums[premium.name] = {
                     enabled: true,
                     hours: premiumHours,
                     rate: getEmployeePremiumRate(employeeId, premium.name),
+                    rate_type: getEmployeePremiumRateType(employeeId, premium.name),
                     name: premium.name
                   };
                 }
@@ -533,18 +493,22 @@ const PayrollEntryTab = ({
           const calculation = await payrollCalculations.calculateEmployeePay(
             employee,
             payrollHours,
-            additionalFedTax,
             {
               yearToDateGross: 0,
               yearToDateEI: 0,
               yearToDateCPP: 0,
               yearToDateFederalTax: 0,
               yearToDateProvincialTax: 0
+            },
+            additionalFedTax,
+            {
+              start: payrollRun?.pay_period_start || selectedPeriod?.start,
+              end: payrollRun?.pay_period_end || selectedPeriod?.end
             }
           );
 
           if (calculation) {
-            // FIXED: Correct net pay calculation - Net Pay = (Gross + Vacation + Holiday) - Deductions
+            // Add holiday pay if present
             const totalGrossWithVacationAndHoliday = calculation.gross_pay + calculation.vacation_pay + holidayPayAmount;
             const correctNetPay = totalGrossWithVacationAndHoliday - calculation.total_deductions;
 
@@ -558,15 +522,21 @@ const PayrollEntryTab = ({
               base_provincial_tax: calculation.base_provincial_tax,
               ontario_health_premium: calculation.ontario_health_premium || 0,
               ei_deduction: calculation.ei_premium,
+              ei_premium: calculation.ei_premium,
               cpp_deduction: calculation.cpp_contribution,
+              cpp_contribution: calculation.cpp_contribution,
               total_deductions: calculation.total_deductions,
               net_pay: Math.max(0, correctNetPay),
               total_hours: totalWorkedHours,
-              regular_hours: lieuLogic.regularHours,
-              lieu_earned: lieuLogic.lieuEarned,
-              lieu_used: lieuLogic.lieuUsed,
-              lieu_balance: lieuLogic.newLieuBalance,
-              stat_holiday_hours: lieuLogic.statHolidayHours,
+              regular_hours: calculation.regular_hours_worked || 0,
+              regular_hours_paid: calculation.regular_hours_paid || 0,
+              overtime_hours: calculation.overtime_hours || 0,
+              lieu_earned: calculation.lieu_earned || 0,
+              lieu_used: calculation.lieu_used || 0,
+              lieu_balance_before: calculation.lieu_balance_before || 0,
+              lieu_balance_after: calculation.lieu_balance_after || 0,
+              lieu_balance: calculation.lieu_balance_after || 0,
+              stat_holiday_hours: calculation.stat_holiday_hours || 0,
               premium_hours: calculation.premium_pay > 0 ? 
                 Object.values(payrollHours.premiums).reduce((sum, p) => sum + (p.hours || 0), 0) : 0,
               premium_pay: calculation.premium_pay,
@@ -575,19 +545,102 @@ const PayrollEntryTab = ({
               holiday_details: holidayDetails,
               health_premium_details: calculation.health_premium_details,
               cra_compliance: calculation.cra_compliance,
-              calculation_method: 'cra_t4127_with_ontario_health_premium'
+              has_wage_changes: calculation.has_wage_changes,
+              wage_breakdown: calculation.wage_breakdown,
+              lieu_calculation: calculation.lieu_calculation,
+              calculation_method: 'cra_t4127_with_lieu_time'
             };
           }
         } catch (calcError) {
-          console.warn('Advanced calculation failed, using fallback:', calcError);
+          console.error('Advanced calculation failed:', calcError);
         }
       }
 
-      // FIXED: Fallback calculation with corrected net pay logic
+      // Fallback calculation (simplified)
       const wage = parseFloat(employee.wage || 0);
-      const regularPay = lieuLogic.regularHours * wage;
-      const statHolidayPay = lieuLogic.statHolidayHours * wage;
-      const basePay = regularPay + statHolidayPay;
+      const totalWorkedHours = parseFloat(hours.total_hours) || 0;
+      const overtimeHours = parseFloat(hours.overtime_hours) || 0;
+      const regularWorkedHours = totalWorkedHours - overtimeHours;
+      
+      // ✅ FIXED: Convert holiday pay to equivalent hours
+      const holidayPayHours = holidayPayAmount > 0 && wage > 0 ? 
+        (holidayPayAmount / wage) : 0;
+      
+      // ✅ FIXED: Lieu calculation with auto-fill logic
+      let regularHoursPaid = regularWorkedHours;
+      let lieuEarned = 0;
+      let lieuUsed = 0;
+      let lieuPay = 0;
+      let lieuBalanceAfter = parseFloat(employee.lieu_time_balance || 0);
+      
+      if (employee?.lieu_time_enabled) {
+        const maxHours = parseFloat(employee.max_paid_hours_per_period || 0);
+        const currentBalance = parseFloat(employee.lieu_time_balance || 0);
+        
+        // ✅ CRITICAL: Include holiday pay hours in total compensation
+        // totalWorkedHours already includes regular + overtime hours
+        const totalCompensationHours = totalWorkedHours + statHolidayHours + holidayPayHours;
+        
+        // Enhanced debugging for lieu time calculation
+        console.log('🔄 LIEU TIME CALCULATION:', {
+          employee: `${employee.first_name} ${employee.last_name}`,
+          lieuTimeEnabled: employee.lieu_time_enabled,
+          maxHours: maxHours,
+          maxHoursRaw: employee.max_paid_hours_per_period,
+          totalWorkedHours: totalWorkedHours,
+          overtimeHours: overtimeHours,
+          statHolidayHours: statHolidayHours,
+          holidayPayHours: holidayPayHours,
+          totalCompensationHours: totalCompensationHours,
+          currentBalance: currentBalance
+        });
+        
+        if (maxHours > 0) {
+          if (totalCompensationHours > maxHours) {
+            // ✅ OVER MAX: Earn lieu time (excess goes to bank)
+            lieuEarned = totalCompensationHours - maxHours;
+            // Pay up to max, minus stat and holiday hours and overtime
+            regularHoursPaid = Math.max(0, maxHours - statHolidayHours - holidayPayHours - overtimeHours);
+            lieuBalanceAfter = currentBalance + lieuEarned;
+            
+            console.log('🔄 LIEU EARNED:', {
+              totalCompensation: totalCompensationHours,
+              maxHours: maxHours,
+              lieuEarned: lieuEarned,
+              newBalance: lieuBalanceAfter,
+              calculation: `${totalCompensationHours} - ${maxHours} = ${lieuEarned}`
+            });
+          } else {
+            // ✅ UNDER MAX: Auto-fill with lieu time to reach max without inflating base hours
+            const shortfall = maxHours - totalCompensationHours;
+            lieuUsed = Math.min(shortfall, currentBalance);
+            // Keep base hours at what was actually worked; pay lieu separately
+            regularHoursPaid = regularWorkedHours;
+            lieuPay = lieuUsed * wage;
+            lieuBalanceAfter = currentBalance - lieuUsed;
+            
+            console.log('🔄 LIEU AUTO-FILL:', {
+              totalCompensation: totalCompensationHours,
+              maxHours: maxHours,
+              shortfall: shortfall,
+              lieuUsed: lieuUsed,
+              regularHoursPaid: regularHoursPaid,
+              newBalance: lieuBalanceAfter
+            });
+          }
+        } else {
+          console.warn('⚠️ LIEU TIME: max_paid_hours_per_period is 0 or not set. Lieu time calculation skipped.', {
+            employee: `${employee.first_name} ${employee.last_name}`,
+            maxHours: maxHours,
+            maxHoursRaw: employee.max_paid_hours_per_period
+          });
+        }
+      }
+      
+      const regularPay = regularHoursPaid * wage;
+      const statHolidayPay = statHolidayHours * wage;
+      const overtimePay = overtimeHours * wage * 1.5;
+      const basePay = regularPay + statHolidayPay + overtimePay;
       
       // Calculate premium pay
       let totalPremiumPay = 0;
@@ -622,13 +675,21 @@ const PayrollEntryTab = ({
         });
       }
       
-      const grossPay = basePay + totalPremiumPay;
-      const vacationPay = grossPay * 0.04;
+      const grossPay = basePay + totalPremiumPay + lieuPay;
       
-      // FIXED: Calculate total income correctly = gross + vacation + holiday
+      // FIXED: Use proper vacation pay calculation from employee settings or business defaults
+      let vacationPercent = parseFloat(employee.vacation_percent || settings?.default_vacation_percent || 0.04);
+      
+      // If vacation_percent looks like a percentage (>= 1.0), convert it to decimal
+      if (vacationPercent >= 1.0) {
+        console.log('🔄 FIXING: Converting vacation_percent from percentage to decimal:', vacationPercent, '->', vacationPercent / 100);
+        vacationPercent = vacationPercent / 100;
+      }
+      
+      const vacationPay = grossPay * vacationPercent;
       const totalIncomeBeforeTax = grossPay + vacationPay + holidayPayAmount;
 
-      // FIXED: Improved tax calculation with proper taxable income
+      // Simple tax calculation
       const federalTax = Math.max(0, (totalIncomeBeforeTax - 310) * 0.15);
       const totalFederalTax = federalTax + additionalFedTax;
       const provincialTax = Math.max(0, (totalIncomeBeforeTax - 245) * 0.0505);
@@ -636,8 +697,6 @@ const PayrollEntryTab = ({
       const cppDeduction = Math.max(0, Math.min((totalIncomeBeforeTax - 67.31) * 0.0595, 74.36));
       
       const totalDeductions = totalFederalTax + provincialTax + eiDeduction + cppDeduction;
-      
-      // FIXED: Net pay = total income (gross + vacation + holiday) minus deductions
       const netPay = totalIncomeBeforeTax - totalDeductions;
 
       return {
@@ -650,17 +709,24 @@ const PayrollEntryTab = ({
         base_provincial_tax: provincialTax,
         ontario_health_premium: 0,
         ei_deduction: eiDeduction,
+        ei_premium: eiDeduction,
         cpp_deduction: cppDeduction,
+        cpp_contribution: cppDeduction,
         total_deductions: totalDeductions,
         net_pay: Math.max(0, netPay),
         total_hours: totalWorkedHours,
-        regular_hours: lieuLogic.regularHours,
-        lieu_earned: lieuLogic.lieuEarned,
-        lieu_used: lieuLogic.lieuUsed,
-        lieu_balance: lieuLogic.newLieuBalance,
-        stat_holiday_hours: lieuLogic.statHolidayHours,
+        regular_hours: regularWorkedHours,
+        regular_hours_paid: regularHoursPaid,
+        overtime_hours: overtimeHours,
+        lieu_earned: lieuEarned,
+        lieu_used: lieuUsed,
+        lieu_balance_before: parseFloat(employee.lieu_time_balance || 0),
+        lieu_balance_after: lieuBalanceAfter,
+        lieu_balance: lieuBalanceAfter,
+        stat_holiday_hours: statHolidayHours,
         premium_hours: Object.values(premiumDetails).reduce((sum, p) => sum + (p.hours || 0), 0),
         premium_pay: totalPremiumPay,
+        lieu_pay: lieuPay,
         premium_details: premiumDetails,
         holiday_pay: holidayPayAmount,
         holiday_details: holidayDetails,
@@ -668,7 +734,7 @@ const PayrollEntryTab = ({
       };
 
     } catch (error) {
-      console.error('Error in getEmployeePreview:', error);
+      console.error('Error in employee preview calculation:', error);
       return defaultPreview;
     }
   }, [
@@ -682,8 +748,9 @@ const PayrollEntryTab = ({
     isEmployeePremiumEnabled, 
     getEmployeePremiumRate, 
     getEmployeePremiumRateType, 
-    payrollCalculations, 
-    calculateLieuTimeLogic
+    payrollCalculations,
+    payrollRun,
+    selectedPeriod
   ]);
 
   // Employee interaction handlers
@@ -693,11 +760,91 @@ const PayrollEntryTab = ({
       setShowEmployeeModal(true);
     }
   }, []);
+
+  // Query database directly for payroll totals state
+  const [payrollTotals, setPayrollTotals] = useState({
+    totalEmployees: 0,
+    totalHours: 0,
+    totalGross: 0,
+    totalNet: 0,
+    totalPremiums: 0,
+    totalAdditionalFedTax: 0,
+    totalLieuEarned: 0,
+    totalLieuUsed: 0,
+    totalHolidayPay: 0,
+    totalOntarioHealthPremium: 0
+  });
+
+  // Function to load payroll totals (extracted so it can be called after saving entries)
+  // Must be defined before handleModalSave so it can be used there
+  const loadPayrollTotals = useCallback(async () => {
+    if (!payrollRun?.id) {
+      setPayrollTotals({
+        totalEmployees: 0,
+        totalHours: 0,
+        totalGross: 0,
+        totalNet: 0,
+        totalPremiums: 0,
+        totalAdditionalFedTax: 0,
+        totalLieuEarned: 0,
+        totalLieuUsed: 0,
+        totalHolidayPay: 0,
+        totalOntarioHealthPremium: 0
+      });
+      return;
+    }
+
+    try {
+      const { data: entries, error } = await supabase
+        .from('hrpayroll_entries')
+        .select('*')
+        .eq('payroll_run_id', payrollRun.id);
+
+      if (error) throw error;
+
+      let totals = {
+        totalEmployees: 0,
+        totalHours: 0,
+        totalGross: 0,
+        totalNet: 0,
+        totalPremiums: 0,
+        totalAdditionalFedTax: 0,
+        totalLieuEarned: 0,
+        totalLieuUsed: 0,
+        totalHolidayPay: 0,
+        totalOntarioHealthPremium: 0
+      };
+
+      entries?.forEach(entry => {
+        totals.totalEmployees++;
+        totals.totalHours += parseFloat(entry.total_hours) || 0;
+        totals.totalGross += (parseFloat(entry.gross_pay) || 0) + (parseFloat(entry.vacation_pay) || 0);
+        totals.totalNet += parseFloat(entry.net_pay) || 0;
+        totals.totalAdditionalFedTax += parseFloat(entry.additional_tax) || 0;
+        totals.totalHolidayPay += parseFloat(entry.holiday_pay) || 0;
+        totals.totalLieuEarned += parseFloat(entry.lieu_earned) || 0;
+        totals.totalLieuUsed += parseFloat(entry.lieu_hours) || 0;
+
+        if (entry.premiums && typeof entry.premiums === 'object') {
+          Object.values(entry.premiums).forEach(premium => {
+            totals.totalPremiums += parseFloat(premium?.total_pay) || 0;
+          });
+        }
+      });
+
+      setPayrollTotals(totals);
+    } catch (error) {
+      console.error('Error loading payroll totals:', error);
+    }
+  }, [payrollRun?.id]);
+
+  useEffect(() => {
+    loadPayrollTotals();
+  }, [loadPayrollTotals]);
   
-  // Database save function
+  // Database save function with lieu time support
   const saveEmployeeEntryToDatabase = useCallback(async (employeeId, hours, additionalFedTax, statHolidayPay, preview) => {
     if (!payrollRun || !payrollRun.id) {
-      console.warn('No payroll run active, cannot save to database');
       return;
     }
 
@@ -707,18 +854,30 @@ const PayrollEntryTab = ({
         console.error('Employee not found:', employeeId);
         return;
       }
-	  
+      
       // Prepare premium data
       const premiumData = {};
       if (hours.premium_hours && allPremiums) {
         allPremiums.forEach(premium => {
           const premiumHours = parseFloat(hours.premium_hours[premium.name]) || 0;
           if (premiumHours > 0 && isEmployeePremiumEnabled(employeeId, premium.name)) {
+            const premiumRate = getEmployeePremiumRate(employeeId, premium.name);
+            const rateType = getEmployeePremiumRateType(employeeId, premium.name);
+      
+            // Calculate total_pay directly
+            let totalPay = 0;
+            if (rateType === 'percentage') {
+              const wage = parseFloat(employee.wage || 0);
+              totalPay = premiumHours * wage * (premiumRate / 100);
+            } else {
+              totalPay = premiumHours * premiumRate;
+            }
+      
             premiumData[premium.name] = {
               hours: premiumHours,
-              rate: getEmployeePremiumRate(employeeId, premium.name),
-              rate_type: getEmployeePremiumRateType(employeeId, premium.name),
-              total_pay: premiumHours * getEmployeePremiumRate(employeeId, premium.name)
+              rate: premiumRate,
+              rate_type: rateType,
+              total_pay: totalPay
             };
           }
         });
@@ -732,51 +891,64 @@ const PayrollEntryTab = ({
         .eq('user_id', employeeId)
         .single();
 
-      // FIXED: Calculate vacation_pay and net_pay if missing from preview
+      // Calculate final values
       const finalGrossPay = preview.gross_pay || 0;
-      const finalVacationPay = (preview.vacation_pay && preview.vacation_pay > 0) 
-        ? preview.vacation_pay 
-        : finalGrossPay * 0.04;
-      
+      const finalVacationPay = preview.vacation_pay || 0;
       const holidayPayAmount = preview.holiday_pay || employeeHolidayPay[employeeId] || 0;
       const totalIncome = finalGrossPay + finalVacationPay + holidayPayAmount;
       
-      // Extract tax values from preview
-      const federalTax = parseFloat(preview.federal_tax) || 0;
-      const additionalTax = parseFloat(additionalFedTax) || 0;
-      const provincialTax = parseFloat(preview.provincial_tax_base || preview.provincial_tax) || 0;
-      const eiDeduction = parseFloat(preview.ei_premium || preview.ei_deduction) || 0;
-      const cppDeduction = parseFloat(preview.cpp_contribution || preview.cpp_deduction) || 0;      const totalDeductions = federalTax + additionalTax + provincialTax + eiDeduction + cppDeduction;
-      const finalNetPay = (preview.net_pay && preview.net_pay > 0 && !isNaN(preview.net_pay))
-        ? preview.net_pay
-        : Math.max(0, totalIncome - totalDeductions);
+      const federalTax = parseFloat(preview.federal_tax) || parseFloat(preview.total_federal_tax) || 0;
+      const additionalTax = parseFloat(preview.additional_federal_tax) || parseFloat(additionalFedTax) || 0;
+      const provincialTax = parseFloat(preview.provincial_tax_total) || parseFloat(preview.provincial_tax) || 0;
+      const ontarioHealthPremium = parseFloat(preview.ontario_health_premium) || 0;
+      const eiDeduction = parseFloat(preview.ei_premium) || parseFloat(preview.ei_deduction) || 0;
+      const cppDeduction = parseFloat(preview.cpp_contribution) || parseFloat(preview.cpp_deduction) || 0;
+      
+      const totalDeductions = federalTax + additionalTax + provincialTax + ontarioHealthPremium + eiDeduction + cppDeduction;
+      const finalNetPay = preview.net_pay || Math.max(0, totalIncome - totalDeductions);
 
+      // Prepare entry data with LIEU TIME fields
       const entryData = {
         payroll_run_id: payrollRun.id,
         user_id: employeeId,
+        
+        // Hours - including lieu time
         total_hours: parseFloat(hours.total_hours) || 0,
-        regular_hours: preview.regular_hours || parseFloat(hours.regular_hours) || 0,
+        regular_hours: preview.regular_hours_paid || preview.regular_hours || 0,
         overtime_hours: preview.overtime_hours || parseFloat(hours.overtime_hours) || 0,
-        lieu_hours: preview.lieu_used || parseFloat(hours.lieu_used) || 0,
-        lieu_earned: preview.lieu_earned || parseFloat(hours.lieu_earned) || 0,
-        lieu_balance_before: parseFloat(employee.lieu_time_balance) || 0,
-        lieu_balance_after: preview.lieu_balance || parseFloat(hours.lieu_balance) || 0,
-        stat_holiday_hours: preview.stat_holiday_hours || parseFloat(hours.stat_worked_hours) || 0,
+        stat_holiday_hours: preview.stat_holiday_hours || 0,
+        
+        // LIEU TIME FIELDS
+        lieu_hours: preview.lieu_used || 0,
+        lieu_earned: preview.lieu_earned || 0,
+        lieu_balance_before: preview.lieu_balance_before || parseFloat(employee.lieu_time_balance) || 0,
+        lieu_balance_after: preview.lieu_balance_after || preview.lieu_balance || 0,
+        
+        // Premiums
         premiums: premiumData,
+        
+        // Pay amounts
         gross_pay: finalGrossPay,
         vacation_pay: finalVacationPay,
+        holiday_pay: holidayPayAmount,
+        
+        // Tax deductions
         federal_tax: federalTax,
         provincial_tax: provincialTax,
-        ontario_health_premium: preview.ontario_health_premium || 0,
+        ontario_health_premium: ontarioHealthPremium,
         ei_deduction: eiDeduction,
         cpp_deduction: cppDeduction,
         additional_tax: additionalTax,
+        
+        // Net pay
         net_pay: finalNetPay,
-        holiday_pay: holidayPayAmount,
+        
+        // Wage change info
+        wage_breakdown: preview.wage_breakdown || null,
+        has_wage_changes: preview.has_wage_changes || false,
+        
         updated_at: new Date().toISOString()
       };
-
-      console.log('ENTRY DATA TO SAVE:', entryData);
 
       if (existingEntry && !checkError) {
         // Update existing entry
@@ -796,26 +968,45 @@ const PayrollEntryTab = ({
         if (insertError) throw insertError;
       }
 
-      console.log('Successfully saved employee entry to database:', employeeId);
+      // Update employee's lieu time balance in users table
+      if (preview.lieu_balance_after !== undefined && preview.lieu_balance_after !== preview.lieu_balance_before) {
+        const { error: balanceError } = await supabase
+          .from('users')
+          .update({ 
+            lieu_time_balance: preview.lieu_balance_after,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', employeeId);
+
+        if (balanceError) {
+          console.error('Failed to update employee lieu balance:', balanceError);
+        }
+      }
 
     } catch (error) {
       console.error('Error saving employee entry to database:', error);
       throw error;
     }
-  }, [payrollRun, sortedEmployees, getEmployeePreview, allPremiums, isEmployeePremiumEnabled, getEmployeePremiumRate, getEmployeePremiumRateType, employeeHolidayPay]);
+  }, [
+    payrollRun, 
+    sortedEmployees, 
+    allPremiums, 
+    isEmployeePremiumEnabled, 
+    getEmployeePremiumRate, 
+    getEmployeePremiumRateType, 
+    employeeHolidayPay
+  ]);
 
-  // FIXED handleModalSave function
+  // Modal save handler - must be defined after loadPayrollTotals
   const handleModalSave = useCallback(async (employeeId, newHours, newAdditionalFedTax, newStatHolidayPay, preview) => {
     if (!employeeId) return;
-
-    console.log('PARENT RECEIVED PREVIEW:', preview);
 
     try {
       if (recordAction && typeof recordAction === 'function') {
         await recordAction('employee_hours_update', employeeId, true);
       }
     } catch (error) {
-      console.warn('Failed to record action:', error);
+      // Silent fail
     }
 
     // Update state
@@ -834,17 +1025,18 @@ const PayrollEntryTab = ({
       [employeeId]: newStatHolidayPay || 0
     }));
 
-    // Save using the preview from the modal - NO recalculation
+    // Save using the preview from the modal
     try {
       await saveEmployeeEntryToDatabase(employeeId, newHours, newAdditionalFedTax, newStatHolidayPay, preview);
-      console.log('Employee entry saved successfully using modal values');
+      // Refresh payroll totals after saving
+      await loadPayrollTotals();
     } catch (error) {
       console.error('Failed to save employee entry:', error);
       alert('Failed to save employee entry: ' + error.message);
     }
-  }, [recordAction, saveEmployeeEntryToDatabase]);
+  }, [recordAction, saveEmployeeEntryToDatabase, loadPayrollTotals]);
 
-  // FIXED: Load draft payroll with saved database values
+  // Load draft payroll with saved database values
   const loadDraftPayrollRun = useCallback(async (draftRun) => {
     if (!draftRun || !draftRun.id) {
       alert('Invalid draft payroll selected');
@@ -863,7 +1055,7 @@ const PayrollEntryTab = ({
           }, 'low');
         }
       } catch (securityError) {
-        console.warn('Security logging failed:', securityError);
+        // Silent fail
       }
 
       setPayrollRun(draftRun);
@@ -893,7 +1085,6 @@ const PayrollEntryTab = ({
 
         entries.forEach(entry => {
           if (entry && entry.user_id) {
-            // FIXED: Load saved database values along with hours
             hoursData[entry.user_id] = {
               total_hours: entry.total_hours || 0,
               regular_hours: entry.regular_hours || 0,
@@ -901,7 +1092,7 @@ const PayrollEntryTab = ({
               lieu_balance: entry.lieu_balance_after || 0,
               overtime_hours: entry.overtime_hours || 0,
               premium_hours: {},
-              // ADDED: Store saved database values for totals calculation
+              wage_period_hours: entry.wage_breakdown || [],
               saved_gross_pay: parseFloat(entry.gross_pay) || 0,
               saved_vacation_pay: parseFloat(entry.vacation_pay) || 0,
               saved_net_pay: parseFloat(entry.net_pay) || 0
@@ -939,7 +1130,7 @@ const PayrollEntryTab = ({
     }
   }, [effectiveBusinessId, logSecurityEvent]);
 
-  // RESTORED: Safe payroll run creation
+  // Payroll run creation
   const createPayrollRun = useCallback(async () => {
     if (!selectedPeriod.start || !selectedPeriod.end || !selectedPeriod.payDate) {
       setError('Please select all dates before creating a payroll run.');
@@ -960,7 +1151,7 @@ const PayrollEntryTab = ({
         }
       }
     } catch (error) {
-      console.warn('Rate limit check failed, continuing...', error);
+      // Continue
     }
 
     setLoading(true);
@@ -973,7 +1164,7 @@ const PayrollEntryTab = ({
           await recordAction('payroll_run_creation', authUser?.id, true);
         }
       } catch (error) {
-        console.warn('Failed to record action:', error);
+        // Silent fail
       }
       
       try {
@@ -986,7 +1177,7 @@ const PayrollEntryTab = ({
           }, 'low');
         }
       } catch (error) {
-        console.warn('Security logging failed:', error);
+        // Silent fail
       }
 
       const { data, error } = await supabase
@@ -1021,7 +1212,7 @@ const PayrollEntryTab = ({
             await recordAction('payroll_run_creation', authUser?.id, false);
           }
         } catch (actionError) {
-          console.warn('Failed to record action:', actionError);
+          // Silent fail
         }
       }
     } finally {
@@ -1030,85 +1221,6 @@ const PayrollEntryTab = ({
       }
     }
   }, [selectedPeriod, effectiveBusinessId, checkRateLimit, recordAction, logSecurityEvent, authUser, effectiveBusinessData]);
-
-  // SIMPLIFIED: Query database directly for payroll totals
-  const [payrollTotals, setPayrollTotals] = useState({
-    totalEmployees: 0,
-    totalHours: 0,
-    totalGross: 0,
-    totalNet: 0,
-    totalPremiums: 0,
-    totalAdditionalFedTax: 0,
-    totalLieuEarned: 0,
-    totalLieuUsed: 0,
-    totalHolidayPay: 0,
-    totalOntarioHealthPremium: 0
-  });
-
-  useEffect(() => {
-    const loadPayrollTotals = async () => {
-      if (!payrollRun?.id) {
-        setPayrollTotals({
-          totalEmployees: 0,
-          totalHours: 0,
-          totalGross: 0,
-          totalNet: 0,
-          totalPremiums: 0,
-          totalAdditionalFedTax: 0,
-          totalLieuEarned: 0,
-          totalLieuUsed: 0,
-          totalHolidayPay: 0,
-          totalOntarioHealthPremium: 0
-        });
-        return;
-      }
-
-      try {
-        const { data: entries, error } = await supabase
-          .from('hrpayroll_entries')
-          .select('*')
-          .eq('payroll_run_id', payrollRun.id);
-
-        if (error) throw error;
-
-        let totals = {
-          totalEmployees: 0,
-          totalHours: 0,
-          totalGross: 0,
-          totalNet: 0,
-          totalPremiums: 0,
-          totalAdditionalFedTax: 0,
-          totalLieuEarned: 0,
-          totalLieuUsed: 0,
-          totalHolidayPay: 0,
-          totalOntarioHealthPremium: 0
-        };
-
-        entries?.forEach(entry => {
-          totals.totalEmployees++;
-          totals.totalHours += parseFloat(entry.total_hours) || 0;
-          totals.totalGross += (parseFloat(entry.gross_pay) || 0) + (parseFloat(entry.vacation_pay) || 0);
-          totals.totalNet += parseFloat(entry.net_pay) || 0;
-          totals.totalAdditionalFedTax += parseFloat(entry.additional_tax) || 0;
-          totals.totalHolidayPay += parseFloat(entry.holiday_pay) || 0;
-          totals.totalLieuEarned += parseFloat(entry.lieu_earned) || 0;
-          totals.totalLieuUsed += parseFloat(entry.lieu_hours) || 0;
-
-          if (entry.premiums && typeof entry.premiums === 'object') {
-            Object.values(entry.premiums).forEach(premium => {
-              totals.totalPremiums += parseFloat(premium?.total_pay) || 0;
-            });
-          }
-        });
-
-        setPayrollTotals(totals);
-      } catch (error) {
-        console.error('Error loading payroll totals:', error);
-      }
-    };
-
-    loadPayrollTotals();
-  }, [payrollRun?.id]);
   
   // Payroll finalization function
   const handleFinalizePayroll = useCallback(async () => {
@@ -1141,6 +1253,8 @@ Pay Date: ${selectedPeriod.payDate}
 Employees: ${payrollTotals.totalEmployees}
 Total Gross Pay: $${payrollTotals.totalGross.toFixed(2)}
 Total Net Pay: $${payrollTotals.totalNet.toFixed(2)}
+Lieu Earned: ${payrollTotals.totalLieuEarned.toFixed(2)} hours
+Lieu Used: ${payrollTotals.totalLieuUsed.toFixed(2)} hours
 
 Once finalized, this payroll cannot be edited from the Entry tab.
 You will need to use the Edit Payroll tab for any changes.`;
@@ -1164,36 +1278,13 @@ You will need to use the Edit Payroll tab for any changes.`;
             pay_period_end: selectedPeriod.end,
             total_employees: payrollTotals.totalEmployees,
             total_gross_pay: payrollTotals.totalGross,
-            total_net_pay: payrollTotals.totalNet
+            total_net_pay: payrollTotals.totalNet,
+            total_lieu_earned: payrollTotals.totalLieuEarned,
+            total_lieu_used: payrollTotals.totalLieuUsed
           }, 'critical');
         }
       } catch (error) {
-        console.warn('Security logging failed:', error);
-      }
-
-      // Save all current employee entries to database first
-      console.log('Saving final employee entries...');
-      const savePromises = sortedEmployees?.map(async (employee) => {
-        if (!employee?.id) return;
-        
-        const hours = employeeHours[employee.id];
-        const additionalTax = employeeAdditionalFedTax[employee.id] || 0;
-        const statHolidayPay = employeeStatHolidayPay[employee.id] || 0;
-        
-        // Only save if employee has hours entered
-        if (hours && (
-          (hours.regular_hours && hours.regular_hours > 0) ||
-          (hours.overtime_hours && hours.overtime_hours > 0) ||
-          (hours.lieu_hours && hours.lieu_hours > 0) ||
-          (hours.total_hours && hours.total_hours > 0)
-        )) {
-          const preview = await getEmployeePreview(employee.id);
-          return saveEmployeeEntryToDatabase(employee.id, hours, additionalTax, statHolidayPay, preview);
-        }
-      });
-
-      if (savePromises && savePromises.length > 0) {
-        await Promise.all(savePromises.filter(Boolean));
+        // Silent fail
       }
 
       // Update payroll run status to 'finalized'
@@ -1208,8 +1299,13 @@ You will need to use the Edit Payroll tab for any changes.`;
         .eq('id', payrollRun.id);
 
       if (finalizeError) {
+        console.error('Finalization failed:', finalizeError);
+        console.error('Payroll Run ID:', payrollRun.id);
+        console.error('Update data:', { status: 'finalized', id: payrollRun.id });
         throw new Error(`Failed to finalize payroll: ${finalizeError.message}`);
       }
+
+      console.log('Successfully finalized payroll run:', payrollRun.id);
 
       // Update local state
       setPayrollRun(prev => ({
@@ -1225,7 +1321,7 @@ You will need to use the Edit Payroll tab for any changes.`;
           await recordAction('payroll_finalized', payrollRun.id, true);
         }
       } catch (error) {
-        console.warn('Failed to record action:', error);
+        // Silent fail
       }
 
       // Log security event for successful finalization
@@ -1237,31 +1333,34 @@ You will need to use the Edit Payroll tab for any changes.`;
             finalized_by: authUser?.id || effectiveBusinessData?.user_id,
             total_employees: payrollTotals.totalEmployees,
             total_gross_pay: payrollTotals.totalGross,
-            total_net_pay: payrollTotals.totalNet
+            total_net_pay: payrollTotals.totalNet,
+            total_lieu_earned: payrollTotals.totalLieuEarned,
+            total_lieu_used: payrollTotals.totalLieuUsed
           }, 'critical');
         }
       } catch (error) {
-        console.warn('Security logging failed:', error);
+        // Silent fail
       }
 
-      setSaveMessage(`Payroll finalized successfully!
+      setSaveMessage(`✅ Payroll finalized successfully!
 
 ${payrollTotals.totalEmployees} employees processed
-$${payrollTotals.totalGross.toFixed(2)} total gross pay
-$${payrollTotals.totalNet.toFixed(2)} total net pay
-Ready for pay statements and government reports
+${payrollTotals.totalGross.toFixed(2)} total gross pay
+${payrollTotals.totalNet.toFixed(2)} total net pay
+${payrollTotals.totalLieuEarned.toFixed(2)} lieu hours earned
+${payrollTotals.totalLieuUsed.toFixed(2)} lieu hours used
 
 This payroll run is now locked and available in:
-Pay Statements tab for employee paystubs
-Tax Reports tab for CRA remittances
-Edit Payroll tab for any corrections`);
+• Pay Statements tab for employee paystubs
+• Tax Reports tab for CRA remittances
+• Edit Payroll tab for any corrections`);
 
       // Optional: Refresh YTD data if available
       if (ytd?.refreshYTD && typeof ytd.refreshYTD === 'function') {
         try {
           await ytd.refreshYTD();
         } catch (error) {
-          console.warn('Failed to refresh YTD data:', error);
+          // Silent fail
         }
       }
 
@@ -1280,7 +1379,7 @@ Edit Payroll tab for any corrections`);
           }, 'high');
         }
       } catch (secError) {
-        console.warn('Security logging failed:', secError);
+        // Silent fail
       }
 
       // Record failed action
@@ -1289,7 +1388,7 @@ Edit Payroll tab for any corrections`);
           await recordAction('payroll_finalization_failed', payrollRun.id, false);
         }
       } catch (actionError) {
-        console.warn('Failed to record action:', actionError);
+        // Silent fail
       }
 
     } finally {
@@ -1380,6 +1479,24 @@ Edit Payroll tab for any corrections`);
               error={error}
             />
 
+            {/* FORCE REFRESH BUTTON - Fix vacation pay cache issue */}
+            <div style={{ textAlign: 'center', margin: '10px 0' }}>
+              <button 
+                onClick={forceRefreshEmployeeData}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: '4px',
+                  border: '1px solid #3b82f6',
+                  backgroundColor: '#3b82f6',
+                  color: 'white',
+                  fontSize: '14px',
+                  cursor: 'pointer'
+                }}
+              >
+                🔄 Refresh Employee Data (Fix Vacation Pay)
+              </button>
+            </div>
+
             {/* Payroll Content */}
             {payrollRun && (
               <>
@@ -1417,7 +1534,7 @@ Edit Payroll tab for any corrections`);
                       fontSize: TavariStyles.typography?.fontSize?.sm || '14px', 
                       color: TavariStyles.colors?.gray600 || '#4b5563' 
                     }}>
-                      This will finalize the payroll with Ontario Health Premium integration and make it available for pay statements.
+                      This will finalize the payroll with lieu time tracking and make it available for pay statements.
                       {ytd?.loading ? ' YTD data will be automatically updated.' : ' YTD system ready for automatic updates.'}
                     </div>
                   </div>
@@ -1443,7 +1560,6 @@ Edit Payroll tab for any corrections`);
               isEmployeePremiumEnabled={isEmployeePremiumEnabled}
               getEmployeePremiumRate={getEmployeePremiumRate}
               getEmployeePremiumRateType={getEmployeePremiumRateType}
-              getEmployeePreview={getEmployeePreview}
               selectedBusinessId={effectiveBusinessId}
               businessData={effectiveBusinessData}
               settings={settings}

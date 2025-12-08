@@ -4,12 +4,30 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../../supabaseClient';
 import { useBusiness } from '../../../contexts/BusinessContext';
 import { useUserProfile } from '../../../hooks/useUserProfile';
+import { usePermissions } from '../../../hooks/usePermissions';
+import PermissionGate from '../../../components/Auth/PermissionGate';
 import SessionManager from '../../../components/SessionManager';
+import toast from 'react-hot-toast';
+import { FiLock, FiDownload } from 'react-icons/fi';
 
 const RevenueReports = () => {
   const navigate = useNavigate();
   const { business } = useBusiness();
   const { profile } = useUserProfile();
+  
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewRevenue = hasAnyPermission(['reports.financial.view', 'music.ads.manage']) || hasElevatedPrivileges();
+  const canExportReports = hasPermission('reports.financial.view') || hasElevatedPrivileges();
   
   const [timeframe, setTimeframe] = useState('30d');
   const [reportType, setReportType] = useState('overview');
@@ -27,10 +45,16 @@ const RevenueReports = () => {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (business?.id) {
+    if (business?.id && !permissionsLoading) {
+      if (!canViewRevenue) {
+        toast.error('You do not have permission to view revenue reports');
+        navigate('/dashboard/music');
+        return;
+      }
+      
       loadRevenueData();
     }
-  }, [business?.id, timeframe]);
+  }, [business?.id, timeframe, permissionsLoading, canViewRevenue]);
 
   const loadRevenueData = async () => {
     if (!business?.id) return;
@@ -69,8 +93,8 @@ const RevenueReports = () => {
       setRevenueData(processedData);
       
     } catch (err) {
-      console.error('Error loading revenue data:', err);
       setError(err.message);
+      toast.error('Failed to load revenue data');
     } finally {
       setIsLoading(false);
     }
@@ -183,6 +207,12 @@ const RevenueReports = () => {
   };
 
   const handleExport = async () => {
+    // Permission check
+    if (!canExportReports) {
+      toast.error('You do not have permission to export revenue reports');
+      return;
+    }
+
     try {
       const exportData = {
         timeframe,
@@ -228,10 +258,10 @@ const RevenueReports = () => {
       URL.revokeObjectURL(url);
       
       setShowExportModal(false);
+      toast.success('Report exported successfully');
       
     } catch (error) {
-      console.error('Export error:', error);
-      alert('Failed to export data');
+      toast.error('Failed to export data');
     }
   };
 
@@ -249,6 +279,42 @@ const RevenueReports = () => {
   };
 
   const topProvider = getTopPerformingProvider();
+
+  // Show loading while permissions are being checked
+  if (permissionsLoading) {
+    return (
+      <SessionManager>
+        <div style={styles.loadingContainer}>
+          <div style={styles.spinner}></div>
+          <div style={styles.loadingText}>Loading permissions...</div>
+        </div>
+      </SessionManager>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canViewRevenue) {
+    return (
+      <SessionManager>
+        <div style={styles.errorContainer}>
+          <FiLock size={64} style={{ color: '#f44336', marginBottom: '20px' }} />
+          <h2 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>Access Denied</h2>
+          <p style={{ fontSize: '16px', color: '#666', marginBottom: '20px' }}>
+            You do not have permission to view revenue reports.
+          </p>
+          <p style={{ fontSize: '14px', color: '#999', marginBottom: '30px' }}>
+            Contact your manager or administrator for access to financial reports.
+          </p>
+          <button 
+            onClick={() => navigate('/dashboard/music')} 
+            style={styles.retryButton}
+          >
+            Return to Music Dashboard
+          </button>
+        </div>
+      </SessionManager>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -281,6 +347,23 @@ const RevenueReports = () => {
         <div style={styles.card}>
           <h1 style={styles.title}>Revenue Reports & Analytics</h1>
           
+          {!canExportReports && (
+            <div style={{ 
+              marginBottom: '15px', 
+              padding: '10px', 
+              backgroundColor: '#fff3cd', 
+              borderRadius: '4px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}>
+              <FiLock size={16} style={{ color: '#856404' }} />
+              <span style={{ color: '#856404', fontSize: '14px' }}>
+                You can view reports but need financial permissions to export data
+              </span>
+            </div>
+          )}
+          
           <div style={styles.controls}>
             <div style={styles.timeframeButtons}>
               {['7d', '30d', '90d'].map(tf => (
@@ -298,12 +381,34 @@ const RevenueReports = () => {
               ))}
             </div>
             
-            <button
-              onClick={() => setShowExportModal(true)}
-              style={styles.exportButton}
+            <PermissionGate
+              permission="reports.financial.view"
+              fallback={
+                <button
+                  disabled
+                  style={{ 
+                    ...styles.exportButton, 
+                    opacity: 0.5, 
+                    cursor: 'not-allowed',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                  }}
+                  title="Permission required to export reports"
+                >
+                  <FiLock size={16} />
+                  Export
+                </button>
+              }
             >
-              📥 Export
-            </button>
+              <button
+                onClick={() => setShowExportModal(true)}
+                style={{ ...styles.exportButton, display: 'flex', alignItems: 'center', gap: '8px' }}
+              >
+                <FiDownload size={16} />
+                Export
+              </button>
+            </PermissionGate>
           </div>
         </div>
 
@@ -437,7 +542,7 @@ const RevenueReports = () => {
         )}
 
         {/* Export Modal */}
-        {showExportModal && (
+        {showExportModal && canExportReports && (
           <div style={styles.modalOverlay} onClick={() => setShowExportModal(false)}>
             <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
               <h2 style={styles.modalTitle}>Export Revenue Report</h2>
@@ -768,6 +873,11 @@ if (!document.querySelector('#revenue-reports-styles')) {
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
     }
   `;
   document.head.appendChild(styleSheet);

@@ -20,3 +20,44 @@ entrypoint = "./functions/helcim-confirm/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/helcim-confirm/*.html" ]
+
+[functions."create-onboarding-form"]
+enabled = true
+verify_jwt = true
+import_map = "./functions/create-onboarding-form/deno.json"
+entrypoint = "./functions/create-onboarding-form/index.ts"
+
+[functions."get-onboarding-status"]
+enabled = true
+verify_jwt = true
+import_map = "./functions/get-onboarding-status/deno.json"
+entrypoint = "./functions/get-onboarding-status/index.ts"
+
+[functions."create-onboarding-form-link"]
+enabled = true
+verify_jwt = true
+import_map = "./functions/create-onboarding-form-link/deno.json"
+entrypoint = "./functions/create-onboarding-form-link/index.ts"
+
+[functions."get-merchant-details"]
+enabled = true
+verify_jwt = true
+import_map = "./functions/get-merchant-details/deno.json"
+entrypoint = "./functions/get-merchant-details/index.ts"
+
+[functions.mail-event-webhook]
+enabled = true
+verify_jwt = false
+import_map = "./functions/mail-event-webhook/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/mail-event-webhook/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/mail-event-webhook/*.html" ]
+
+[functions."mail-domain-manager"]
+enabled = true
+verify_jwt = false
+import_map = "./functions/mail-domain-manager/deno.json"
+entrypoint = "./functions/mail-domain-manager/index.ts"

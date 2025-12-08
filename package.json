@@ -1,6 +1,10 @@
 {
   "name": "tavari-core-frontend",
   "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "version": "1.0.0",
   "type": "module",
   "description": "Tavari Core System - Multi-module business management platform",
@@ -11,7 +15,55 @@
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "preview": "vite preview",
     "start": "vite",
-    "deploy": "vite build && npx vercel --prod"
+    "deploy": "vite build && npx vercel --prod",
+    "electron-dev": "cross-env NODE_ENV=development electron build/electron/main.cjs",
+    "electron-kiosk": "cross-env KIOSK_MODE=true KIOSK_FULLSCREEN=true electron build/electron/main.cjs",
+    "build-desktop": "electron-builder",
+    "build-exe": "node scripts/build-exe-only.cjs",
+    "build-desktop-portable": "npm run build-desktop"
+  },
+  "main": "build/electron/main.cjs",
+  "build": {
+    "appId": "com.tavari.music-desktop",
+    "productName": "Tavari Music Desktop",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "build/electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "sign": null,
+      "signingHashAlgorithms": [],
+      "signDlls": false,
+      "verifyUpdateCodeSignature": false
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "portable": {
+      "artifactName": "Tavari-Music-Desktop-Portable.zip"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Tavari-Music-Desktop-Setup-${version}.exe",
+      "script": null
+    }
   },
   "dependencies": {
     "@aws-sdk/client-ses": "^3.873.0",
@@ -22,21 +74,29 @@
     "cors": "^2.8.5",
     "crypto-js": "^4.2.0",
     "dayjs": "^1.11.13",
+    "html2pdf.js": "^0.12.1",
     "lucide-react": "^0.542.0",
+    "node-machine-id": "^1.1.12",
     "qrcode": "^1.5.3",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-hot-toast": "^2.5.2",
     "react-icons": "^5.5.0",
-    "react-router-dom": "^7.7.1"
+    "react-router-dom": "^7.7.1",
+    "recharts": "^3.2.1",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.30.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "archiver": "^7.0.1",
     "artillery": "^2.0.23",
+    "cross-env": "^7.0.3",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3",
     "eslint": "^9.30.1",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",

@@ -1,16 +1,54 @@
+// screens/HR/OrientationCalendar.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
 import ScheduleOrientationModal from './ScheduleOrientationModal';
 
 const OrientationCalendar = () => {
   const navigate = useNavigate();
 
-  // Authentication state
-  const [authUser, setAuthUser] = useState(null);
-  const [selectedBusinessId, setSelectedBusinessId] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [authError, setAuthError] = useState(null);
+  // Security context
+  const {
+    recordAction,
+    logSecurityEvent,
+    checkRateLimit
+  } = useSecurityContext({
+    componentName: 'OrientationCalendar',
+    sensitiveComponent: false,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Authentication using standardized hook
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin', 'hr_admin'],
+    requireBusiness: true,
+    componentName: 'OrientationCalendar'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
 
   // Component state
   const [sessions, setSessions] = useState([]);
@@ -21,75 +59,49 @@ const OrientationCalendar = () => {
   const [selectedSession, setSelectedSession] = useState(null);
   const [dashboardSummary, setDashboardSummary] = useState(null);
 
-  // Authentication setup (same pattern as TabScreen)
+  // Permission checks
+  const canViewOrientation = hasAnyPermission([
+    'hr.onboarding.view',
+    'hr.orientation.view'
+  ]) || hasElevatedPrivileges();
+
+  const canCreateSessions = hasPermission('hr.orientation.create') || hasElevatedPrivileges();
+  const canScheduleEmployees = hasPermission('hr.orientation.schedule') || hasElevatedPrivileges();
+  const canViewAttendees = hasPermission('hr.orientation.view_attendees') || hasElevatedPrivileges();
+
+  // Check permissions on mount
   useEffect(() => {
-    const initializeAuth = async () => {
-      try {
-        console.log('OrientationCalendar: Initializing authentication...');
-        
-        const { data: { session }, error } = await supabase.auth.getSession();
-
-        if (error || !session?.user) {
-          console.error('OrientationCalendar: No valid session');
-          navigate('/login');
-          return;
-        }
-
-        setAuthUser(session.user);
-        console.log('OrientationCalendar: Authenticated as:', session.user.email);
-
-        const currentBusinessId = localStorage.getItem('currentBusinessId');
-        console.log('OrientationCalendar: Business ID from localStorage:', currentBusinessId);
-
-        if (!currentBusinessId) {
-          setAuthError('No business selected');
-          return;
-        }
-
-        setSelectedBusinessId(currentBusinessId);
-
-        // Verify user has access to this business
-        const { data: userRole, error: roleError } = await supabase
-          .from('user_roles')
-          .select('*')
-          .eq('user_id', session.user.id)
-          .eq('business_id', currentBusinessId)
-          .eq('active', true)
-          .single();
-
-        if (roleError || !userRole) {
-          console.error('OrientationCalendar: User not authorized for this business:', roleError);
-          setAuthError('Not authorized for this business');
-          return;
-        }
-
-        console.log('OrientationCalendar: User role verified:', userRole.role);
-        setAuthLoading(false);
-
-      } catch (err) {
-        console.error('OrientationCalendar: Authentication error:', err);
-        setAuthError(err.message);
-        setAuthLoading(false);
-      }
-    };
-
-    initializeAuth();
-  }, [navigate]);
+    if (!permissionsLoading && !canViewOrientation) {
+      toast.error('You do not have permission to view the Orientation Calendar');
+      navigate('/dashboard/hr/dashboard');
+    }
+  }, [permissionsLoading, canViewOrientation]);
 
   // Load orientation data
   useEffect(() => {
-    if (!authUser || !selectedBusinessId) return;
-    loadOrientationData();
-    loadDashboardSummary();
-  }, [authUser, selectedBusinessId, selectedDate]);
+    if (!authUser || !selectedBusinessId || authLoading || permissionsLoading) return;
+    
+    if (canViewOrientation) {
+      loadOrientationData();
+      loadDashboardSummary();
+    }
+  }, [authUser, selectedBusinessId, selectedDate, authLoading, permissionsLoading, canViewOrientation]);
 
   const loadOrientationData = async () => {
+    if (!canViewOrientation) return;
+
     setLoading(true);
     try {
       const startDate = new Date(selectedDate);
       startDate.setDate(startDate.getDate() - 7);
       const endDate = new Date(selectedDate);
       endDate.setDate(endDate.getDate() + 30);
+
+      await logSecurityEvent('orientation_calendar_access', {
+        action: 'load_orientation_data',
+        business_id: selectedBusinessId,
+        date_range: { start: startDate.toISOString().split('T')[0], end: endDate.toISOString().split('T')[0] }
+      }, 'low');
 
       console.log('Loading orientation data for business:', selectedBusinessId);
 
@@ -101,21 +113,35 @@ const OrientationCalendar = () => {
 
       if (error) {
         console.error('Orientation data error:', error);
-        // Don't throw error, just log it and continue with empty data
         setSessions([]);
+        toast.error('Failed to load orientation sessions');
+
+        await logSecurityEvent('orientation_data_load_failed', {
+          error_message: error.message,
+          business_id: selectedBusinessId
+        }, 'medium');
       } else {
         console.log('Orientation data loaded:', data);
         setSessions(data || []);
+        recordAction('view_orientation_calendar', selectedBusinessId);
       }
     } catch (error) {
       console.error('Error loading orientation data:', error);
       setSessions([]);
+      toast.error('An error occurred while loading orientation data');
+
+      await logSecurityEvent('orientation_data_error', {
+        error_message: error.message,
+        business_id: selectedBusinessId
+      }, 'medium');
     } finally {
       setLoading(false);
     }
   };
 
   const loadDashboardSummary = async () => {
+    if (!canViewOrientation) return;
+
     try {
       console.log('Loading dashboard summary for business:', selectedBusinessId);
       
@@ -125,7 +151,6 @@ const OrientationCalendar = () => {
 
       if (error) {
         console.error('Dashboard summary error:', error);
-        // Set default values instead of throwing error
         setDashboardSummary({
           upcoming_sessions: 0,
           total_registered: 0,
@@ -166,21 +191,44 @@ const OrientationCalendar = () => {
   };
 
   const handleCreateSession = () => {
+    if (!canCreateSessions) {
+      toast.error('You do not have permission to create orientation sessions');
+      return;
+    }
+
     setSelectedSession(null);
     setShowCreateModal(true);
+    recordAction('open_create_session_modal', selectedBusinessId);
   };
 
   const handleScheduleEmployee = (session) => {
+    if (!canScheduleEmployees) {
+      toast.error('You do not have permission to schedule employees for orientation');
+      return;
+    }
+
     setSelectedSession(session);
     setShowScheduleModal(true);
+    recordAction('open_schedule_employee_modal', { session_id: session.event_id });
   };
 
   const handleViewAttendees = (session) => {
+    if (!canViewAttendees) {
+      toast.error('You do not have permission to view orientation attendees');
+      return;
+    }
+
+    recordAction('navigate_to_attendees', { session_id: session.event_id });
     navigate(`/dashboard/hr/orientation/attendance/${session.event_id}`);
   };
 
   const handleBackToHR = () => {
     navigate('/dashboard/hr/dashboard');
+  };
+
+  const handleDateChange = (newDate) => {
+    setSelectedDate(newDate);
+    recordAction('change_calendar_date', { new_date: newDate });
   };
 
   const getNextWeekDates = () => {
@@ -210,13 +258,30 @@ const OrientationCalendar = () => {
     return `${displayHour}:${minutes} ${ampm}`;
   };
 
-  // Loading state
-  if (authLoading) {
+  // Loading states
+  if (permissionsLoading || authLoading) {
     return (
       <div style={styles.container}>
         <div style={styles.loadingContainer}>
           <h3>Loading Orientation Calendar...</h3>
           <p>Authenticating user and loading data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!canViewOrientation) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.errorContainer}>
+          <h3>Access Denied</h3>
+          <p>You do not have permission to view the Orientation Calendar</p>
+          <button 
+            style={styles.backButton}
+            onClick={handleBackToHR}
+          >
+            Back to HR Dashboard
+          </button>
         </div>
       </div>
     );
@@ -241,207 +306,261 @@ const OrientationCalendar = () => {
   }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <div>
-          <h1 style={styles.title}>Orientation Calendar</h1>
-          <button 
-            style={styles.backButton}
-            onClick={handleBackToHR}
-          >
-            ← Back to HR Dashboard
-          </button>
-        </div>
-        <button 
-          style={styles.createButton}
-          onClick={handleCreateSession}
-        >
-          Create Session
-        </button>
-      </div>
-
-      {/* Dashboard Summary */}
-      {dashboardSummary && (
-        <div style={styles.summaryCards}>
-          <div style={styles.summaryCard}>
-            <div style={styles.cardTitle}>Upcoming Sessions</div>
-            <div style={styles.cardValue}>{dashboardSummary.upcoming_sessions || 0}</div>
-          </div>
-          <div style={styles.summaryCard}>
-            <div style={styles.cardTitle}>Total Registered</div>
-            <div style={styles.cardValue}>{dashboardSummary.total_registered || 0}</div>
-          </div>
-          <div style={styles.summaryCard}>
-            <div style={styles.cardTitle}>Pending Attendance</div>
-            <div style={styles.cardValue}>{dashboardSummary.pending_attendance || 0}</div>
-          </div>
-          <div style={styles.summaryCard}>
-            <div style={styles.cardTitle}>Completed</div>
-            <div style={styles.cardValue}>{dashboardSummary.completed_orientations || 0}</div>
-          </div>
-        </div>
-      )}
-
-      {/* Date Navigation */}
-      <div style={styles.dateNavigation}>
-        <button 
-          style={styles.navButton}
-          onClick={() => {
-            const newDate = new Date(selectedDate);
-            newDate.setDate(newDate.getDate() - 7);
-            setSelectedDate(newDate.toISOString().split('T')[0]);
-          }}
-        >
-          ← Previous Week
-        </button>
-        
-        <input
-          type="date"
-          style={styles.dateInput}
-          value={selectedDate}
-          onChange={(e) => setSelectedDate(e.target.value)}
-        />
-        
-        <button 
-          style={styles.navButton}
-          onClick={() => {
-            const newDate = new Date(selectedDate);
-            newDate.setDate(newDate.getDate() + 7);
-            setSelectedDate(newDate.toISOString().split('T')[0]);
-          }}
-        >
-          Next Week →
-        </button>
-      </div>
-
-      {/* Calendar Grid */}
-      <div style={styles.calendarContainer}>
-        {loading ? (
-          <div style={styles.loadingMessage}>Loading sessions...</div>
-        ) : (
-          <div style={styles.weekGrid}>
-            {getNextWeekDates().map((date, index) => {
-              const daysSessions = getSessionsForDate(date);
-              const isToday = date.toDateString() === new Date().toDateString();
-              
-              return (
-                <div key={index} style={{
-                  ...styles.dayColumn,
-                  backgroundColor: isToday ? '#f0f9ff' : 'white'
-                }}>
-                  <div style={styles.dayHeader}>
-                    <div style={styles.dayName}>
-                      {date.toLocaleDateString('en-US', { weekday: 'short' })}
-                    </div>
-                    <div style={styles.dayNumber}>
-                      {date.getDate()}
-                    </div>
-                  </div>
-                  
-                  <div style={styles.sessionsContainer}>
-                    {daysSessions.map((session) => (
-                      <div 
-                        key={session.event_id} 
-                        style={{
-                          ...styles.sessionCard,
-                          backgroundColor: session.attendee_count >= session.max_attendees ? '#fee2e2' : '#f0fdf4'
-                        }}
-                      >
-                        <div style={styles.sessionTime}>
-                          {formatTime(session.start_time)}
-                        </div>
-                        <div style={styles.sessionTitle}>
-                          {session.title}
-                        </div>
-                        <div style={styles.sessionInfo}>
-                          {session.attendee_count}/{session.max_attendees} attendees
-                        </div>
-                        {session.location && (
-                          <div style={styles.sessionLocation}>
-                            📍 {session.location}
-                          </div>
-                        )}
-                        
-                        <div style={styles.sessionActions}>
-                          <button
-                            style={styles.actionButton}
-                            onClick={() => handleScheduleEmployee(session)}
-                          >
-                            Schedule
-                          </button>
-                          <button
-                            style={styles.actionButton}
-                            onClick={() => handleViewAttendees(session)}
-                          >
-                            Attendees
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                    
-                    {daysSessions.length === 0 && (
-                      <div style={styles.noSessions}>
-                        No sessions scheduled
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Next Session Highlight */}
-      {dashboardSummary?.next_session_date && (
-        <div style={styles.nextSessionCard}>
-          <h3 style={styles.nextSessionTitle}>Next Session</h3>
-          <div style={styles.nextSessionInfo}>
-            <strong>{dashboardSummary.next_session_title}</strong>
-            <br />
-            {new Date(dashboardSummary.next_session_date).toLocaleDateString()}
-            <br />
-            {dashboardSummary.available_spots_next} spots available
-          </div>
-        </div>
-      )}
-
-      {/* Modals */}
-      {showCreateModal && (
-        <div style={styles.modalOverlay}>
-          <div style={styles.modal}>
-            <div style={styles.modalHeader}>
-              <h3>Create Orientation Session</h3>
-              <button onClick={() => setShowCreateModal(false)} style={styles.modalClose}>×</button>
-            </div>
-            <div style={styles.modalContent}>
-              <p>Create session functionality will be implemented in a future step.</p>
-              <p>For now, you can create sessions directly in the database.</p>
+    <POSAuthWrapper
+      requiredRoles={['owner', 'manager', 'admin', 'hr_admin']}
+      requireBusiness={true}
+      componentName="OrientationCalendar"
+    >
+      <SecurityWrapper>
+        <div style={styles.container}>
+          <div style={styles.header}>
+            <div>
+              <h1 style={styles.title}>Orientation Calendar</h1>
               <button 
-                style={styles.createButton} 
-                onClick={() => setShowCreateModal(false)}
+                style={styles.backButton}
+                onClick={handleBackToHR}
               >
-                Close
+                ← Back to HR Dashboard
               </button>
             </div>
+            
+            <PermissionGate 
+              permissions={['hr.orientation.create']} 
+              requireElevated
+              fallback={
+                <button 
+                  disabled
+                  style={{...styles.createButton, opacity: 0.5, cursor: 'not-allowed'}}
+                  title="You do not have permission to create sessions"
+                >
+                  Create Session
+                </button>
+              }
+            >
+              <button 
+                style={styles.createButton}
+                onClick={handleCreateSession}
+              >
+                Create Session
+              </button>
+            </PermissionGate>
           </div>
-        </div>
-      )}
 
-      {showScheduleModal && selectedSession && (
-        <ScheduleOrientationModal
-          isOpen={showScheduleModal}
-          onClose={() => setShowScheduleModal(false)}
-          businessId={selectedBusinessId}
-          selectedSession={selectedSession}
-          onEmployeeScheduled={() => {
-            setShowScheduleModal(false);
-            loadOrientationData();
-            loadDashboardSummary();
-          }}
-        />
-      )}
-    </div>
+          {/* Dashboard Summary */}
+          {dashboardSummary && (
+            <div style={styles.summaryCards}>
+              <div style={styles.summaryCard}>
+                <div style={styles.cardTitle}>Upcoming Sessions</div>
+                <div style={styles.cardValue}>{dashboardSummary.upcoming_sessions || 0}</div>
+              </div>
+              <div style={styles.summaryCard}>
+                <div style={styles.cardTitle}>Total Registered</div>
+                <div style={styles.cardValue}>{dashboardSummary.total_registered || 0}</div>
+              </div>
+              <div style={styles.summaryCard}>
+                <div style={styles.cardTitle}>Pending Attendance</div>
+                <div style={styles.cardValue}>{dashboardSummary.pending_attendance || 0}</div>
+              </div>
+              <div style={styles.summaryCard}>
+                <div style={styles.cardTitle}>Completed</div>
+                <div style={styles.cardValue}>{dashboardSummary.completed_orientations || 0}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Date Navigation */}
+          <div style={styles.dateNavigation}>
+            <button 
+              style={styles.navButton}
+              onClick={() => {
+                const newDate = new Date(selectedDate);
+                newDate.setDate(newDate.getDate() - 7);
+                handleDateChange(newDate.toISOString().split('T')[0]);
+              }}
+            >
+              ← Previous Week
+            </button>
+            
+            <input
+              type="date"
+              style={styles.dateInput}
+              value={selectedDate}
+              onChange={(e) => handleDateChange(e.target.value)}
+            />
+            
+            <button 
+              style={styles.navButton}
+              onClick={() => {
+                const newDate = new Date(selectedDate);
+                newDate.setDate(newDate.getDate() + 7);
+                handleDateChange(newDate.toISOString().split('T')[0]);
+              }}
+            >
+              Next Week →
+            </button>
+          </div>
+
+          {/* Calendar Grid */}
+          <div style={styles.calendarContainer}>
+            {loading ? (
+              <div style={styles.loadingMessage}>Loading sessions...</div>
+            ) : (
+              <div style={styles.weekGrid}>
+                {getNextWeekDates().map((date, index) => {
+                  const daysSessions = getSessionsForDate(date);
+                  const isToday = date.toDateString() === new Date().toDateString();
+                  
+                  return (
+                    <div key={index} style={{
+                      ...styles.dayColumn,
+                      backgroundColor: isToday ? '#f0f9ff' : 'white'
+                    }}>
+                      <div style={styles.dayHeader}>
+                        <div style={styles.dayName}>
+                          {date.toLocaleDateString('en-US', { weekday: 'short' })}
+                        </div>
+                        <div style={styles.dayNumber}>
+                          {date.getDate()}
+                        </div>
+                      </div>
+                      
+                      <div style={styles.sessionsContainer}>
+                        {daysSessions.map((session) => (
+                          <div 
+                            key={session.event_id} 
+                            style={{
+                              ...styles.sessionCard,
+                              backgroundColor: session.attendee_count >= session.max_attendees ? '#fee2e2' : '#f0fdf4'
+                            }}
+                          >
+                            <div style={styles.sessionTime}>
+                              {formatTime(session.start_time)}
+                            </div>
+                            <div style={styles.sessionTitle}>
+                              {session.title}
+                            </div>
+                            <div style={styles.sessionInfo}>
+                              {session.attendee_count}/{session.max_attendees} attendees
+                            </div>
+                            {session.location && (
+                              <div style={styles.sessionLocation}>
+                                📍 {session.location}
+                              </div>
+                            )}
+                            
+                            <div style={styles.sessionActions}>
+                              <PermissionGate 
+                                permissions={['hr.orientation.schedule']} 
+                                requireElevated
+                                fallback={
+                                  <button
+                                    disabled
+                                    style={{...styles.actionButton, opacity: 0.5, cursor: 'not-allowed'}}
+                                    title="No permission"
+                                  >
+                                    Schedule
+                                  </button>
+                                }
+                              >
+                                <button
+                                  style={styles.actionButton}
+                                  onClick={() => handleScheduleEmployee(session)}
+                                >
+                                  Schedule
+                                </button>
+                              </PermissionGate>
+                              
+                              <PermissionGate 
+                                permissions={['hr.orientation.view_attendees']} 
+                                requireElevated
+                                fallback={
+                                  <button
+                                    disabled
+                                    style={{...styles.actionButton, opacity: 0.5, cursor: 'not-allowed'}}
+                                    title="No permission"
+                                  >
+                                    Attendees
+                                  </button>
+                                }
+                              >
+                                <button
+                                  style={styles.actionButton}
+                                  onClick={() => handleViewAttendees(session)}
+                                >
+                                  Attendees
+                                </button>
+                              </PermissionGate>
+                            </div>
+                          </div>
+                        ))}
+                        
+                        {daysSessions.length === 0 && (
+                          <div style={styles.noSessions}>
+                            No sessions scheduled
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Next Session Highlight */}
+          {dashboardSummary?.next_session_date && (
+            <div style={styles.nextSessionCard}>
+              <h3 style={styles.nextSessionTitle}>Next Session</h3>
+              <div style={styles.nextSessionInfo}>
+                <strong>{dashboardSummary.next_session_title}</strong>
+                <br />
+                {new Date(dashboardSummary.next_session_date).toLocaleDateString()}
+                <br />
+                {dashboardSummary.available_spots_next} spots available
+              </div>
+            </div>
+          )}
+
+          {/* Modals */}
+          {showCreateModal && canCreateSessions && (
+            <div style={styles.modalOverlay}>
+              <div style={styles.modal}>
+                <div style={styles.modalHeader}>
+                  <h3>Create Orientation Session</h3>
+                  <button onClick={() => setShowCreateModal(false)} style={styles.modalClose}>×</button>
+                </div>
+                <div style={styles.modalContent}>
+                  <p>Create session functionality will be implemented in a future step.</p>
+                  <p>For now, you can create sessions directly in the database.</p>
+                  <button 
+                    style={styles.createButton} 
+                    onClick={() => setShowCreateModal(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showScheduleModal && selectedSession && canScheduleEmployees && (
+            <ScheduleOrientationModal
+              isOpen={showScheduleModal}
+              onClose={() => setShowScheduleModal(false)}
+              businessId={selectedBusinessId}
+              selectedSession={selectedSession}
+              onEmployeeScheduled={() => {
+                setShowScheduleModal(false);
+                loadOrientationData();
+                loadDashboardSummary();
+                toast.success('Employee scheduled successfully');
+                recordAction('employee_scheduled', { session_id: selectedSession.event_id });
+              }}
+            />
+          )}
+        </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 

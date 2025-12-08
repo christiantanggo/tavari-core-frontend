@@ -1,50 +1,118 @@
-// screens/Mail/ContactDetails.jsx
+// screens/Mail/ContactDetails.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import EmailPauseBanner, { blockEmailSendIfPaused } from '../../components/EmailPauseBanner';
 import { 
   FiArrowLeft, FiEdit3, FiSave, FiX, FiMail, FiPhone, FiUser, 
-  FiTag, FiCalendar, FiUserCheck, FiUserX, FiTrash2, FiRefreshCw, FiSend
+  FiTag, FiCalendar, FiUserCheck, FiUserX, FiTrash2, FiRefreshCw, 
+  FiSend, FiAlertCircle
 } from 'react-icons/fi';
+
+// Permission System Imports
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import toast from 'react-hot-toast';
 
 const ContactDetails = () => {
   const navigate = useNavigate();
   const { id } = useParams();
+  
+  // Security context for contact data
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'ContactDetails',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'medium'
+  });
+
+  // Authentication using standardized hook
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin'],
+    requireBusiness: true,
+    componentName: 'ContactDetails'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   const [contact, setContact] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editData, setEditData] = useState({});
   const [errors, setErrors] = useState({});
-  const [businessId, setBusinessId] = useState(null);
   const [engagementHistory, setEngagementHistory] = useState([]);
 
+  const businessId = selectedBusinessId;
+
+  // Permission checks
+  const canViewContacts = hasPermission('mail.contacts.view') || hasElevatedPrivileges();
+  const canEditContacts = hasPermission('mail.contacts.import') || hasElevatedPrivileges();
+  const canDeleteContacts = hasPermission('mail.contacts.export') || hasElevatedPrivileges();
+  const canSendEmails = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
+
+  // Check permissions on mount
   useEffect(() => {
-    getCurrentBusiness();
-  }, []);
+    if (!permissionsLoading && !authLoading && !canViewContacts) {
+      toast.error('You do not have permission to view contact details');
+      navigate('/dashboard/mail/contacts');
+    }
+  }, [permissionsLoading, authLoading, canViewContacts]);
 
   useEffect(() => {
-    if (businessId && id) {
+    if (businessId && id && !authLoading && !permissionsLoading && canViewContacts) {
       loadContact();
       loadEngagementHistory();
     }
-  }, [businessId, id]);
-
-  const getCurrentBusiness = async () => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        setBusinessId(user.id);
-      }
-    } catch (error) {
-      console.error('Error getting current business:', error);
-    }
-  };
+  }, [businessId, id, authLoading, permissionsLoading, canViewContacts]);
 
   const loadContact = async () => {
+    // Permission check
+    if (!canViewContacts) {
+      toast.error('You do not have permission to view contacts');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('load_contact', 20, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
     try {
       setLoading(true);
+
+      await logSecurityEvent('contact_details_access', {
+        action: 'load_contact_details',
+        contact_id: id,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
+
       const { data, error } = await supabase
         .from('mail_contacts')
         .select('*')
@@ -63,12 +131,15 @@ const ContactDetails = () => {
         tags: (data.tags || []).join(', '),
         subscribed: data.subscribed
       });
+
+      await recordAction('contact_loaded', true, id);
     } catch (error) {
       console.error('Error loading contact:', error);
       if (error.code === 'PGRST116') {
         // Contact not found
         navigate('/dashboard/mail/contacts');
       }
+      await recordAction('contact_loaded', false, id);
     } finally {
       setLoading(false);
     }
@@ -117,10 +188,29 @@ const ContactDetails = () => {
   };
 
   const handleSave = async () => {
+    // Permission check
+    if (!canEditContacts) {
+      toast.error('You do not have permission to edit contacts');
+      return;
+    }
+
     if (!validateForm()) return;
+
+    // Rate limiting
+    if (!checkRateLimit('update_contact', 10, 60000)) {
+      toast.error('Too many update requests. Please wait a moment.');
+      return;
+    }
 
     setSaving(true);
     try {
+      await logSecurityEvent('contact_update', {
+        action: 'update_contact',
+        contact_id: id,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
+
       // Clean phone number
       const cleanPhone = editData.phone ? editData.phone.replace(/\D/g, '') : '';
       const formattedPhone = cleanPhone.length >= 10 ? 
@@ -175,19 +265,44 @@ const ContactDetails = () => {
       await loadContact();
       setEditing(false);
       setErrors({});
+      toast.success('Contact updated successfully');
+      await recordAction('contact_updated', true, id);
     } catch (error) {
       console.error('Error updating contact:', error);
       setErrors({ submit: 'Failed to update contact. Please try again.' });
+      toast.error('Failed to update contact');
+      await recordAction('contact_updated', false, id);
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async () => {
+    // Permission check
+    if (!canDeleteContacts) {
+      toast.error('You do not have permission to delete contacts');
+      return;
+    }
+
     const confirmMessage = `Delete contact "${contact.first_name} ${contact.last_name}" permanently?`;
     if (!window.confirm(confirmMessage)) return;
 
+    // Rate limiting
+    if (!checkRateLimit('delete_contact', 5, 60000)) {
+      toast.error('Too many delete requests. Please wait a moment.');
+      return;
+    }
+
     try {
+      await logSecurityEvent('contact_delete', {
+        action: 'delete_contact',
+        contact_id: id,
+        contact_email: contact.email,
+        contact_name: `${contact.first_name} ${contact.last_name}`,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'high');
+
       const { error } = await supabase
         .from('mail_contacts')
         .delete()
@@ -207,16 +322,40 @@ const ContactDetails = () => {
         created_at: new Date().toISOString()
       });
 
+      toast.success('Contact deleted successfully');
+      await recordAction('contact_deleted', true, id);
       navigate('/dashboard/mail/contacts');
     } catch (error) {
       console.error('Error deleting contact:', error);
-      alert('Failed to delete contact. Please try again.');
+      toast.error('Failed to delete contact. Please try again.');
+      await recordAction('contact_deleted', false, id);
     }
   };
 
   const handleSubscriptionToggle = async () => {
+    // Permission check
+    if (!canEditContacts) {
+      toast.error('You do not have permission to modify contact subscriptions');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('toggle_subscription', 10, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
     try {
       const newSubscribed = !contact.subscribed;
+
+      await logSecurityEvent('contact_subscription_toggle', {
+        action: newSubscribed ? 'resubscribe_contact' : 'unsubscribe_contact',
+        contact_id: id,
+        contact_email: contact.email,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
+
       const updates = {
         subscribed: newSubscribed,
         updated_at: new Date().toISOString()
@@ -248,22 +387,53 @@ const ContactDetails = () => {
       });
 
       await loadContact();
+      toast.success(newSubscribed ? 'Contact resubscribed' : 'Contact unsubscribed');
+      await recordAction('subscription_toggled', true, id);
     } catch (error) {
       console.error('Error updating subscription:', error);
-      alert('Failed to update subscription status. Please try again.');
+      toast.error('Failed to update subscription status. Please try again.');
+      await recordAction('subscription_toggled', false, id);
     }
   };
 
   const handleSendDirectEmail = async () => {
+    // Permission check
+    if (!canSendEmails) {
+      toast.error('You do not have permission to send emails');
+      return;
+    }
+
     if (blockEmailSendIfPaused('Direct email sending')) return;
     
+    await logSecurityEvent('direct_email_attempt', {
+      action: 'attempt_direct_email',
+      contact_id: id,
+      contact_email: contact.email,
+      business_id: businessId,
+      user_id: authUser?.id
+    }, 'medium');
+
     // TODO: Implement direct email sending functionality
-    alert('Direct email sending functionality will be implemented when email service is ready.');
+    toast.info('Direct email sending functionality will be implemented when email service is ready.');
   };
 
   const handleAddToCampaign = async () => {
+    // Permission check
+    if (!canSendEmails) {
+      toast.error('You do not have permission to add contacts to campaigns');
+      return;
+    }
+
     if (blockEmailSendIfPaused('Adding to campaign')) return;
     
+    await logSecurityEvent('add_to_campaign_navigation', {
+      action: 'navigate_add_to_campaign',
+      contact_id: id,
+      contact_email: contact.email,
+      business_id: businessId,
+      user_id: authUser?.id
+    }, 'low');
+
     // Navigate to campaigns or show campaign selection modal
     navigate('/dashboard/mail/campaigns', { 
       state: { 
@@ -305,340 +475,394 @@ const ContactDetails = () => {
     }
   };
 
-  if (loading) {
+  if (authLoading || permissionsLoading || loading) {
     return (
-      <div style={styles.container}>
-        <EmailPauseBanner />
-        <div style={styles.loading}>Loading contact...</div>
-      </div>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <EmailPauseBanner />
+          <div style={styles.loading}>Loading contact...</div>
+        </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  if (authError) {
+    return (
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <EmailPauseBanner />
+          <div style={styles.errorState}>
+            <FiAlertCircle style={styles.errorIcon} />
+            <h2>Authentication Error</h2>
+            <p>{authError}</p>
+          </div>
+        </div>
+      </POSAuthWrapper>
     );
   }
 
   if (!contact) {
     return (
-      <div style={styles.container}>
-        <EmailPauseBanner />
-        <div style={styles.notFound}>Contact not found</div>
-      </div>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <EmailPauseBanner />
+          <div style={styles.notFound}>Contact not found</div>
+        </div>
+      </POSAuthWrapper>
     );
   }
 
   return (
-    <div style={styles.container}>
-      <EmailPauseBanner />
-      
-      {/* Header */}
-      <div style={styles.header}>
-        <div style={styles.headerLeft}>
-          <button 
-            style={styles.backButton}
-            onClick={() => navigate('/dashboard/mail/contacts')}
-          >
-            <FiArrowLeft style={styles.buttonIcon} />
-            Back to Contacts
-          </button>
-          <h1 style={styles.title}>
-            {contact.first_name} {contact.last_name}
-          </h1>
-          <div style={styles.statusBadge}>
-            {contact.subscribed ? (
-              <>
-                <FiUserCheck style={styles.statusIcon} />
-                <span>Subscribed</span>
-              </>
-            ) : (
-              <>
-                <FiUserX style={styles.statusIcon} />
-                <span>Unsubscribed</span>
-              </>
-            )}
-          </div>
-        </div>
-        
-        <div style={styles.headerActions}>
-          {contact.subscribed && (
-            <>
+    <POSAuthWrapper>
+      <SecurityWrapper>
+        <div style={styles.container}>
+          <EmailPauseBanner />
+          
+          {/* Header */}
+          <div style={styles.header}>
+            <div style={styles.headerLeft}>
               <button 
-                style={styles.emailButton}
-                onClick={handleSendDirectEmail}
+                style={styles.backButton}
+                onClick={() => navigate('/dashboard/mail/contacts')}
               >
-                <FiSend style={styles.buttonIcon} />
-                Send Email
+                <FiArrowLeft style={styles.buttonIcon} />
+                Back to Contacts
               </button>
-              <button 
-                style={styles.campaignButton}
-                onClick={handleAddToCampaign}
-              >
-                <FiMail style={styles.buttonIcon} />
-                Add to Campaign
-              </button>
-            </>
-          )}
-          <button 
-            style={styles.subscriptionButton}
-            onClick={handleSubscriptionToggle}
-          >
-            {contact.subscribed ? <FiUserX /> : <FiUserCheck />}
-            {contact.subscribed ? 'Unsubscribe' : 'Resubscribe'}
-          </button>
-          {!editing ? (
-            <button 
-              style={styles.editButton}
-              onClick={() => setEditing(true)}
-            >
-              <FiEdit3 style={styles.buttonIcon} />
-              Edit Contact
-            </button>
-          ) : (
-            <div style={styles.editActions}>
-              <button 
-                style={styles.cancelButton}
-                onClick={() => {
-                  setEditing(false);
-                  setErrors({});
-                  // Reset edit data
-                  setEditData({
-                    first_name: contact.first_name || '',
-                    last_name: contact.last_name || '',
-                    email: contact.email || '',
-                    phone: contact.phone || '',
-                    tags: (contact.tags || []).join(', '),
-                    subscribed: contact.subscribed
-                  });
-                }}
-                disabled={saving}
-              >
-                <FiX style={styles.buttonIcon} />
-                Cancel
-              </button>
-              <button 
-                style={styles.saveButton}
-                onClick={handleSave}
-                disabled={saving}
-              >
-                <FiSave style={styles.buttonIcon} />
-                {saving ? 'Saving...' : 'Save'}
-              </button>
+              <h1 style={styles.title}>
+                {contact.first_name} {contact.last_name}
+              </h1>
+              <div style={styles.statusBadge}>
+                {contact.subscribed ? (
+                  <>
+                    <FiUserCheck style={styles.statusIcon} />
+                    <span>Subscribed</span>
+                  </>
+                ) : (
+                  <>
+                    <FiUserX style={styles.statusIcon} />
+                    <span>Unsubscribed</span>
+                  </>
+                )}
+              </div>
             </div>
-          )}
-        </div>
-      </div>
-
-      {/* Contact Information */}
-      <div style={styles.content}>
-        <div style={styles.mainSection}>
-          <div style={styles.contactCard}>
-            <h2 style={styles.sectionTitle}>Contact Information</h2>
             
-            {editing ? (
-              <div style={styles.editForm}>
-                <div style={styles.formRow}>
-                  <div style={styles.formGroup}>
-                    <label style={styles.label}>
-                      <FiUser style={styles.labelIcon} />
-                      First Name *
-                    </label>
-                    <input
-                      type="text"
-                      style={{
-                        ...styles.input,
-                        ...(errors.first_name ? styles.inputError : {})
+            <div style={styles.headerActions}>
+              <PermissionGate permission="mail.campaigns.send">
+                {contact.subscribed && (
+                  <>
+                    <button 
+                      style={styles.emailButton}
+                      onClick={handleSendDirectEmail}
+                    >
+                      <FiSend style={styles.buttonIcon} />
+                      Send Email
+                    </button>
+                    <button 
+                      style={styles.campaignButton}
+                      onClick={handleAddToCampaign}
+                    >
+                      <FiMail style={styles.buttonIcon} />
+                      Add to Campaign
+                    </button>
+                  </>
+                )}
+              </PermissionGate>
+              
+              <PermissionGate permission="mail.contacts.import">
+                <button 
+                  style={styles.subscriptionButton}
+                  onClick={handleSubscriptionToggle}
+                >
+                  {contact.subscribed ? <FiUserX /> : <FiUserCheck />}
+                  {contact.subscribed ? 'Unsubscribe' : 'Resubscribe'}
+                </button>
+              </PermissionGate>
+
+              <PermissionGate permission="mail.contacts.import">
+                {!editing ? (
+                  <button 
+                    style={styles.editButton}
+                    onClick={() => setEditing(true)}
+                  >
+                    <FiEdit3 style={styles.buttonIcon} />
+                    Edit Contact
+                  </button>
+                ) : (
+                  <div style={styles.editActions}>
+                    <button 
+                      style={styles.cancelButton}
+                      onClick={() => {
+                        setEditing(false);
+                        setErrors({});
+                        // Reset edit data
+                        setEditData({
+                          first_name: contact.first_name || '',
+                          last_name: contact.last_name || '',
+                          email: contact.email || '',
+                          phone: contact.phone || '',
+                          tags: (contact.tags || []).join(', '),
+                          subscribed: contact.subscribed
+                        });
                       }}
-                      value={editData.first_name}
-                      onChange={(e) => setEditData(prev => ({ ...prev, first_name: e.target.value }))}
-                    />
-                    {errors.first_name && <span style={styles.errorText}>{errors.first_name}</span>}
-                  </div>
-
-                  <div style={styles.formGroup}>
-                    <label style={styles.label}>
-                      <FiUser style={styles.labelIcon} />
-                      Last Name
-                    </label>
-                    <input
-                      type="text"
-                      style={styles.input}
-                      value={editData.last_name}
-                      onChange={(e) => setEditData(prev => ({ ...prev, last_name: e.target.value }))}
-                    />
-                  </div>
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>
-                    <FiMail style={styles.labelIcon} />
-                    Email Address *
-                  </label>
-                  <input
-                    type="email"
-                    style={{
-                      ...styles.input,
-                      ...(errors.email ? styles.inputError : {})
-                    }}
-                    value={editData.email}
-                    onChange={(e) => setEditData(prev => ({ ...prev, email: e.target.value }))}
-                  />
-                  {errors.email && <span style={styles.errorText}>{errors.email}</span>}
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>
-                    <FiPhone style={styles.labelIcon} />
-                    Phone Number
-                  </label>
-                  <input
-                    type="tel"
-                    style={styles.input}
-                    value={editData.phone}
-                    onChange={(e) => setEditData(prev => ({ ...prev, phone: e.target.value }))}
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>
-                    <FiTag style={styles.labelIcon} />
-                    Tags (comma-separated)
-                  </label>
-                  <input
-                    type="text"
-                    style={styles.input}
-                    value={editData.tags}
-                    onChange={(e) => setEditData(prev => ({ ...prev, tags: e.target.value }))}
-                    placeholder="customer, birthday-party, vip"
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={editData.subscribed}
-                      onChange={(e) => setEditData(prev => ({ ...prev, subscribed: e.target.checked }))}
-                      style={styles.checkbox}
-                    />
-                    Subscribed to emails
-                  </label>
-                </div>
-
-                {errors.submit && (
-                  <div style={styles.errorMessage}>
-                    {errors.submit}
+                      disabled={saving}
+                    >
+                      <FiX style={styles.buttonIcon} />
+                      Cancel
+                    </button>
+                    <button 
+                      style={styles.saveButton}
+                      onClick={handleSave}
+                      disabled={saving}
+                    >
+                      <FiSave style={styles.buttonIcon} />
+                      {saving ? 'Saving...' : 'Save'}
+                    </button>
                   </div>
                 )}
-              </div>
-            ) : (
-              <div style={styles.contactInfo}>
-                <div style={styles.infoRow}>
-                  <FiMail style={styles.infoIcon} />
-                  <span style={styles.infoLabel}>Email:</span>
-                  <span style={styles.infoValue}>{contact.email}</span>
-                </div>
-
-                {contact.phone && (
-                  <div style={styles.infoRow}>
-                    <FiPhone style={styles.infoIcon} />
-                    <span style={styles.infoLabel}>Phone:</span>
-                    <span style={styles.infoValue}>{contact.phone}</span>
-                  </div>
-                )}
-
-                <div style={styles.infoRow}>
-                  <FiTag style={styles.infoIcon} />
-                  <span style={styles.infoLabel}>Tags:</span>
-                  <div style={styles.tags}>
-                    {(contact.tags || []).length > 0 ? 
-                      contact.tags.map(tag => (
-                        <span key={tag} style={styles.tag}>{tag}</span>
-                      )) : 
-                      <span style={styles.noTags}>No tags</span>
-                    }
-                  </div>
-                </div>
-
-                <div style={styles.infoRow}>
-                  <FiCalendar style={styles.infoIcon} />
-                  <span style={styles.infoLabel}>Added:</span>
-                  <span style={styles.infoValue}>{formatDate(contact.created_at)}</span>
-                </div>
-
-                <div style={styles.infoRow}>
-                  <FiRefreshCw style={styles.infoIcon} />
-                  <span style={styles.infoLabel}>Last Updated:</span>
-                  <span style={styles.infoValue}>{formatDate(contact.updated_at)}</span>
-                </div>
-
-                <div style={styles.infoRow}>
-                  <FiUser style={styles.infoIcon} />
-                  <span style={styles.infoLabel}>Source:</span>
-                  <span style={styles.infoValue}>{contact.source}</span>
-                </div>
-
-                {contact.unsubscribed_at && (
-                  <div style={styles.infoRow}>
-                    <FiUserX style={styles.infoIcon} />
-                    <span style={styles.infoLabel}>Unsubscribed:</span>
-                    <span style={styles.infoValue}>{formatDate(contact.unsubscribed_at)}</span>
-                  </div>
-                )}
-              </div>
-            )}
+              </PermissionGate>
+            </div>
           </div>
 
-          {/* Engagement History */}
-          <div style={styles.historyCard}>
-            <h2 style={styles.sectionTitle}>Engagement History</h2>
-            {engagementHistory.length > 0 ? (
-              <div style={styles.historyList}>
-                {engagementHistory.map(item => (
-                  <div key={item.id} style={styles.historyItem}>
-                    <div style={styles.historyIcon}>
-                      {getEngagementIcon(item.type)}
-                    </div>
-                    <div style={styles.historyContent}>
-                      <div style={styles.historyDescription}>
-                        {getEngagementDescription(item)}
+          {/* Contact Information */}
+          <div style={styles.content}>
+            <div style={styles.mainSection}>
+              <div style={styles.contactCard}>
+                <h2 style={styles.sectionTitle}>Contact Information</h2>
+                
+                {editing ? (
+                  <PermissionGate 
+                    permission="mail.contacts.import"
+                    fallback={
+                      <div style={styles.permissionDenied}>
+                        <FiAlertCircle style={styles.permissionIcon} />
+                        <p>You do not have permission to edit contacts</p>
                       </div>
-                      <div style={styles.historyDate}>
-                        {formatDate(item.date)}
+                    }
+                  >
+                    <div style={styles.editForm}>
+                      <div style={styles.formRow}>
+                        <div style={styles.formGroup}>
+                          <label style={styles.label}>
+                            <FiUser style={styles.labelIcon} />
+                            First Name *
+                          </label>
+                          <input
+                            type="text"
+                            style={{
+                              ...styles.input,
+                              ...(errors.first_name ? styles.inputError : {})
+                            }}
+                            value={editData.first_name}
+                            onChange={(e) => setEditData(prev => ({ ...prev, first_name: e.target.value }))}
+                          />
+                          {errors.first_name && <span style={styles.errorText}>{errors.first_name}</span>}
+                        </div>
+
+                        <div style={styles.formGroup}>
+                          <label style={styles.label}>
+                            <FiUser style={styles.labelIcon} />
+                            Last Name
+                          </label>
+                          <input
+                            type="text"
+                            style={styles.input}
+                            value={editData.last_name}
+                            onChange={(e) => setEditData(prev => ({ ...prev, last_name: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+
+                      <div style={styles.formGroup}>
+                        <label style={styles.label}>
+                          <FiMail style={styles.labelIcon} />
+                          Email Address *
+                        </label>
+                        <input
+                          type="email"
+                          style={{
+                            ...styles.input,
+                            ...(errors.email ? styles.inputError : {})
+                          }}
+                          value={editData.email}
+                          onChange={(e) => setEditData(prev => ({ ...prev, email: e.target.value }))}
+                        />
+                        {errors.email && <span style={styles.errorText}>{errors.email}</span>}
+                      </div>
+
+                      <div style={styles.formGroup}>
+                        <label style={styles.label}>
+                          <FiPhone style={styles.labelIcon} />
+                          Phone Number
+                        </label>
+                        <input
+                          type="tel"
+                          style={styles.input}
+                          value={editData.phone}
+                          onChange={(e) => setEditData(prev => ({ ...prev, phone: e.target.value }))}
+                        />
+                      </div>
+
+                      <div style={styles.formGroup}>
+                        <label style={styles.label}>
+                          <FiTag style={styles.labelIcon} />
+                          Tags (comma-separated)
+                        </label>
+                        <input
+                          type="text"
+                          style={styles.input}
+                          value={editData.tags}
+                          onChange={(e) => setEditData(prev => ({ ...prev, tags: e.target.value }))}
+                          placeholder="customer, birthday-party, vip"
+                        />
+                      </div>
+
+                      <div style={styles.formGroup}>
+                        <label style={styles.checkboxLabel}>
+                          <input
+                            type="checkbox"
+                            checked={editData.subscribed}
+                            onChange={(e) => setEditData(prev => ({ ...prev, subscribed: e.target.checked }))}
+                            style={styles.checkbox}
+                          />
+                          Subscribed to emails
+                        </label>
+                      </div>
+
+                      {errors.submit && (
+                        <div style={styles.errorMessage}>
+                          {errors.submit}
+                        </div>
+                      )}
+                    </div>
+                  </PermissionGate>
+                ) : (
+                  <div style={styles.contactInfo}>
+                    <div style={styles.infoRow}>
+                      <FiMail style={styles.infoIcon} />
+                      <span style={styles.infoLabel}>Email:</span>
+                      <span style={styles.infoValue}>{contact.email}</span>
+                    </div>
+
+                    {contact.phone && (
+                      <div style={styles.infoRow}>
+                        <FiPhone style={styles.infoIcon} />
+                        <span style={styles.infoLabel}>Phone:</span>
+                        <span style={styles.infoValue}>{contact.phone}</span>
+                      </div>
+                    )}
+
+                    <div style={styles.infoRow}>
+                      <FiTag style={styles.infoIcon} />
+                      <span style={styles.infoLabel}>Tags:</span>
+                      <div style={styles.tags}>
+                        {(contact.tags || []).length > 0 ? 
+                          contact.tags.map(tag => (
+                            <span key={tag} style={styles.tag}>{tag}</span>
+                          )) : 
+                          <span style={styles.noTags}>No tags</span>
+                        }
                       </div>
                     </div>
-                    {item.status && (
-                      <div style={styles.historyStatus}>
-                        {item.status}
+
+                    <div style={styles.infoRow}>
+                      <FiCalendar style={styles.infoIcon} />
+                      <span style={styles.infoLabel}>Added:</span>
+                      <span style={styles.infoValue}>{formatDate(contact.created_at)}</span>
+                    </div>
+
+                    <div style={styles.infoRow}>
+                      <FiRefreshCw style={styles.infoIcon} />
+                      <span style={styles.infoLabel}>Last Updated:</span>
+                      <span style={styles.infoValue}>{formatDate(contact.updated_at)}</span>
+                    </div>
+
+                    <div style={styles.infoRow}>
+                      <FiUser style={styles.infoIcon} />
+                      <span style={styles.infoLabel}>Source:</span>
+                      <span style={styles.infoValue}>{contact.source}</span>
+                    </div>
+
+                    {contact.unsubscribed_at && (
+                      <div style={styles.infoRow}>
+                        <FiUserX style={styles.infoIcon} />
+                        <span style={styles.infoLabel}>Unsubscribed:</span>
+                        <span style={styles.infoValue}>{formatDate(contact.unsubscribed_at)}</span>
                       </div>
                     )}
                   </div>
-                ))}
+                )}
               </div>
-            ) : (
-              <div style={styles.noHistory}>
-                <p>No engagement history yet.</p>
-                <p style={styles.noHistorySubtext}>
-                  Engagement history will appear here when this contact receives campaigns or makes subscription changes.
+
+              {/* Engagement History */}
+              <div style={styles.historyCard}>
+                <h2 style={styles.sectionTitle}>Engagement History</h2>
+                {engagementHistory.length > 0 ? (
+                  <div style={styles.historyList}>
+                    {engagementHistory.map(item => (
+                      <div key={item.id} style={styles.historyItem}>
+                        <div style={styles.historyIcon}>
+                          {getEngagementIcon(item.type)}
+                        </div>
+                        <div style={styles.historyContent}>
+                          <div style={styles.historyDescription}>
+                            {getEngagementDescription(item)}
+                          </div>
+                          <div style={styles.historyDate}>
+                            {formatDate(item.date)}
+                          </div>
+                        </div>
+                        {item.status && (
+                          <div style={styles.historyStatus}>
+                            {item.status}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={styles.noHistory}>
+                    <p>No engagement history yet.</p>
+                    <p style={styles.noHistorySubtext}>
+                      Engagement history will appear here when this contact receives campaigns or makes subscription changes.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Danger Zone */}
+            <PermissionGate 
+              permission="mail.contacts.export"
+              fallback={
+                <div style={styles.dangerZone}>
+                  <h3 style={styles.dangerTitle}>Delete Contact</h3>
+                  <div style={styles.permissionDenied}>
+                    <FiAlertCircle style={styles.permissionIcon} />
+                    <p>You do not have permission to delete contacts</p>
+                  </div>
+                </div>
+              }
+            >
+              <div style={styles.dangerZone}>
+                <h3 style={styles.dangerTitle}>Danger Zone</h3>
+                <div style={styles.dangerActions}>
+                  <button 
+                    style={styles.deleteButton}
+                    onClick={handleDelete}
+                  >
+                    <FiTrash2 style={styles.buttonIcon} />
+                    Delete Contact
+                  </button>
+                </div>
+                <p style={styles.dangerText}>
+                  This action cannot be undone. The contact will be permanently removed from your database.
                 </p>
               </div>
-            )}
+            </PermissionGate>
           </div>
         </div>
-
-        {/* Danger Zone */}
-        <div style={styles.dangerZone}>
-          <h3 style={styles.dangerTitle}>Danger Zone</h3>
-          <div style={styles.dangerActions}>
-            <button 
-              style={styles.deleteButton}
-              onClick={handleDelete}
-            >
-              <FiTrash2 style={styles.buttonIcon} />
-              Delete Contact
-            </button>
-          </div>
-          <p style={styles.dangerText}>
-            This action cannot be undone. The contact will be permanently removed from your database.
-          </p>
-        </div>
-      </div>
-    </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 
@@ -661,6 +885,31 @@ const styles = {
     padding: '40px',
     fontSize: '18px',
     color: '#666',
+  },
+  errorState: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '60px',
+    textAlign: 'center',
+  },
+  errorIcon: {
+    fontSize: '48px',
+    color: '#f44336',
+    marginBottom: '20px',
+  },
+  permissionDenied: {
+    backgroundColor: '#fff3cd',
+    border: '2px solid #f39c12',
+    borderRadius: '8px',
+    padding: '20px',
+    textAlign: 'center',
+    color: '#856404',
+  },
+  permissionIcon: {
+    fontSize: '32px',
+    marginBottom: '12px',
   },
   header: {
     display: 'flex',

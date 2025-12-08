@@ -1,12 +1,17 @@
-// screens/POS/RefundsScreen.jsx - Updated with Modular Components
+// screens/POS/RefundsScreen.jsx - WITH PERMISSION SYSTEM + NO CONSOLE LOGGING
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
-import { logAction } from '../../helpers/posAudit';
+import toast from 'react-hot-toast';
 
-// Foundation Components
+// Security & Authentication
+import { SecurityWrapper, useSecurityContext } from '../../Security';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+
+// Foundation Components
 import { TavariStyles } from '../../utils/TavariStyles';
 
 // Refund Components
@@ -21,12 +26,42 @@ import BarcodeScanHandler from '../../components/POS/BarcodeScanHandler';
 const RefundsScreen = () => {
   const navigate = useNavigate();
   
-  // Foundation hooks
+  // Security context for sensitive refund operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'RefundsScreen',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
+  // Authentication using standardized hook
   const auth = usePOSAuth({
     requiredRoles: ['cashier', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'RefundsScreen'
   });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canProcessRefunds = hasPermission('pos.sales.refund') || hasElevatedPrivileges();
+  const canViewAllSales = hasPermission('pos.sales.view_all') || hasElevatedPrivileges();
+  const canVoidSales = hasPermission('pos.sales.void') || isOwner();
+  const canManualRefund = hasAnyPermission(['pos.sales.refund', 'pos.discounts.manager_override']) || hasElevatedPrivileges();
 
   // State management
   const [transactions, setTransactions] = useState([]);
@@ -43,25 +78,38 @@ const RefundsScreen = () => {
   const [qrScanResult, setQrScanResult] = useState(null);
   const [isQrScannerActive, setIsQrScannerActive] = useState(false);
 
+  // Check permissions on mount
   useEffect(() => {
-    if (auth.selectedBusinessId) {
+    if (!permissionsLoading && !canProcessRefunds) {
+      toast.error('You do not have permission to process refunds');
+      navigate('/dashboard/pos');
+    }
+  }, [permissionsLoading, canProcessRefunds, navigate]);
+
+  useEffect(() => {
+    if (auth.selectedBusinessId && !permissionsLoading && canProcessRefunds) {
       loadTransactions();
       loadBusinessSettings();
     }
-  }, [auth.selectedBusinessId, dateRange]);
+  }, [auth.selectedBusinessId, dateRange, permissionsLoading, canProcessRefunds]);
 
   useEffect(() => {
-    if (auth.selectedBusinessId) {
+    if (auth.selectedBusinessId && !permissionsLoading && canProcessRefunds) {
       if (searchTerm) {
         searchTransactions();
       } else {
         loadTransactions();
       }
     }
-  }, [searchTerm, auth.selectedBusinessId]);
+  }, [searchTerm, auth.selectedBusinessId, permissionsLoading, canProcessRefunds]);
 
   const loadBusinessSettings = async () => {
     try {
+      await logSecurityEvent('business_settings_access', {
+        action: 'load_refund_settings',
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       // Load POS settings
       const { data: posSettings, error: posError } = await supabase
         .from('pos_settings')
@@ -96,7 +144,12 @@ const RefundsScreen = () => {
 
       setBusinessSettings(combinedSettings);
     } catch (err) {
-      console.error('Error loading business settings:', err);
+      await logSecurityEvent('business_settings_error', {
+        action: 'load_refund_settings_failed',
+        business_id: auth.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+
       // Set minimal defaults
       setBusinessSettings({
         business_name: 'Your Business Name',
@@ -134,6 +187,20 @@ const RefundsScreen = () => {
     try {
       setLoading(true);
       setError(null);
+
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('load_refund_transactions');
+      if (!rateLimitCheck.allowed) {
+        setError('Too many requests. Please wait a moment.');
+        setLoading(false);
+        return;
+      }
+
+      await logSecurityEvent('refund_transactions_access', {
+        action: 'load_transactions',
+        business_id: auth.selectedBusinessId,
+        date_range: dateRange
+      }, 'low');
 
       const dateFilter = getDateFilter();
       
@@ -173,7 +240,7 @@ const RefundsScreen = () => {
 
       if (salesError) throw salesError;
 
-      console.log('Loaded sales:', sales);
+      await recordAction('refund_transactions_loaded', auth.selectedBusinessId, true);
 
       // Get existing refunds for these sales
       if (sales && sales.length > 0) {
@@ -184,7 +251,11 @@ const RefundsScreen = () => {
           .in('original_sale_id', saleIds);
 
         if (refundsError) {
-          console.warn('Error loading refunds:', refundsError);
+          await logSecurityEvent('refund_load_warning', {
+            action: 'load_refunds_failed',
+            business_id: auth.selectedBusinessId,
+            error_message: refundsError.message
+          }, 'low');
         }
 
         // Calculate refunded amounts per sale
@@ -206,7 +277,12 @@ const RefundsScreen = () => {
         setTransactions([]);
       }
     } catch (err) {
-      console.error('Error loading transactions:', err);
+      await logSecurityEvent('refund_transactions_error', {
+        action: 'load_transactions_failed',
+        business_id: auth.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
       setError('Failed to load transactions: ' + err.message);
     } finally {
       setLoading(false);
@@ -222,6 +298,28 @@ const RefundsScreen = () => {
     try {
       setLoading(true);
       setError(null);
+
+      // Validate search input
+      const validation = await validateInput(searchTerm, 'text', 'search_term');
+      if (!validation.valid) {
+        setError(validation.error);
+        setLoading(false);
+        return;
+      }
+
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('search_refund_transactions');
+      if (!rateLimitCheck.allowed) {
+        setError('Too many search requests. Please wait a moment.');
+        setLoading(false);
+        return;
+      }
+
+      await logSecurityEvent('refund_search', {
+        action: 'search_transactions',
+        business_id: auth.selectedBusinessId,
+        search_term_length: searchTerm.length
+      }, 'low');
 
       const { data: sales, error } = await supabase
         .from('pos_sales')
@@ -258,7 +356,7 @@ const RefundsScreen = () => {
 
       if (error) throw error;
 
-      console.log('Search results:', sales);
+      await recordAction('refund_search_completed', auth.selectedBusinessId, true);
 
       // Get refund info for search results
       if (sales && sales.length > 0) {
@@ -285,7 +383,12 @@ const RefundsScreen = () => {
         setTransactions([]);
       }
     } catch (err) {
-      console.error('Error searching transactions:', err);
+      await logSecurityEvent('refund_search_error', {
+        action: 'search_transactions_failed',
+        business_id: auth.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
       setError('Failed to search transactions: ' + err.message);
     } finally {
       setLoading(false);
@@ -293,36 +396,44 @@ const RefundsScreen = () => {
   };
 
   // QR Code scan handler
-  const handleQRTransactionFound = (transaction) => {
-    console.log('QR scan found transaction:', transaction);
+  const handleQRTransactionFound = async (transaction) => {
     setQrScanResult(transaction);
     setSelectedTransaction(transaction);
     setIsQrScannerActive(false);
     
-    // Show success message
-    const successMessage = `Found transaction: Sale #${transaction.sale_number}`;
-    showToast(successMessage, 'success');
+    toast.success(`Found transaction: Sale #${transaction.sale_number}`);
     
-    // Log the QR scan
-    logAction({
-      action: 'qr_scan_transaction_found',
-      context: 'RefundsScreen',
-      metadata: {
-        transaction_id: transaction.id,
-        sale_number: transaction.sale_number,
-        scan_method: 'qr_code'
-      }
-    });
+    await logSecurityEvent('qr_transaction_found', {
+      action: 'qr_scan_success',
+      business_id: auth.selectedBusinessId,
+      transaction_id: transaction.id,
+      sale_number: transaction.sale_number,
+      scan_method: 'qr_code'
+    }, 'low');
+
+    await recordAction('qr_scan_transaction_found', transaction.id, true);
   };
 
   // QR/Barcode scan handler - simplified for actual database structure  
   const handleBarcodeScan = async (scannedCode) => {
     if (!isQrScannerActive) return;
     
-    console.log('Barcode/QR scanned:', scannedCode);
     setError(null);
     
     try {
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('qr_scan');
+      if (!rateLimitCheck.allowed) {
+        setError('Too many scan attempts. Please wait a moment.');
+        return;
+      }
+
+      await logSecurityEvent('barcode_scan_attempt', {
+        action: 'scan_initiated',
+        business_id: auth.selectedBusinessId,
+        code_length: scannedCode.length
+      }, 'low');
+
       // Try direct QR code lookup first (when QR codes start getting populated)
       let { data: transaction, error } = await supabase
         .from('pos_sales')
@@ -381,6 +492,12 @@ const RefundsScreen = () => {
       }
 
       if (error || !transaction) {
+        await logSecurityEvent('qr_scan_not_found', {
+          action: 'scan_failed',
+          business_id: auth.selectedBusinessId,
+          scanned_code_length: scannedCode.length
+        }, 'low');
+        
         throw new Error(`No transaction found for scanned code: ${scannedCode}`);
       }
 
@@ -398,41 +515,51 @@ const RefundsScreen = () => {
         remaining_refundable: (transaction.total || 0) - totalRefunded
       };
 
-      handleQRTransactionFound(transactionWithRefundInfo);
+      await handleQRTransactionFound(transactionWithRefundInfo);
       
     } catch (err) {
-      console.error('QR scan error:', err);
+      await logSecurityEvent('qr_scan_error', {
+        action: 'scan_error',
+        business_id: auth.selectedBusinessId,
+        error_message: err.message
+      }, 'medium');
+      
       setError(err.message);
-      showToast(err.message, 'error');
+      toast.error(err.message);
     }
   };
 
-  const handleSelectTransaction = (transaction) => {
+  const handleSelectTransaction = async (transaction) => {
     setSelectedTransaction(transaction);
     setShowRefundModal(true);
     
-    logAction({
-      action: 'refund_transaction_selected',
-      context: 'RefundsScreen',
-      metadata: {
-        sale_id: transaction.id,
-        sale_number: transaction.sale_number,
-        original_total: transaction.total,
-        remaining_refundable: transaction.remaining_refundable
-      }
-    });
+    await logSecurityEvent('refund_transaction_selected', {
+      action: 'transaction_selected',
+      business_id: auth.selectedBusinessId,
+      sale_id: transaction.id,
+      sale_number: transaction.sale_number,
+      original_total: transaction.total,
+      remaining_refundable: transaction.remaining_refundable
+    }, 'medium');
+
+    await recordAction('refund_transaction_selected', transaction.id, true);
   };
 
-  const handleManualRefund = () => {
+  const handleManualRefund = async () => {
+    if (!canManualRefund) {
+      toast.error('You do not have permission to process manual refunds');
+      return;
+    }
+
     setShowManualRefundModal(true);
     
-    logAction({
-      action: 'manual_refund_initiated',
-      context: 'RefundsScreen',
-      metadata: {
-        initiated_by: auth.authUser?.id
-      }
-    });
+    await logSecurityEvent('manual_refund_initiated', {
+      action: 'manual_refund_started',
+      business_id: auth.selectedBusinessId,
+      initiated_by: auth.authUser?.id
+    }, 'high');
+
+    await recordAction('manual_refund_initiated', auth.selectedBusinessId, true);
   };
 
   const handleCloseRefundModal = () => {
@@ -460,33 +587,6 @@ const RefundsScreen = () => {
     }
   };
 
-  const showToast = (message, type = 'info') => {
-    const toast = document.createElement('div');
-    const bgColor = type === 'error' ? TavariStyles.colors.danger : 
-                   type === 'success' ? TavariStyles.colors.success : 
-                   TavariStyles.colors.primary;
-    
-    toast.style.cssText = `
-      position: fixed;
-      top: 120px;
-      right: 20px;
-      padding: 12px 20px;
-      border-radius: 6px;
-      color: white;
-      font-weight: bold;
-      z-index: 1000;
-      background-color: ${bgColor};
-    `;
-    toast.textContent = message;
-    document.body.appendChild(toast);
-    
-    setTimeout(() => {
-      if (document.body.contains(toast)) {
-        document.body.removeChild(toast);
-      }
-    }, 3000);
-  };
-
   const renderTransactionsList = () => {
     if (loading) {
       return (
@@ -504,14 +604,16 @@ const RefundsScreen = () => {
           <div style={styles.emptyText}>
             {searchTerm ? 'Try a different search term or scan a QR code' : 'No transactions for the selected time period'}
           </div>
-          <div style={styles.emptyActions}>
-            <button 
-              style={styles.manualRefundButton}
-              onClick={handleManualRefund}
-            >
-              💰 Manual Refund
-            </button>
-          </div>
+          <PermissionGate permission="pos.sales.refund">
+            <div style={styles.emptyActions}>
+              <button 
+                style={styles.manualRefundButton}
+                onClick={handleManualRefund}
+              >
+                💰 Manual Refund
+              </button>
+            </div>
+          </PermissionGate>
         </div>
       );
     }
@@ -600,77 +702,85 @@ const RefundsScreen = () => {
   };
 
   return (
-    <POSAuthWrapper 
-      requiredRoles={['cashier', 'manager', 'owner']}
-      requireBusiness={true}
+    <SecurityWrapper
       componentName="RefundsScreen"
+      sensitiveComponent={true}
+      requireSecureConnection={false}
+      securityLevel="high"
     >
-      <div style={styles.container}>
-        <div style={styles.header}>
-          <h2 style={styles.title}>Process Refunds</h2>
-          <p style={styles.subtitle}>Search transactions by sale number or customer name, or scan QR codes for quick refunds</p>
-        </div>
-
-        <RefundSearchControls
-          searchTerm={searchTerm}
-          onSearchChange={setSearchTerm}
-          dateRange={dateRange}
-          onDateRangeChange={setDateRange}
-          isQrScannerActive={isQrScannerActive}
-          onToggleQrScanner={handleToggleQrScanner}
-          onManualRefund={handleManualRefund}
-          loading={loading}
-        />
-
-        {error && (
-          <div style={styles.errorBanner}>
-            {error}
+      <POSAuthWrapper 
+        requiredRoles={['cashier', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="RefundsScreen"
+      >
+        <div style={styles.container}>
+          <div style={styles.header}>
+            <h2 style={styles.title}>Process Refunds</h2>
+            <p style={styles.subtitle}>Search transactions by sale number or customer name, or scan QR codes for quick refunds</p>
           </div>
-        )}
 
-        {qrScanResult && (
-          <div style={styles.successBanner}>
-            QR scan successful! Found transaction: Sale #{qrScanResult.sale_number}
+          <RefundSearchControls
+            searchTerm={searchTerm}
+            onSearchChange={setSearchTerm}
+            dateRange={dateRange}
+            onDateRangeChange={setDateRange}
+            isQrScannerActive={isQrScannerActive}
+            onToggleQrScanner={handleToggleQrScanner}
+            onManualRefund={handleManualRefund}
+            loading={loading}
+            canManualRefund={canManualRefund}
+          />
+
+          {error && (
+            <div style={styles.errorBanner}>
+              {error}
+            </div>
+          )}
+
+          {qrScanResult && (
+            <div style={styles.successBanner}>
+              QR scan successful! Found transaction: Sale #{qrScanResult.sale_number}
+            </div>
+          )}
+
+          <div style={styles.content}>
+            {renderTransactionsList()}
           </div>
-        )}
 
-        <div style={styles.content}>
-          {renderTransactionsList()}
+          {/* Barcode/QR Scanner - Uses existing BarcodeScanHandler */}
+          {isQrScannerActive && (
+            <BarcodeScanHandler
+              onScan={handleBarcodeScan}
+              disabled={false}
+              testId="refunds-qr-scanner"
+            />
+          )}
+
+          {/* Regular Refund Modal */}
+          {showRefundModal && selectedTransaction && (
+            <RefundModal
+              transaction={selectedTransaction}
+              businessSettings={businessSettings}
+              selectedBusinessId={auth.selectedBusinessId}
+              authUser={auth.authUser}
+              onClose={handleCloseRefundModal}
+              onRefundCompleted={handleRefundCompleted}
+            />
+          )}
+
+          {/* Manual Refund Modal */}
+          {showManualRefundModal && (
+            <ManualRefundModal
+              businessSettings={businessSettings}
+              selectedBusinessId={auth.selectedBusinessId}
+              authUser={auth.authUser}
+              onClose={handleCloseManualRefundModal}
+              onRefundCompleted={handleRefundCompleted}
+            />
+          )}
         </div>
-
-        {/* Barcode/QR Scanner - Uses existing BarcodeScanHandler */}
-        {isQrScannerActive && (
-          <BarcodeScanHandler
-            onScan={handleBarcodeScan}
-            disabled={false}
-            testId="refunds-qr-scanner"
-          />
-        )}
-
-        {/* Regular Refund Modal */}
-        {showRefundModal && selectedTransaction && (
-          <RefundModal
-            transaction={selectedTransaction}
-            businessSettings={businessSettings}
-            selectedBusinessId={auth.selectedBusinessId}
-            authUser={auth.authUser}
-            onClose={handleCloseRefundModal}
-            onRefundCompleted={handleRefundCompleted}
-          />
-        )}
-
-        {/* Manual Refund Modal */}
-        {showManualRefundModal && (
-          <ManualRefundModal
-            businessSettings={businessSettings}
-            selectedBusinessId={auth.selectedBusinessId}
-            authUser={auth.authUser}
-            onClose={handleCloseManualRefundModal}
-            onRefundCompleted={handleRefundCompleted}
-          />
-        )}
-      </div>
-    </POSAuthWrapper>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

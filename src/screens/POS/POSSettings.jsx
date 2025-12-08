@@ -1,16 +1,16 @@
-// src/screens/POS/POSSettings.jsx - Complete fixed version with all tabs restored
+// src/screens/POS/POSSettings.jsx - Production Ready with Permissions & Security
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
-import { logAction } from '../../helpers/posAudit';
-
-// Foundation components
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import { TavariStyles } from '../../utils/TavariStyles';
 
-// All tab components
+// Tab components
 import GeneralTab from './POSSettingsComponents/GeneralTab';
 import PaymentsTab from './POSSettingsComponents/PaymentsTab';
 import TaxesTab from './POSSettingsComponents/TaxesTab';
@@ -30,6 +30,46 @@ const POSSettings = () => {
     componentName: 'POSSettings'
   });
 
+  // Security context
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSSettings',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks for settings tabs
+  const canViewGeneralSettings = hasPermission('pos.settings.view') || hasElevatedPrivileges();
+  const canEditGeneralSettings = hasPermission('pos.settings.edit') || hasElevatedPrivileges();
+  const canViewPaymentSettings = hasPermission('pos.settings.payments') || hasElevatedPrivileges();
+  const canEditPaymentSettings = hasPermission('pos.settings.payments.edit') || hasElevatedPrivileges();
+  const canViewTaxSettings = hasPermission('pos.settings.taxes') || hasElevatedPrivileges();
+  const canEditTaxSettings = hasPermission('pos.settings.taxes.edit') || hasElevatedPrivileges();
+  const canViewReceiptSettings = hasPermission('pos.settings.receipts') || hasElevatedPrivileges();
+  const canEditReceiptSettings = hasPermission('pos.settings.receipts.edit') || hasElevatedPrivileges();
+  const canViewLoyaltySettings = hasPermission('pos.settings.loyalty') || hasElevatedPrivileges();
+  const canEditLoyaltySettings = hasPermission('pos.settings.loyalty.edit') || hasElevatedPrivileges();
+  const canViewTabSettings = hasPermission('pos.settings.tabs') || hasElevatedPrivileges();
+  const canEditTabSettings = hasPermission('pos.settings.tabs.edit') || hasElevatedPrivileges();
+  const canViewSecuritySettings = hasPermission('pos.settings.security') || hasElevatedPrivileges();
+  const canEditSecuritySettings = hasPermission('pos.settings.security.edit') || hasElevatedPrivileges();
+  const canViewAlertSettings = hasPermission('pos.settings.alerts') || hasElevatedPrivileges();
+  const canEditAlertSettings = hasPermission('pos.settings.alerts.edit') || hasElevatedPrivileges();
+
   // Tax calculations hook
   const {
     taxCategories,
@@ -39,14 +79,10 @@ const POSSettings = () => {
     validateTaxConfiguration
   } = useTaxCalculations(auth.selectedBusinessId);
 
-  // Tab state
+  // State
   const [activeTab, setActiveTab] = useState('general');
-
-  // Terminal-level settings state
   const [currentTerminalId, setCurrentTerminalId] = useState(null);
   const [terminalName, setTerminalName] = useState('');
-
-  // Settings state matching actual database columns
   const [settings, setSettings] = useState({
     terminal_mode: 'manual',
     pin_required: false,
@@ -79,7 +115,6 @@ const POSSettings = () => {
     max_drawer_variance: 5.00,
     require_manager_pin_for_variance: true,
     deposit_history_requires_manager: true,
-    // Additional settings for new tabs
     auto_delete_saved_carts_hours: 48,
     receipt_auto_print: true,
     receipt_auto_email: false,
@@ -103,7 +138,29 @@ const POSSettings = () => {
   const [error, setError] = useState(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Load terminal ID from localStorage on component mount
+  // Tab permission mapping
+  const TAB_PERMISSIONS = {
+    general: { view: canViewGeneralSettings, edit: canEditGeneralSettings },
+    payments: { view: canViewPaymentSettings, edit: canEditPaymentSettings },
+    taxes: { view: canViewTaxSettings, edit: canEditTaxSettings },
+    receipts: { view: canViewReceiptSettings, edit: canEditReceiptSettings },
+    loyalty: { view: canViewLoyaltySettings, edit: canEditLoyaltySettings },
+    tabs: { view: canViewTabSettings, edit: canEditTabSettings },
+    security: { view: canViewSecuritySettings, edit: canEditSecuritySettings },
+    alerts: { view: canViewAlertSettings, edit: canEditAlertSettings }
+  };
+
+  // Check if user can view current tab
+  const canViewCurrentTab = () => {
+    return TAB_PERMISSIONS[activeTab]?.view || false;
+  };
+
+  // Check if user can edit current tab
+  const canEditCurrentTab = () => {
+    return TAB_PERMISSIONS[activeTab]?.edit || false;
+  };
+
+  // Load terminal ID
   useEffect(() => {
     const storedTerminalId = localStorage.getItem('tavari_terminal_id');
     const storedTerminalName = localStorage.getItem('tavari_terminal_name');
@@ -114,19 +171,25 @@ const POSSettings = () => {
     }
   }, []);
 
-  // Fetch settings on load
+  // Fetch settings
   useEffect(() => {
-    if (auth.selectedBusinessId) {
+    if (auth.selectedBusinessId && canViewGeneralSettings) {
       fetchSettings();
     }
-  }, [auth.selectedBusinessId, currentTerminalId]);
+  }, [auth.selectedBusinessId, currentTerminalId, canViewGeneralSettings]);
 
   const fetchSettings = async () => {
     setLoading(true);
     setError(null);
     
     try {
-      // First try to get terminal-specific settings
+      await logSecurityEvent('pos_settings_accessed', {
+        action: 'fetch_settings',
+        business_id: auth.selectedBusinessId,
+        terminal_id: currentTerminalId,
+        accessed_by: auth.authUser?.id
+      }, 'low');
+
       let settingsData = null;
       
       if (currentTerminalId) {
@@ -135,23 +198,24 @@ const POSSettings = () => {
           .select('*')
           .eq('business_id', auth.selectedBusinessId)
           .eq('terminal_id', currentTerminalId)
-          .single();
+          .maybeSingle();
           
-        if (!terminalError) {
+        if (!terminalError && terminalSettings) {
           settingsData = terminalSettings;
         }
       }
       
-      // If no terminal-specific settings, get business defaults
       if (!settingsData) {
         const { data: businessSettings, error: businessError } = await supabase
           .from('pos_settings')
           .select('*')
           .eq('business_id', auth.selectedBusinessId)
           .is('terminal_id', null)
-          .single();
-          
-        if (businessError && businessError.code !== 'PGRST116') throw businessError;
+          .maybeSingle();
+
+        if (businessError && businessError.code && businessError.code !== 'PGRST116') {
+          throw businessError;
+        }
         settingsData = businessSettings;
       }
 
@@ -188,7 +252,6 @@ const POSSettings = () => {
           max_drawer_variance: parseFloat(settingsData.max_drawer_variance) || 5.00,
           require_manager_pin_for_variance: settingsData.require_manager_pin_for_variance !== undefined ? settingsData.require_manager_pin_for_variance : true,
           deposit_history_requires_manager: settingsData.deposit_history_requires_manager !== undefined ? settingsData.deposit_history_requires_manager : true,
-          // Additional settings with defaults
           auto_delete_saved_carts_hours: parseInt(settingsData.auto_delete_saved_carts_hours) || 48,
           receipt_auto_print: settingsData.receipt_auto_print !== undefined ? settingsData.receipt_auto_print : true,
           receipt_auto_email: settingsData.receipt_auto_email || false,
@@ -209,7 +272,12 @@ const POSSettings = () => {
         });
       }
     } catch (err) {
-      console.error('Error loading settings:', err);
+      await logSecurityEvent('pos_settings_fetch_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId,
+        terminal_id: currentTerminalId
+      }, 'medium');
+      
       setError('Error loading settings: ' + err.message);
     } finally {
       setLoading(false);
@@ -217,7 +285,14 @@ const POSSettings = () => {
   };
 
   // Handle terminal changes
-  const handleTerminalChange = (terminalId) => {
+  const handleTerminalChange = async (terminalId) => {
+    await logSecurityEvent('terminal_changed', {
+      old_terminal: currentTerminalId,
+      new_terminal: terminalId,
+      business_id: auth.selectedBusinessId,
+      changed_by: auth.authUser?.id
+    }, 'low');
+
     setCurrentTerminalId(terminalId);
     
     if (terminalId) {
@@ -227,19 +302,42 @@ const POSSettings = () => {
       localStorage.removeItem('tavari_terminal_name');
     }
     
-    // Reload settings for the new terminal context
     fetchSettings();
   };
 
-  // Fixed handleSave to work with the corrected database constraints
+  // Save settings
   const handleSave = async () => {
+    if (!canEditCurrentTab()) {
+      setError('You do not have permission to edit these settings');
+      await logSecurityEvent('pos_settings_save_denied', {
+        tab: activeTab,
+        business_id: auth.selectedBusinessId,
+        user_id: auth.authUser?.id
+      }, 'medium');
+      return;
+    }
+
+    // Rate limiting
+    const rateLimitCheck = await checkRateLimit('save_pos_settings', 10, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many save attempts. Please wait a moment.');
+      return;
+    }
+
     setError(null);
     setSaveSuccess(false);
     
     try {
+      await logSecurityEvent('pos_settings_save_initiated', {
+        tab: activeTab,
+        business_id: auth.selectedBusinessId,
+        terminal_id: currentTerminalId,
+        saved_by: auth.authUser?.id
+      }, 'medium');
+
       const updatedSettings = {
         business_id: auth.selectedBusinessId,
-        terminal_id: currentTerminalId || null, // Explicitly set null for business-level settings
+        terminal_id: currentTerminalId || null,
         terminal_mode: settings.terminal_mode,
         pin_required: settings.pin_required,
         tip_enabled: settings.tip_enabled,
@@ -271,7 +369,6 @@ const POSSettings = () => {
         max_drawer_variance: Number(settings.max_drawer_variance),
         require_manager_pin_for_variance: settings.require_manager_pin_for_variance,
         deposit_history_requires_manager: settings.deposit_history_requires_manager,
-        // Additional settings
         auto_delete_saved_carts_hours: Number(settings.auto_delete_saved_carts_hours),
         receipt_auto_print: settings.receipt_auto_print,
         receipt_auto_email: settings.receipt_auto_email,
@@ -292,21 +389,19 @@ const POSSettings = () => {
         updated_at: new Date().toISOString()
       };
 
-      // Use the proper unique constraint (business_id, terminal_id) for checking existing records
       const { data: existingSettings, error: checkError } = await supabase
         .from('pos_settings')
         .select('id')
         .eq('business_id', auth.selectedBusinessId)
         .filter('terminal_id', currentTerminalId ? 'eq' : 'is', currentTerminalId)
-        .single();
+        .maybeSingle();
 
-      if (checkError && checkError.code !== 'PGRST116') {
+      if (checkError && checkError.code && checkError.code !== 'PGRST116') {
         throw checkError;
       }
 
       let result;
       if (existingSettings) {
-        // Update existing record using both business_id and terminal_id
         result = await supabase
           .from('pos_settings')
           .update(updatedSettings)
@@ -315,7 +410,6 @@ const POSSettings = () => {
           .select()
           .single();
       } else {
-        // Insert new record
         result = await supabase
           .from('pos_settings')
           .insert([updatedSettings])
@@ -328,19 +422,26 @@ const POSSettings = () => {
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
 
-      await logAction({
-        action: 'pos_settings_updated',
-        context: 'POSSettings',
-        metadata: {
-          business_id: auth.selectedBusinessId,
-          terminal_id: currentTerminalId,
-          updated_settings: updatedSettings,
-          active_tab: activeTab
-        }
-      });
+      await logSecurityEvent('pos_settings_saved', {
+        tab: activeTab,
+        business_id: auth.selectedBusinessId,
+        terminal_id: currentTerminalId,
+        saved_by: auth.authUser?.id,
+        settings_count: Object.keys(updatedSettings).length
+      }, 'low');
+
+      await recordAction('pos_settings_updated', {
+        tab: activeTab,
+        terminal_id: currentTerminalId
+      }, true);
 
     } catch (err) {
-      console.error('Error saving settings:', err);
+      await logSecurityEvent('pos_settings_save_error', {
+        error: err.message,
+        tab: activeTab,
+        business_id: auth.selectedBusinessId
+      }, 'high');
+      
       setError('Error saving settings: ' + err.message);
     }
   };
@@ -353,18 +454,30 @@ const POSSettings = () => {
     setSaveSuccess(false);
   };
 
+  // Tab configuration
   const tabs = [
-    { id: 'general', label: 'General', icon: '⚙️' },
-    { id: 'payments', label: 'Payments', icon: '💳' },
-    { id: 'taxes', label: 'Taxes', icon: '📊' },
-    { id: 'receipts', label: 'Receipts', icon: '🧾' },
-    { id: 'loyalty', label: 'Loyalty', icon: '🎯' },
-    { id: 'tabs', label: 'Tabs', icon: '📋' },
-    { id: 'security', label: 'Security', icon: '🔒' },
-    { id: 'alerts', label: 'Alerts', icon: '🔔' }
-  ];
+    { id: 'general', label: 'General', icon: '⚙️', permission: canViewGeneralSettings },
+    { id: 'payments', label: 'Payments', icon: '💳', permission: canViewPaymentSettings },
+    { id: 'taxes', label: 'Taxes', icon: '📊', permission: canViewTaxSettings },
+    { id: 'receipts', label: 'Receipts', icon: '🧾', permission: canViewReceiptSettings },
+    { id: 'loyalty', label: 'Loyalty', icon: '🎯', permission: canViewLoyaltySettings },
+    { id: 'tabs', label: 'Tabs', icon: '📋', permission: canViewTabSettings },
+    { id: 'security', label: 'Security', icon: '🔒', permission: canViewSecuritySettings },
+    { id: 'alerts', label: 'Alerts', icon: '🔔', permission: canViewAlertSettings }
+  ].filter(tab => tab.permission); // Only show tabs user has permission for
 
   const renderTabContent = () => {
+    if (!canViewCurrentTab()) {
+      return (
+        <div style={styles.noAccessContainer}>
+          <h3 style={{ color: TavariStyles.colors.danger }}>Access Denied</h3>
+          <p style={styles.noAccessText}>
+            You do not have permission to view these settings.
+          </p>
+        </div>
+      );
+    }
+
     const commonProps = {
       settings,
       handleInputChange,
@@ -373,7 +486,8 @@ const POSSettings = () => {
       onTerminalChange: handleTerminalChange,
       taxCategories,
       taxLoading,
-      refreshTaxData
+      refreshTaxData,
+      canEdit: canEditCurrentTab()
     };
 
     switch (activeTab) {
@@ -398,156 +512,196 @@ const POSSettings = () => {
     }
   };
 
-  const handleAuthReady = (authData) => {
-    console.log('POSSettings: Authentication ready', authData);
+  const styles = {
+    container: {
+      ...TavariStyles.layout.container
+    },
+    header: {
+      marginBottom: TavariStyles.spacing['3xl'],
+      textAlign: 'center',
+      color: TavariStyles.colors.gray800
+    },
+    terminalIndicator: {
+      marginTop: TavariStyles.spacing.md,
+      padding: TavariStyles.spacing.md,
+      backgroundColor: TavariStyles.colors.primary,
+      color: TavariStyles.colors.white,
+      borderRadius: TavariStyles.borderRadius.md,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      fontWeight: TavariStyles.typography.fontWeight.medium
+    },
+    errorBanner: {
+      ...TavariStyles.components.banner.base,
+      ...TavariStyles.components.banner.variants.error,
+      marginBottom: TavariStyles.spacing.xl
+    },
+    successBanner: {
+      ...TavariStyles.components.banner.base,
+      ...TavariStyles.components.banner.variants.success,
+      marginBottom: TavariStyles.spacing.xl
+    },
+    loadingSettings: {
+      ...TavariStyles.components.loading.container
+    },
+    tabsContainer: {
+      flex: 1,
+      ...TavariStyles.layout.card,
+      overflow: 'hidden',
+      display: 'flex',
+      flexDirection: 'column'
+    },
+    tabsHeader: {
+      display: 'flex',
+      borderBottom: `2px solid ${TavariStyles.colors.gray200}`,
+      backgroundColor: TavariStyles.colors.gray50,
+      overflowX: 'auto'
+    },
+    tab: {
+      flex: 1,
+      minWidth: '100px',
+      padding: `${TavariStyles.spacing.lg} ${TavariStyles.spacing.xl}`,
+      border: 'none',
+      backgroundColor: 'transparent',
+      cursor: 'pointer',
+      fontSize: TavariStyles.typography.fontSize.base,
+      fontWeight: TavariStyles.typography.fontWeight.medium,
+      color: TavariStyles.colors.gray600,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: TavariStyles.spacing.sm,
+      transition: TavariStyles.transitions.normal,
+      borderBottom: '3px solid transparent'
+    },
+    activeTab: {
+      color: TavariStyles.colors.primary,
+      borderBottomColor: TavariStyles.colors.primary,
+      backgroundColor: TavariStyles.colors.white
+    },
+    tabIcon: {
+      fontSize: TavariStyles.typography.fontSize.lg
+    },
+    tabsBody: {
+      flex: 1,
+      overflow: 'auto'
+    },
+    actions: {
+      display: 'flex',
+      gap: TavariStyles.spacing.lg,
+      justifyContent: 'center',
+      paddingTop: TavariStyles.spacing.xl,
+      borderTop: `1px solid ${TavariStyles.colors.gray200}`,
+      marginTop: TavariStyles.spacing.xl
+    },
+    saveButton: {
+      ...TavariStyles.components.button.base,
+      ...TavariStyles.components.button.variants.success
+    },
+    noAccessContainer: {
+      padding: TavariStyles.spacing['3xl'],
+      textAlign: 'center'
+    },
+    noAccessText: {
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600,
+      margin: 0
+    }
   };
 
-  return (
-    <POSAuthWrapper
-      requiredRoles={['owner', 'manager']}
-      requireBusiness={true}
-      componentName="POSSettings"
-      onAuthReady={handleAuthReady}
-    >
-      <div style={styles.container}>
-        <div style={styles.header}>
-          <h2>POS Settings</h2>
-          <p>Configure your point-of-sale system settings</p>
-          {currentTerminalId && (
-            <div style={styles.terminalIndicator}>
-              Currently configuring: <strong>{terminalName || currentTerminalId}</strong>
+  // Check overall access
+  if (!permissionsLoading && tabs.length === 0) {
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['owner', 'manager']}
+          requireBusiness={true}
+          componentName="POSSettings"
+        >
+          <div style={styles.container}>
+            <div style={styles.noAccessContainer}>
+              <h3 style={{ color: TavariStyles.colors.danger }}>Access Denied</h3>
+              <p style={styles.noAccessText}>
+                You do not have permission to view any POS settings.
+              </p>
             </div>
-          )}
-        </div>
-
-        {error && <div style={styles.errorBanner}>{error}</div>}
-        {saveSuccess && <div style={styles.successBanner}>Settings saved successfully!</div>}
-
-        <div style={styles.tabsContainer}>
-          <div style={styles.tabsHeader}>
-            {tabs.map(tab => (
-              <button
-                key={tab.id}
-                style={{
-                  ...styles.tab,
-                  ...(activeTab === tab.id ? styles.activeTab : {})
-                }}
-                onClick={() => setActiveTab(tab.id)}
-              >
-                <span style={styles.tabIcon}>{tab.icon}</span>
-                <span>{tab.label}</span>
-              </button>
-            ))}
           </div>
+        </POSAuthWrapper>
+      </SecurityWrapper>
+    );
+  }
 
-          <div style={styles.tabsBody}>
-            {loading || taxLoading ? (
-              <div style={styles.loadingSettings}>Loading settings...</div>
-            ) : (
-              renderTabContent()
+  return (
+    <SecurityWrapper>
+      <POSAuthWrapper
+        requiredRoles={['owner', 'manager']}
+        requireBusiness={true}
+        componentName="POSSettings"
+      >
+        <div style={styles.container}>
+          <div style={styles.header}>
+            <h2>POS Settings</h2>
+            <p>Configure your point-of-sale system settings</p>
+            {currentTerminalId && (
+              <div style={styles.terminalIndicator}>
+                Currently configuring: <strong>{terminalName || currentTerminalId}</strong>
+              </div>
             )}
           </div>
-        </div>
 
-        <div style={styles.actions}>
-          <button
-            style={styles.saveButton}
-            onClick={handleSave}
-            disabled={loading}
+          {error && <div style={styles.errorBanner}>{error}</div>}
+          {saveSuccess && <div style={styles.successBanner}>Settings saved successfully!</div>}
+
+          <div style={styles.tabsContainer}>
+            <div style={styles.tabsHeader}>
+              {tabs.map(tab => (
+                <button
+                  key={tab.id}
+                  style={{
+                    ...styles.tab,
+                    ...(activeTab === tab.id ? styles.activeTab : {})
+                  }}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  <span style={styles.tabIcon}>{tab.icon}</span>
+                  <span>{tab.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <div style={styles.tabsBody}>
+              {loading || taxLoading || permissionsLoading ? (
+                <div style={styles.loadingSettings}>Loading settings...</div>
+              ) : (
+                renderTabContent()
+              )}
+            </div>
+          </div>
+
+          <PermissionGate
+            permissions={[`pos.settings.${activeTab}.edit`, 'pos.settings.edit']}
+            requireAny={true}
+            fallback={
+              <div style={{ textAlign: 'center', padding: TavariStyles.spacing.lg }}>
+                <p style={{ color: TavariStyles.colors.gray600 }}>
+                  You have view-only access to these settings.
+                </p>
+              </div>
+            }
           >
-            {loading ? 'Saving...' : 'Save Settings'}
-          </button>
+            <div style={styles.actions}>
+              <button
+                style={styles.saveButton}
+                onClick={handleSave}
+                disabled={loading || !canEditCurrentTab()}
+              >
+                {loading ? 'Saving...' : 'Save Settings'}
+              </button>
+            </div>
+          </PermissionGate>
         </div>
-      </div>
-    </POSAuthWrapper>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
-};
-
-const styles = {
-  container: {
-    ...TavariStyles.layout.container
-  },
-  header: {
-    marginBottom: TavariStyles.spacing['3xl'],
-    textAlign: 'center',
-    color: TavariStyles.colors.gray800
-  },
-  terminalIndicator: {
-    marginTop: TavariStyles.spacing.md,
-    padding: TavariStyles.spacing.md,
-    backgroundColor: TavariStyles.colors.primary,
-    color: TavariStyles.colors.white,
-    borderRadius: TavariStyles.borderRadius.md,
-    fontSize: TavariStyles.typography.fontSize.sm,
-    fontWeight: TavariStyles.typography.fontWeight.medium
-  },
-  errorBanner: {
-    ...TavariStyles.components.banner.base,
-    ...TavariStyles.components.banner.variants.error,
-    marginBottom: TavariStyles.spacing.xl
-  },
-  successBanner: {
-    ...TavariStyles.components.banner.base,
-    ...TavariStyles.components.banner.variants.success,
-    marginBottom: TavariStyles.spacing.xl
-  },
-  loadingSettings: {
-    ...TavariStyles.components.loading.container
-  },
-  tabsContainer: {
-    flex: 1,
-    ...TavariStyles.layout.card,
-    overflow: 'hidden',
-    display: 'flex',
-    flexDirection: 'column'
-  },
-  tabsHeader: {
-    display: 'flex',
-    borderBottom: `2px solid ${TavariStyles.colors.gray200}`,
-    backgroundColor: TavariStyles.colors.gray50,
-    overflowX: 'auto'
-  },
-  tab: {
-    flex: 1,
-    minWidth: '100px',
-    padding: `${TavariStyles.spacing.lg} ${TavariStyles.spacing.xl}`,
-    border: 'none',
-    backgroundColor: 'transparent',
-    cursor: 'pointer',
-    fontSize: TavariStyles.typography.fontSize.base,
-    fontWeight: TavariStyles.typography.fontWeight.medium,
-    color: TavariStyles.colors.gray600,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: TavariStyles.spacing.sm,
-    transition: TavariStyles.transitions.normal,
-    borderBottom: '3px solid transparent'
-  },
-  activeTab: {
-    color: TavariStyles.colors.primary,
-    borderBottomColor: TavariStyles.colors.primary,
-    backgroundColor: TavariStyles.colors.white
-  },
-  tabIcon: {
-    fontSize: TavariStyles.typography.fontSize.lg
-  },
-  tabsBody: {
-    flex: 1,
-    overflow: 'auto'
-  },
-  actions: {
-    display: 'flex',
-    gap: TavariStyles.spacing.lg,
-    justifyContent: 'center',
-    paddingTop: TavariStyles.spacing.xl,
-    borderTop: `1px solid ${TavariStyles.colors.gray200}`,
-    marginTop: TavariStyles.spacing.xl
-  },
-  saveButton: {
-    ...TavariStyles.components.button.base,
-    ...TavariStyles.components.button.variants.success
-  }
 };
 
 export default POSSettings;

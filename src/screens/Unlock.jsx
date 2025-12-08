@@ -1,10 +1,12 @@
-// src/screens/Unlock.jsx - Modernized with Security Integration
-import React, { useState, useRef, useEffect } from 'react';
+// src/screens/Unlock.jsx - With centralized auth cleanup
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { useUserProfile } from '../hooks/useUserProfile';
 import { TavariStyles } from '../utils/TavariStyles';
 import TavariCheckbox from '../components/UI/TavariCheckbox';
+import toast from 'react-hot-toast';
+import { Eye, EyeOff } from 'lucide-react';
 import { 
   SecurityWrapper, 
   useSecurityContext 
@@ -13,6 +15,8 @@ import { usePOSAuth } from '../hooks/usePOSAuth';
 import { useTaxCalculations } from '../hooks/useTaxCalculations';
 import POSAuthWrapper from '../components/Auth/POSAuthWrapper';
 import bcrypt from 'bcryptjs';
+import { sessionPersistence } from '../services/SessionPersistence';
+import { clearAllAuthData } from '../utils/authCleanup';
 
 const UnlockComponent = () => {
   const { profile } = useUserProfile();
@@ -29,6 +33,172 @@ const UnlockComponent = () => {
   });
   
   const pinInputRef = useRef(null);
+  const employeeCacheRef = useRef(null);
+  const employeeCachePromiseRef = useRef(null);
+
+  const getCurrentBusinessId = () => localStorage.getItem('currentBusinessId');
+
+  const pinsMatch = useCallback(async (inputPin, storedPin) => {
+    if (!storedPin) return false;
+
+    if (storedPin.startsWith('$2a$') || storedPin.startsWith('$2b$') || storedPin.startsWith('$2y$')) {
+      try {
+        return await bcrypt.compare(inputPin, storedPin);
+      } catch (err) {
+        console.warn('Failed to compare hashed PIN:', err?.message || err);
+        return false;
+      }
+    }
+
+    return String(storedPin) === String(inputPin);
+  }, []);
+
+  const loadEmployeeCache = useCallback(async () => {
+    const businessId = getCurrentBusinessId();
+
+    if (!businessId) {
+      return [];
+    }
+
+    if (employeeCacheRef.current && employeeCacheRef.current.business_id === businessId) {
+      return employeeCacheRef.current.employees;
+    }
+
+    if (employeeCachePromiseRef.current) {
+      return employeeCachePromiseRef.current;
+    }
+
+    employeeCachePromiseRef.current = (async () => {
+      try {
+        const { data: userRoles, error: rolesError } = await supabase
+          .from('user_roles')
+          .select('user_id, role')
+          .eq('business_id', businessId)
+          .eq('active', true);
+
+        if (rolesError) {
+          console.warn('Failed to load user roles for unlock cache:', rolesError.message);
+          return [];
+        }
+
+        if (!userRoles || userRoles.length === 0) {
+          return [];
+        }
+
+        // Dynamically derive role list from role_permissions. If none found, allow all roles present.
+        let roleSet = new Set();
+        try {
+          const { data: rp } = await supabase
+            .from('role_permissions')
+            .select('role_key')
+            .eq('business_id', businessId);
+          if (Array.isArray(rp) && rp.length > 0) {
+            roleSet = new Set(rp.map(r => r.role_key).filter(Boolean));
+          }
+        } catch (e) {
+          // non-fatal
+        }
+
+        const authorizedUserIds = userRoles
+          .filter((ur) => roleSet.size === 0 ? true : roleSet.has(ur.role))
+          .map((ur) => ur.user_id)
+          .filter(Boolean);
+
+        if (authorizedUserIds.length === 0) {
+          return [];
+        }
+
+        const { data: staffMembers, error: staffError } = await supabase.rpc(
+          'get_staff_pins_for_unlock',
+          {
+            p_business_id: businessId,
+            business_user_ids: authorizedUserIds
+          }
+        );
+
+        if (staffError) {
+          console.error('Failed to load staff pins for unlock cache:', staffError.message);
+          return [];
+        }
+
+        const roleMap = new Map(userRoles.map((ur) => [ur.user_id, ur.role]));
+        const employees = (staffMembers || []).map((staff) => ({
+          ...staff,
+          role: roleMap.get(staff.id) || 'employee',
+          business_id: businessId
+        }));
+
+        employeeCacheRef.current = {
+          business_id: businessId,
+          employees
+        };
+
+        return employees;
+      } catch (cacheError) {
+        console.error('Failed to load employee cache:', cacheError);
+        return [];
+      } finally {
+        employeeCachePromiseRef.current = null;
+      }
+    })();
+
+    const result = await employeeCachePromiseRef.current;
+
+    employeeCacheRef.current = {
+      business_id: businessId,
+      employees: result
+    };
+
+    return result;
+  }, []);
+
+  const findEmployeeByPin = useCallback(async (pin) => {
+    const employees = await loadEmployeeCache();
+    for (const employee of employees) {
+      if (!employee?.pin) continue;
+      if (await pinsMatch(pin, employee.pin)) {
+        return employee;
+      }
+    }
+    return null;
+  }, [loadEmployeeCache, pinsMatch]);
+
+  const getRoleForUser = useCallback(async (userId) => {
+    if (!userId) return 'employee';
+    const cache = await loadEmployeeCache();
+    const cached = cache.find((employee) => employee.id === userId);
+    if (cached?.role) {
+      return cached.role;
+    }
+
+    try {
+      const businessId = getCurrentBusinessId();
+      if (!businessId) return 'employee';
+
+      const { data, error } = await supabase
+        .from('business_users')
+        .select('role')
+        .eq('business_id', businessId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (error) {
+        console.warn('Unable to resolve role for user:', error.message);
+        return 'employee';
+      }
+
+      return data?.role || 'employee';
+    } catch (err) {
+      console.warn('Failed to fetch role for user:', err?.message || err);
+      return 'employee';
+    }
+  }, [loadEmployeeCache]);
+
+  const broadcastActivePosUserChange = () => {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('pos-active-user-changed'));
+    }
+  };
 
   // Security context for sensitive unlock operations
   const {
@@ -45,9 +215,10 @@ const UnlockComponent = () => {
     enableDeviceTracking: true,
     enableInputValidation: true,
     enableAuditLogging: true,
-    sessionTimeout: 5 * 60 * 1000, // 5 minutes for unlock screen
+    sessionTimeout: 0, // NO timeout - unlock screen should stay open indefinitely
     onSessionTimeout: () => {
-      handleForceLogout('Session timeout on unlock screen');
+      // This should never be called since sessionTimeout is 0
+      console.warn('Unlock screen session timeout triggered - this should not happen');
     }
   });
 
@@ -60,6 +231,19 @@ const UnlockComponent = () => {
     }, 100);
     
     return () => clearTimeout(timer);
+  }, []);
+
+  // Ensure session continues to refresh even when on unlock screen
+  // This prevents logout while the timeout modal is visible
+  useEffect(() => {
+    // Ensure session persistence is enabled
+    if (sessionPersistence.isPersistenceEnabled()) {
+      sessionPersistence.startAutoRefresh();
+    }
+    
+    return () => {
+      // Don't stop refresh on unmount - let it continue
+    };
   }, []);
 
   // Load failed attempts from localStorage
@@ -100,6 +284,7 @@ const UnlockComponent = () => {
   const handleForceLogout = async (reason = 'Forced logout') => {
     try {
       await logSecurityEvent('forced_logout', {
+        user_id: profile?.id,
         reason,
         data_type: 'session_management',
         data_action: 'forced_logout'
@@ -107,12 +292,25 @@ const UnlockComponent = () => {
 
       const today = new Date().toISOString().split('T')[0];
       localStorage.setItem('lastForcedLogout', today);
-      localStorage.removeItem('pinFailedAttempts');
+      
+      // 🔧 CRITICAL: Use centralized cleanup function
+      clearAllAuthData('forced_logout');
+      
+      // Disable session persistence on forced logout
+      sessionPersistence.disablePersistence();
       
       await supabase.auth.signOut();
       navigate('/login');
     } catch (err) {
-      console.error('Error during force logout:', err);
+      await logSecurityEvent('logout_error', {
+        user_id: profile?.id,
+        error_message: err.message,
+        data_type: 'session_management',
+        data_action: 'logout_failed'
+      }, 'high');
+      
+      // Even on error, try to clean up
+      clearAllAuthData('logout_error');
       navigate('/login');
     }
   };
@@ -160,7 +358,6 @@ const UnlockComponent = () => {
         return;
       }
 
-      // Get stored PIN
       let storedPin = profile?.pin;
       if (!storedPin && profile?.id) {
         const { data: userRow } = await supabase
@@ -172,60 +369,117 @@ const UnlockComponent = () => {
         storedPin = userRow?.pin;
       }
 
-      if (!storedPin) {
-        await logSecurityEvent('system_error', {
-          error_message: 'No PIN configured for user account',
-          data_type: 'authentication',
-          data_action: 'pin_verification_error',
-          threat_type: 'configuration_error'
-        }, 'high');
-        
-        setError('No PIN configured for your account. Contact administrator.');
-        setIsLoading(false);
-        return;
+      let unlockingUser = profile;
+      let pinMatches = false;
+
+      // Verify against logged-in user's PIN first
+      if (await pinsMatch(pinInput, storedPin)) {
+        pinMatches = true;
+      } else {
+        // Attempt to match against any other employee for this business
+        const alternateUser = await findEmployeeByPin(pinInput);
+        if (alternateUser) {
+          unlockingUser = alternateUser;
+          pinMatches = true;
+        }
       }
 
-      // Verify PIN
-      const pinMatches = await bcrypt.compare(pinInput, storedPin);
+      if (!pinMatches) {
+        // Failed attempt, existing logic handles below
+      }
 
-      if (pinMatches) {
+      if (pinMatches && unlockingUser) {
+        const effectiveRole = unlockingUser.role || await getRoleForUser(unlockingUser.id);
         // Successful unlock
-        await recordAction('unlock', true, profile?.id);
+        await recordAction('unlock', true, unlockingUser?.id || profile?.id);
+        
+        // IMPORTANT: Restart auto-refresh if persistence enabled
+        if (sessionPersistence.isPersistenceEnabled()) {
+          console.log('🔄 Restarting auto-refresh after unlock...');
+          sessionPersistence.startAutoRefresh();
+        }
         
         await logSecurityEvent('successful_unlock', {
+          user_id: unlockingUser?.id || profile?.id,
           data_type: 'authentication',
           data_action: 'pin_unlock_success',
-          unlock_method: 'pin'
+          unlock_method: 'pin',
+          persistent_session: sessionPersistence.isPersistenceEnabled()
         }, 'low');
 
         // Insert successful unlock audit log
         await supabase.from('audit_logs').insert([
           {
-            user_id: profile?.id,
+            user_id: unlockingUser?.id || profile?.id,
             event_type: 'pin_login',
-            details: JSON.stringify({
+            details: {
               method: 'unlock_screen',
               time: new Date().toISOString(),
               device_fingerprint: securityState.deviceFingerprint,
               user_ip: securityState.userIP
-            }),
+            },
           },
           {
-            user_id: profile?.id,
+            user_id: unlockingUser?.id || profile?.id,
             event_type: 'pin_unlock',
-            details: JSON.stringify({
+            details: {
               method: 'unlock_screen',
               time: new Date().toISOString(),
               device_fingerprint: securityState.deviceFingerprint,
               user_ip: securityState.userIP
-            }),
+            },
           }
         ]);
 
-        // Clear failed attempts and navigate
+        // Track which employee unlocked the register so POS can attribute sales
+        const businessId = getCurrentBusinessId();
+        if (unlockingUser?.id) {
+          const displayName = unlockingUser.full_name || [unlockingUser.first_name, unlockingUser.last_name].filter(Boolean).join(' ') || unlockingUser.email || `Employee ${unlockingUser.id}`;
+          const activeUserPayload = {
+            id: unlockingUser.id,
+            role: effectiveRole || 'employee',
+            full_name: unlockingUser.full_name || displayName,
+            first_name: unlockingUser.first_name || null,
+            last_name: unlockingUser.last_name || null,
+            email: unlockingUser.email || null,
+            name: displayName,
+            business_id: businessId || null,
+            unlocked_at: Date.now(),
+            source: 'unlock'
+          };
+
+          localStorage.setItem('posActiveUser', JSON.stringify(activeUserPayload));
+          localStorage.setItem('posLastUnlockedBy', JSON.stringify(activeUserPayload));
+          broadcastActivePosUserChange();
+        }
+
+        // Clear failed attempts
         localStorage.removeItem('pinFailedAttempts');
         setError('');
-        navigate('/dashboard');
+        
+        // Ensure session is still valid and restore if needed
+        const { data: { session: currentSession } } = await supabase.auth.getSession();
+        if (!currentSession && sessionPersistence.isPersistenceEnabled()) {
+          // Try to restore session before navigating
+          const restoreResult = await sessionPersistence.restoreSession();
+          if (restoreResult.restored) {
+            console.log('✅ Session restored after PIN unlock');
+          } else {
+            console.warn('⚠️ Could not restore session after PIN unlock');
+          }
+        }
+        
+        const displayName = unlockingUser?.full_name || unlockingUser?.name || unlockingUser?.first_name || profile?.full_name || profile?.first_name;
+        const unlockMessage = displayName ? `Session unlocked by ${displayName}` : 'Session unlocked successfully';
+        toast.success(unlockMessage);
+
+        const returnPath = sessionStorage.getItem('unlockReturnPath');
+        if (returnPath) {
+          sessionStorage.removeItem('unlockReturnPath');
+          navigate(returnPath);
+        } else {
+          navigate('/dashboard');
+        }
 
       } else {
         // Failed PIN attempt
@@ -237,6 +491,7 @@ const UnlockComponent = () => {
 
         // Log failed attempt
         await logSecurityEvent('failed_unlock', {
+          user_id: profile?.id,
           data_type: 'authentication',
           data_action: 'pin_unlock_failed',
           failed_attempt_count: newFailedCount,
@@ -246,12 +501,12 @@ const UnlockComponent = () => {
         await supabase.from('audit_logs').insert({
           user_id: profile?.id,
           event_type: 'failed_pin_login',
-          details: JSON.stringify({
+          details: {
             attempt: newFailedCount,
             time: new Date().toISOString(),
             device_fingerprint: securityState.deviceFingerprint,
             user_ip: securityState.userIP
-          }),
+          },
         });
 
         // Check for brute force attempts in last 10 minutes
@@ -266,6 +521,7 @@ const UnlockComponent = () => {
 
         if (!failureFetchError && recentFailures && recentFailures.length >= 3) {
           await logSecurityEvent('suspicious_activity', {
+            user_id: profile?.id,
             data_type: 'threat_detection',
             data_action: 'brute_force_detected',
             threat_type: 'PIN brute force attempt',
@@ -279,35 +535,36 @@ const UnlockComponent = () => {
           await supabase.from('audit_logs').insert({
             user_id: profile?.id,
             event_type: 'suspicious_activity',
-            details: JSON.stringify({
+            details: {
               type: 'PIN brute force attempt',
               attempts: recentFailures.length,
               window: '10min',
               triggeredAt: new Date().toISOString(),
-            }),
+            },
           });
         }
 
         // Handle lockout after 3 failed attempts
         if (newFailedCount >= 3) {
           await logSecurityEvent('account_lockout', {
+            user_id: profile?.id,
             data_type: 'security_enforcement',
             data_action: 'pin_lockout_triggered',
             threat_type: 'brute_force_protection',
             failed_attempt_count: newFailedCount
           }, 'high');
 
-          localStorage.removeItem('pinFailedAttempts');
+          toast.error('Account locked. Please log in again.');
           await handleForceLogout(`Account locked after ${newFailedCount} failed PIN attempts`);
         } else {
           setError(`Incorrect PIN. Attempt ${newFailedCount} of 3.`);
+          toast.error(`Incorrect PIN. ${3 - newFailedCount} attempts remaining.`);
         }
       }
 
     } catch (error) {
-      console.error('Unlock process error:', error);
-      
       await logSecurityEvent('system_error', {
+        user_id: profile?.id,
         error_message: error.message,
         error_stack: error.stack,
         data_type: 'authentication',
@@ -315,6 +572,7 @@ const UnlockComponent = () => {
       }, 'high');
       
       setError('An unexpected error occurred. Please try again.');
+      toast.error('Unlock failed');
     } finally {
       setIsLoading(false);
     }
@@ -326,6 +584,7 @@ const UnlockComponent = () => {
     setError('Pasting PINs is not allowed for security reasons.');
     
     logSecurityEvent('suspicious_activity', {
+      user_id: profile?.id,
       threat_type: 'pin_paste_attempt',
       data_type: 'input_validation',
       data_action: 'paste_blocked'
@@ -595,7 +854,7 @@ const UnlockComponent = () => {
               tabIndex={-1}
               disabled={isLoading}
             >
-              {showPin ? '🙈' : '👁️'}
+              {showPin ? <EyeOff size={18} /> : <Eye size={18} />}
             </button>
           </div>
           <div style={styles.attemptsWarning}>
@@ -657,15 +916,15 @@ const Unlock = () => {
       sessionTimeout={5 * 60 * 1000} // 5 minutes
       securityLevel="high"
       autoBlock={false}
-      showSecurityStatus={process.env.NODE_ENV === 'development'}
+      showSecurityStatus={false}
       onSecurityThreat={(threat) => {
-        console.warn('Security threat detected on unlock screen:', threat);
+        // Security threats logged automatically
       }}
       onSessionTimeout={() => {
-        console.log('Unlock screen session timed out');
+        // Session timeout handled by component
       }}
       onRateLimitExceeded={(blockedActions) => {
-        console.warn('Rate limit exceeded on unlock screen:', blockedActions);
+        // Rate limit events logged automatically
       }}
     >
       <POSAuthWrapper

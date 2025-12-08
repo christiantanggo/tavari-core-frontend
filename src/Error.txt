@@ -1,92 +1,1127 @@
 Download the React DevTools for a better development experience: https://react.dev/link/react-devtools
-supabaseClient.js:9 Multiple GoTrueClient instances detected in the same browser context. It is not an error, but this should be avoided as it may produce undefined behavior when used concurrently under the same storage key.
-_GoTrueClient @ @supabase_supabase-js.js?v=c31e45dc:5157
-SupabaseAuthClient @ @supabase_supabase-js.js?v=c31e45dc:7235
-_initSupabaseAuthClient @ @supabase_supabase-js.js?v=c31e45dc:7433
-SupabaseClient @ @supabase_supabase-js.js?v=c31e45dc:7306
-createClient @ @supabase_supabase-js.js?v=c31e45dc:7473
-(anonymous) @ supabaseClient.js:9Understand this warning
+supabaseClient.js:7 🔎 ENV CHECK → {VITE_SUPABASE_URL: 'https://iagcamwcfuiopmwefohz.supabase.co', VITE_SUPABASE_ANON_KEY: '✅ (anon key present)', VITE_SUPABASE_SERVICE_KEY: '⚠️ (no service key)'}
+emailSendingService.js:32 🚀 AWS SES Client initialized for REAL email sending
+emailSendingService.js:33 Region: us-east-3
+emailSendingService.js:34 Access Key ID: AKIAYVKY...
+emailSendingService.js:35 Credentials configured: true
 UserContext.jsx:13 📡 Checking session...
 UserContext.jsx:13 📡 Checking session...
-POSCategories.jsx:125 Uncaught ReferenceError: EditCategoryModal is not defined
-    at POSCategories (POSCategories.jsx:125:5)
-    at react-stack-bottom-frame (react-dom_client.js?v=c31e45dc:17424:20)
-    at renderWithHooks (react-dom_client.js?v=c31e45dc:4206:24)
-    at updateFunctionComponent (react-dom_client.js?v=c31e45dc:6619:21)
-    at beginWork (react-dom_client.js?v=c31e45dc:7654:20)
-    at runWithFiberInDEV (react-dom_client.js?v=c31e45dc:1485:72)
-    at performUnitOfWork (react-dom_client.js?v=c31e45dc:10868:98)
-    at workLoopSync (react-dom_client.js?v=c31e45dc:10728:43)
-    at renderRootSync (react-dom_client.js?v=c31e45dc:10711:13)
-    at performWorkOnRoot (react-dom_client.js?v=c31e45dc:10359:46)
-POSCategories @ POSCategories.jsx:125
-react-stack-bottom-frame @ react-dom_client.js?v=c31e45dc:17424
-renderWithHooks @ react-dom_client.js?v=c31e45dc:4206
-updateFunctionComponent @ react-dom_client.js?v=c31e45dc:6619
-beginWork @ react-dom_client.js?v=c31e45dc:7654
-runWithFiberInDEV @ react-dom_client.js?v=c31e45dc:1485
-performUnitOfWork @ react-dom_client.js?v=c31e45dc:10868
-workLoopSync @ react-dom_client.js?v=c31e45dc:10728
-renderRootSync @ react-dom_client.js?v=c31e45dc:10711
-performWorkOnRoot @ react-dom_client.js?v=c31e45dc:10359
-performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=c31e45dc:11623
-performWorkUntilDeadline @ react-dom_client.js?v=c31e45dc:36
-<POSCategories>
-exports.jsxDEV @ react_jsx-dev-runtime.js?v=c31e45dc:250
-App @ App.jsx:115
-react-stack-bottom-frame @ react-dom_client.js?v=c31e45dc:17424
-renderWithHooksAgain @ react-dom_client.js?v=c31e45dc:4281
-renderWithHooks @ react-dom_client.js?v=c31e45dc:4217
-updateFunctionComponent @ react-dom_client.js?v=c31e45dc:6619
-beginWork @ react-dom_client.js?v=c31e45dc:7654
-runWithFiberInDEV @ react-dom_client.js?v=c31e45dc:1485
-performUnitOfWork @ react-dom_client.js?v=c31e45dc:10868
-workLoopSync @ react-dom_client.js?v=c31e45dc:10728
-renderRootSync @ react-dom_client.js?v=c31e45dc:10711
-performWorkOnRoot @ react-dom_client.js?v=c31e45dc:10359
-performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=c31e45dc:11623
-performWorkUntilDeadline @ react-dom_client.js?v=c31e45dc:36
+App.jsx:205 🔄 Auth state changed: SIGNED_IN Session exists
+App.jsx:211 ✅ User logged in - music service will initialize
+App.jsx:281 🎵 Initializing music service for business: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+App.jsx:198 📱 Initial session loaded: Active session found
+usePOSAuth.js:39 PageLockModal: Initializing authentication...
+usePOSAuth.js:39 SidebarNav: Initializing authentication...
+usePOSAuth.js:39 HRPayrollDashboard: Initializing authentication...
+usePOSAuth.js:39 HR Payroll Dashboard: Initializing authentication...
+usePOSAuth.js:39 usePayrollCalculations: Initializing authentication...
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: null
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:46 ❌ No businessId provided, exiting
+App.jsx:281 🎵 Initializing music service for business: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:39 PageLockModal: Initializing authentication...
+usePOSAuth.js:39 SidebarNav: Initializing authentication...
+usePOSAuth.js:39 HRPayrollDashboard: Initializing authentication...
+usePOSAuth.js:39 HR Payroll Dashboard: Initializing authentication...
+usePOSAuth.js:39 usePayrollCalculations: Initializing authentication...
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: null
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:46 ❌ No businessId provided, exiting
+DeviceFingerprint.js:186  [Deprecation] The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet)
+getAudioFingerprint @ DeviceFingerprint.js:186
+generate @ DeviceFingerprint.js:58
+await in generate
+(anonymous) @ useSecurityContext.js:64
+(anonymous) @ useSecurityContext.js:538
+react_stack_bottom_frame @ react-dom-client.development.js:23953
+runWithFiberInDEV @ react-dom-client.development.js:1519
+commitHookEffectListMount @ react-dom-client.development.js:11905
+commitHookPassiveMountEffects @ react-dom-client.development.js:12026
+commitPassiveMountOnFiber @ react-dom-client.development.js:13841
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13853
+flushPassiveEffects @ react-dom-client.development.js:15737
+(anonymous) @ react-dom-client.development.js:15379
+performWorkUntilDeadline @ scheduler.development.js:45
+<PageLockModal>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+SidebarNav @ SidebarNav.jsx:159
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<SidebarNav>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+DashboardLayout @ DashboardLayout.jsx:14
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<DashboardLayout>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+App @ App.jsx:326
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
 <App>
-exports.jsxDEV @ react_jsx-dev-runtime.js?v=c31e45dc:250
-(anonymous) @ main.jsx:18Understand this error
-App.jsx:115 An error occurred in the <POSCategories> component.
-
-Consider adding an error boundary to your tree to customize error handling behavior.
-Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
-
-defaultOnUncaughtError @ react-dom_client.js?v=c31e45dc:6229
-logUncaughtError @ react-dom_client.js?v=c31e45dc:6283
-runWithFiberInDEV @ react-dom_client.js?v=c31e45dc:1485
-lane.callback @ react-dom_client.js?v=c31e45dc:6311
-callCallback @ react-dom_client.js?v=c31e45dc:4097
-commitCallbacks @ react-dom_client.js?v=c31e45dc:4109
-runWithFiberInDEV @ react-dom_client.js?v=c31e45dc:1487
-commitLayoutEffectOnFiber @ react-dom_client.js?v=c31e45dc:9029
-flushLayoutEffects @ react-dom_client.js?v=c31e45dc:11174
-commitRoot @ react-dom_client.js?v=c31e45dc:11080
-commitRootWhenReady @ react-dom_client.js?v=c31e45dc:10512
-performWorkOnRoot @ react-dom_client.js?v=c31e45dc:10457
-performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=c31e45dc:11623
-performWorkUntilDeadline @ react-dom_client.js?v=c31e45dc:36
-<POSCategories>
-exports.jsxDEV @ react_jsx-dev-runtime.js?v=c31e45dc:250
-App @ App.jsx:115
-react-stack-bottom-frame @ react-dom_client.js?v=c31e45dc:17424
-renderWithHooksAgain @ react-dom_client.js?v=c31e45dc:4281
-renderWithHooks @ react-dom_client.js?v=c31e45dc:4217
-updateFunctionComponent @ react-dom_client.js?v=c31e45dc:6619
-beginWork @ react-dom_client.js?v=c31e45dc:7654
-runWithFiberInDEV @ react-dom_client.js?v=c31e45dc:1485
-performUnitOfWork @ react-dom_client.js?v=c31e45dc:10868
-workLoopSync @ react-dom_client.js?v=c31e45dc:10728
-renderRootSync @ react-dom_client.js?v=c31e45dc:10711
-performWorkOnRoot @ react-dom_client.js?v=c31e45dc:10359
-performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=c31e45dc:11623
-performWorkUntilDeadline @ react-dom_client.js?v=c31e45dc:36
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+(anonymous) @ main.jsx:22
+DeviceFingerprint.js:193  The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page.
+getAudioFingerprint @ DeviceFingerprint.js:193
+generate @ DeviceFingerprint.js:58
+await in generate
+(anonymous) @ useSecurityContext.js:64
+(anonymous) @ useSecurityContext.js:538
+react_stack_bottom_frame @ react-dom-client.development.js:23953
+runWithFiberInDEV @ react-dom-client.development.js:1519
+commitHookEffectListMount @ react-dom-client.development.js:11905
+commitHookPassiveMountEffects @ react-dom-client.development.js:12026
+commitPassiveMountOnFiber @ react-dom-client.development.js:13841
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13853
+flushPassiveEffects @ react-dom-client.development.js:15737
+(anonymous) @ react-dom-client.development.js:15379
+performWorkUntilDeadline @ scheduler.development.js:45
+<PageLockModal>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+SidebarNav @ SidebarNav.jsx:159
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<SidebarNav>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+DashboardLayout @ DashboardLayout.jsx:14
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<DashboardLayout>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+App @ App.jsx:326
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
 <App>
-exports.jsxDEV @ react_jsx-dev-runtime.js?v=c31e45dc:250
-(anonymous) @ main.jsx:18Understand this warning
-UserContext.jsx:17 📡 Session result: {access_token: 'eyJhbGciOiJIUzI1NiIsImtpZCI6IlJNWGJtYXNaWFRqNkVvUk…xzZX0.HluFJYGwObPqMiEWNnShr_rateUrLwFjfeI7EXU0jbM', token_type: 'bearer', expires_in: 3600, expires_at: 1754198259, refresh_token: 'qduy4t2pcoko', …}
-UserContext.jsx:22 📡 Fetching user profile for ID: ea2e7ee6-907e-462d-93f7-7dee632b2afb
-UserContext.jsx:17 📡 Session result: {access_token: 'eyJhbGciOiJIUzI1NiIsImtpZCI6IlJNWGJtYXNaWFRqNkVvUk…xzZX0.HluFJYGwObPqMiEWNnShr_rateUrLwFjfeI7EXU0jbM', token_type: 'bearer', expires_in: 3600, expires_at: 1754198259, refresh_token: 'qduy4t2pcoko', …}
-UserContext.jsx:22 📡 Fetching user profile for ID: ea2e7ee6-907e-462d-93f7-7dee632b2afb
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+(anonymous) @ main.jsx:22
+DeviceFingerprint.js:186  [Deprecation] The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet)
+getAudioFingerprint @ DeviceFingerprint.js:186
+generate @ DeviceFingerprint.js:58
+await in generate
+(anonymous) @ useSecurityContext.js:64
+(anonymous) @ useSecurityContext.js:538
+react_stack_bottom_frame @ react-dom-client.development.js:23953
+runWithFiberInDEV @ react-dom-client.development.js:1519
+commitHookEffectListMount @ react-dom-client.development.js:11905
+commitHookPassiveMountEffects @ react-dom-client.development.js:12026
+commitPassiveMountOnFiber @ react-dom-client.development.js:13841
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13853
+flushPassiveEffects @ react-dom-client.development.js:15737
+(anonymous) @ react-dom-client.development.js:15379
+performWorkUntilDeadline @ scheduler.development.js:45
+<HRPayrollDashboard>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+App @ App.jsx:403
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<App>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+(anonymous) @ main.jsx:22
+DeviceFingerprint.js:193  The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page.
+getAudioFingerprint @ DeviceFingerprint.js:193
+generate @ DeviceFingerprint.js:58
+await in generate
+(anonymous) @ useSecurityContext.js:64
+(anonymous) @ useSecurityContext.js:538
+react_stack_bottom_frame @ react-dom-client.development.js:23953
+runWithFiberInDEV @ react-dom-client.development.js:1519
+commitHookEffectListMount @ react-dom-client.development.js:11905
+commitHookPassiveMountEffects @ react-dom-client.development.js:12026
+commitPassiveMountOnFiber @ react-dom-client.development.js:13841
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13853
+flushPassiveEffects @ react-dom-client.development.js:15737
+(anonymous) @ react-dom-client.development.js:15379
+performWorkUntilDeadline @ scheduler.development.js:45
+<HRPayrollDashboard>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+App @ App.jsx:403
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<App>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+(anonymous) @ main.jsx:22
+DeviceFingerprint.js:186  [Deprecation] The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet)
+getAudioFingerprint @ DeviceFingerprint.js:186
+generate @ DeviceFingerprint.js:58
+await in generate
+(anonymous) @ useSecurityContext.js:64
+(anonymous) @ useSecurityContext.js:538
+react_stack_bottom_frame @ react-dom-client.development.js:23953
+runWithFiberInDEV @ react-dom-client.development.js:1519
+commitHookEffectListMount @ react-dom-client.development.js:11905
+commitHookPassiveMountEffects @ react-dom-client.development.js:12026
+commitPassiveMountOnFiber @ react-dom-client.development.js:13841
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13853
+flushPassiveEffects @ react-dom-client.development.js:15737
+(anonymous) @ react-dom-client.development.js:15379
+performWorkUntilDeadline @ scheduler.development.js:45
+<HRPayrollDashboard>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+App @ App.jsx:403
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<App>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+(anonymous) @ main.jsx:22
+DeviceFingerprint.js:193  The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page.
+getAudioFingerprint @ DeviceFingerprint.js:193
+generate @ DeviceFingerprint.js:58
+await in generate
+(anonymous) @ useSecurityContext.js:64
+(anonymous) @ useSecurityContext.js:538
+react_stack_bottom_frame @ react-dom-client.development.js:23953
+runWithFiberInDEV @ react-dom-client.development.js:1519
+commitHookEffectListMount @ react-dom-client.development.js:11905
+commitHookPassiveMountEffects @ react-dom-client.development.js:12026
+commitPassiveMountOnFiber @ react-dom-client.development.js:13841
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13853
+flushPassiveEffects @ react-dom-client.development.js:15737
+(anonymous) @ react-dom-client.development.js:15379
+performWorkUntilDeadline @ scheduler.development.js:45
+<HRPayrollDashboard>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+App @ App.jsx:403
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<App>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+(anonymous) @ main.jsx:22
+HeaderBar.jsx:93 🔄 Syncing business ID to localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: null
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:46 ❌ No businessId provided, exiting
+UserContext.jsx:17 📡 Session result: {access_token: 'eyJhbGciOiJIUzI1NiIsImtpZCI6IlJNWGJtYXNaWFRqNkVvUk…xzZX0.iIa-1zWMgXhfEZux6WrPF-j2K0OuPx_b4R-BB-f2ov4', token_type: 'bearer', expires_in: 3600, expires_at: 1759855983, refresh_token: 'qjecungwe35k', …}
+UserContext.jsx:22 📡 Fetching user profile for ID: e861f114-7a95-47c3-a4ca-465e7c405aac
+App.jsx:198 📱 Initial session loaded: Active session found
+App.jsx:281 🎵 Initializing music service for business: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+App.jsx:205 🔄 Auth state changed: INITIAL_SESSION Session exists
+App.jsx:211 ✅ User logged in - music service will initialize
+App.jsx:281 🎵 Initializing music service for business: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+UserContext.jsx:17 📡 Session result: {access_token: 'eyJhbGciOiJIUzI1NiIsImtpZCI6IlJNWGJtYXNaWFRqNkVvUk…xzZX0.iIa-1zWMgXhfEZux6WrPF-j2K0OuPx_b4R-BB-f2ov4', token_type: 'bearer', expires_in: 3600, expires_at: 1759855983, refresh_token: 'qjecungwe35k', …}
+UserContext.jsx:22 📡 Fetching user profile for ID: e861f114-7a95-47c3-a4ca-465e7c405aac
+usePOSAuth.js:43 PageLockModal: Session check result: {session: true, error: null}
+usePOSAuth.js:52 PageLockModal: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 PageLockModal: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 SidebarNav: Session check result: {session: true, error: null}
+usePOSAuth.js:52 SidebarNav: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 SidebarNav: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 HRPayrollDashboard: Session check result: {session: true, error: null}
+usePOSAuth.js:52 HRPayrollDashboard: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 HRPayrollDashboard: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 HR Payroll Dashboard: Session check result: {session: true, error: null}
+usePOSAuth.js:52 HR Payroll Dashboard: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 HR Payroll Dashboard: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:56 📋 STEP 1: Loading payroll settings...
+usePOSAuth.js:43 usePayrollCalculations: Session check result: {session: true, error: null}
+usePOSAuth.js:52 usePayrollCalculations: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 usePayrollCalculations: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 PageLockModal: Session check result: {session: true, error: null}
+usePOSAuth.js:52 PageLockModal: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 PageLockModal: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 SidebarNav: Session check result: {session: true, error: null}
+usePOSAuth.js:52 SidebarNav: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 SidebarNav: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 HRPayrollDashboard: Session check result: {session: true, error: null}
+usePOSAuth.js:52 HRPayrollDashboard: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 HRPayrollDashboard: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 HR Payroll Dashboard: Session check result: {session: true, error: null}
+usePOSAuth.js:52 HR Payroll Dashboard: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 HR Payroll Dashboard: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 usePayrollCalculations: Session check result: {session: true, error: null}
+usePOSAuth.js:52 usePayrollCalculations: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 usePayrollCalculations: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+sw.js:55 [Service Worker] Fetching from network: https://iagcamwcfuiopmwefohz.supabase.co/storage/v1/object/public/music-files/cb982fca-cf7a-4f59-b9c7-55ca0364eddc/1755149770583_nicky_youre__dazy_-_sunroof_remix__clean_-_lyrics__feat._24kgoldn.mp3
+usePOSAuth.js:84 PageLockModal: User role verified: owner
+usePayrollCalculations.js:63 Settings result: {settingsData: {…}, settingsError: null}
+usePayrollCalculations.js:66 📋 STEP 2: Loading payroll runs...
+usePOSAuth.js:84 SidebarNav: User role verified: owner
+usePOSAuth.js:106 PageLockModal: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 PageLockModal: Authentication completed successfully
+usePayrollCalculations.js:74 Runs result: {count: 10, runsError: null}
+usePayrollCalculations.js:77 📋 STEP 3: Loading user_roles...
+usePayrollCalculations.js:78 Query params: {business_id: 'cb982fca-cf7a-4f59-b9c7-55ca0364eddc', active: true}
+sw.js:55 [Service Worker] Fetching from network: https://iagcamwcfuiopmwefohz.supabase.co/storage/v1/object/public/music-files/cb982fca-cf7a-4f59-b9c7-55ca0364eddc/1755149563924_meant_to_be__feat._florida_georgia_line___pop_radio_version___audio__-_bebe_rexha.mp3
+usePOSAuth.js:106 SidebarNav: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 SidebarNav: Authentication completed successfully
+usePOSAuth.js:84 HRPayrollDashboard: User role verified: owner
+usePayrollCalculations.js:86 🔍 USER_ROLES QUERY COMPLETE
+usePayrollCalculations.js:87    Error: null
+usePayrollCalculations.js:88    Data count: 11
+usePayrollCalculations.js:89    Full data: (11) [{…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}]
+usePayrollCalculations.js:98 🔍 EXTRACTED USER IDS:
+usePayrollCalculations.js:99    Count: 11
+usePayrollCalculations.js:100    IDs: (11) ['e861f114-7a95-47c3-a4ca-465e7c405aac', '4cd91ad9-ddda-4cd4-9c9e-3a1f2833fcc9', '07b7210b-98e3-49aa-8a87-06f67dcbf91f', 'bc375015-abf9-4734-80eb-b0d5742d07d0', '4cd55d3c-c5b5-44ec-982d-0f1504a191d1', 'f3693c3b-7650-40b8-a93d-b0bac4c61d79', '198e6d4b-88a3-4efc-921f-0a3348ab482e', '5216922b-4b53-476c-9719-c922c0dcbde0', '82fffe14-a7a3-4507-a5cb-fad52a75922c', '475f3aee-6ca7-4080-adee-e6c48b3ea5bf', 'fc4973c3-13a1-46d0-80e5-2a7954bfab54']
+usePayrollCalculations.js:112 📋 STEP 4: Loading employees from users table...
+usePayrollCalculations.js:113 Query: SELECT * FROM users WHERE id IN (... 11 ids)
+HeaderBar.jsx:44 📋 User has access to businesses: ['cb982fca-cf7a-4f59-b9c7-55ca0364eddc']
+sw.js:55 [Service Worker] Fetching from network: https://iagcamwcfuiopmwefohz.supabase.co/storage/v1/object/public/music-files/cb982fca-cf7a-4f59-b9c7-55ca0364eddc/1758513493967_here_comes_the_rain_again_eurythmics.mp3
+HeaderBar.jsx:45 💾 Cached business ID: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:84 HR Payroll Dashboard: User role verified: owner
+usePOSAuth.js:106 HRPayrollDashboard: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 HRPayrollDashboard: Authentication completed successfully
+usePayrollCalculations.js:136 🔍 EMPLOYEES QUERY COMPLETE
+usePayrollCalculations.js:137    Error: null
+usePayrollCalculations.js:138    Data count: 1
+usePayrollCalculations.js:139    Expected count: 11
+usePayrollCalculations.js:140    Full employee data: [{…}]
+usePayrollCalculations.js:154 📋 STEP 5: Loading employee premiums...
+sw.js:55 [Service Worker] Fetching from network: https://iagcamwcfuiopmwefohz.supabase.co/storage/v1/object/public/music-files/cb982fca-cf7a-4f59-b9c7-55ca0364eddc/1758513762191_the_sign_-_ace_of_base__1992_.mp3
+usePOSAuth.js:84 usePayrollCalculations: User role verified: owner
+usePOSAuth.js:106 HR Payroll Dashboard: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 HR Payroll Dashboard: Authentication completed successfully
+HRPayrollDashboard.jsx:96 Loading dashboard stats for business: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:162 Premium result: {count: 12, premiumError: null}
+usePayrollCalculations.js:165 📋 STEP 6: Attaching premiums to employees...
+usePayrollCalculations.js:170    Employee Test Test: 2 premiums
+usePayrollCalculations.js:175 ════════════════════════════════════════
+usePayrollCalculations.js:176 ✅ LOAD DATA COMPLETE
+usePayrollCalculations.js:177    Settings: true
+usePayrollCalculations.js:178    Employees loaded: 1
+usePayrollCalculations.js:179    Payroll runs: 10
+usePayrollCalculations.js:180    Employee names: ['Test Test']
+usePayrollCalculations.js:181 ════════════════════════════════════════
+usePOSAuth.js:84 PageLockModal: User role verified: owner
+usePOSAuth.js:106 usePayrollCalculations: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 usePayrollCalculations: Authentication completed successfully
+HRPayrollDashboard.jsx:111 Total active employees: 11
+usePOSAuth.js:39 PayrollEntryTab: Initializing authentication...
+usePOSAuth.js:39 PayrollEntryTab: Initializing authentication...
+usePOSAuth.js:39 usePayrollCalculations: Initializing authentication...
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:56 📋 STEP 1: Loading payroll settings...
+usePOSAuth.js:39 useYTDCalculations: Initializing authentication...
+usePOSAuth.js:39 PayrollEntryTab: Initializing authentication...
+usePOSAuth.js:39 PayrollEntryTab: Initializing authentication...
+usePOSAuth.js:39 usePayrollCalculations: Initializing authentication...
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:56 📋 STEP 1: Loading payroll settings...
+usePOSAuth.js:39 useYTDCalculations: Initializing authentication...
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:56 📋 STEP 1: Loading payroll settings...
+usePOSAuth.js:43 PayrollEntryTab: Session check result: {session: true, error: null}
+usePOSAuth.js:52 PayrollEntryTab: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 PayrollEntryTab: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:84 SidebarNav: User role verified: owner
+usePOSAuth.js:43 PayrollEntryTab: Session check result: {session: true, error: null}
+usePOSAuth.js:52 PayrollEntryTab: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 PayrollEntryTab: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 usePayrollCalculations: Session check result: {session: true, error: null}
+usePOSAuth.js:52 usePayrollCalculations: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 usePayrollCalculations: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:106 PageLockModal: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 PageLockModal: Authentication completed successfully
+usePOSAuth.js:43 useYTDCalculations: Session check result: {session: true, error: null}
+usePOSAuth.js:52 useYTDCalculations: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 useYTDCalculations: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 PayrollEntryTab: Session check result: {session: true, error: null}
+usePOSAuth.js:52 PayrollEntryTab: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 PayrollEntryTab: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 PayrollEntryTab: Session check result: {session: true, error: null}
+usePOSAuth.js:52 PayrollEntryTab: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 PayrollEntryTab: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 usePayrollCalculations: Session check result: {session: true, error: null}
+usePOSAuth.js:52 usePayrollCalculations: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 usePayrollCalculations: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 useYTDCalculations: Session check result: {session: true, error: null}
+usePOSAuth.js:52 useYTDCalculations: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 useYTDCalculations: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+PayrollEntryTab.jsx:225  Error loading premiums: {message: 'AbortError: signal is aborted without reason', details: 'AbortError: signal is aborted without reason\n    a…ite/deps/react-dom_client.js?v=aef59274:10400:13)', hint: '', code: '20'}
+(anonymous) @ PayrollEntryTab.jsx:225
+await in (anonymous)
+(anonymous) @ PayrollEntryTab.jsx:340
+react_stack_bottom_frame @ react-dom-client.development.js:23953
+runWithFiberInDEV @ react-dom-client.development.js:1519
+commitHookEffectListMount @ react-dom-client.development.js:11905
+commitHookPassiveMountEffects @ react-dom-client.development.js:12026
+commitPassiveMountOnFiber @ react-dom-client.development.js:13841
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13834
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13957
+recursivelyTraversePassiveMountEffects @ react-dom-client.development.js:13815
+commitPassiveMountOnFiber @ react-dom-client.development.js:13853
+flushPassiveEffects @ react-dom-client.development.js:15737
+flushPendingEffects @ react-dom-client.development.js:15702
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16204
+performWorkUntilDeadline @ scheduler.development.js:45
+<PayrollEntryTab>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+renderTabContent @ HRPayrollDashboard.jsx:316
+HRPayrollDashboard @ HRPayrollDashboard.jsx:687
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<HRPayrollDashboard>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+App @ App.jsx:403
+react_stack_bottom_frame @ react-dom-client.development.js:23863
+renderWithHooksAgain @ react-dom-client.development.js:5629
+renderWithHooks @ react-dom-client.development.js:5541
+updateFunctionComponent @ react-dom-client.development.js:8897
+beginWork @ react-dom-client.development.js:10522
+runWithFiberInDEV @ react-dom-client.development.js:1519
+performUnitOfWork @ react-dom-client.development.js:15132
+workLoopSync @ react-dom-client.development.js:14956
+renderRootSync @ react-dom-client.development.js:14936
+performWorkOnRoot @ react-dom-client.development.js:14419
+performWorkOnRootViaSchedulerTask @ react-dom-client.development.js:16216
+performWorkUntilDeadline @ scheduler.development.js:45
+<App>
+exports.jsxDEV @ react-jsx-dev-runtime.development.js:346
+(anonymous) @ main.jsx:22
+usePOSAuth.js:84 HRPayrollDashboard: User role verified: owner
+HRPayrollDashboard.jsx:126 Active payroll runs: 8
+HRPayrollDashboard.jsx:135 Calculating monthly payroll from 2025-10-01 to 2025-10-31
+usePayrollCalculations.js:63 Settings result: {settingsData: {…}, settingsError: null}
+usePayrollCalculations.js:66 📋 STEP 2: Loading payroll runs...
+usePOSAuth.js:106 SidebarNav: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 SidebarNav: Authentication completed successfully
+usePOSAuth.js:84 HR Payroll Dashboard: User role verified: owner
+HRPayrollDashboard.jsx:151 Monthly payroll runs found: 2
+usePayrollCalculations.js:63 Settings result: {settingsData: {…}, settingsError: null}
+usePayrollCalculations.js:66 📋 STEP 2: Loading payroll runs...
+usePayrollCalculations.js:74 Runs result: {count: 10, runsError: null}
+usePayrollCalculations.js:77 📋 STEP 3: Loading user_roles...
+usePayrollCalculations.js:78 Query params: {business_id: 'cb982fca-cf7a-4f59-b9c7-55ca0364eddc', active: true}
+usePOSAuth.js:106 HRPayrollDashboard: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 HRPayrollDashboard: Authentication completed successfully
+usePOSAuth.js:84 usePayrollCalculations: User role verified: owner
+HRPayrollDashboard.jsx:173 Monthly payroll total: 897.77
+usePayrollCalculations.js:74 Runs result: {count: 10, runsError: null}
+usePayrollCalculations.js:77 📋 STEP 3: Loading user_roles...
+usePayrollCalculations.js:78 Query params: {business_id: 'cb982fca-cf7a-4f59-b9c7-55ca0364eddc', active: true}
+usePayrollCalculations.js:63 Settings result: {settingsData: {…}, settingsError: null}
+usePayrollCalculations.js:66 📋 STEP 2: Loading payroll runs...
+usePayrollCalculations.js:86 🔍 USER_ROLES QUERY COMPLETE
+usePayrollCalculations.js:87    Error: null
+usePayrollCalculations.js:88    Data count: 11
+usePayrollCalculations.js:89    Full data: (11) [{…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}]
+usePayrollCalculations.js:98 🔍 EXTRACTED USER IDS:
+usePayrollCalculations.js:99    Count: 11
+usePayrollCalculations.js:100    IDs: (11) ['e861f114-7a95-47c3-a4ca-465e7c405aac', '4cd91ad9-ddda-4cd4-9c9e-3a1f2833fcc9', '07b7210b-98e3-49aa-8a87-06f67dcbf91f', 'bc375015-abf9-4734-80eb-b0d5742d07d0', '4cd55d3c-c5b5-44ec-982d-0f1504a191d1', 'f3693c3b-7650-40b8-a93d-b0bac4c61d79', '198e6d4b-88a3-4efc-921f-0a3348ab482e', '5216922b-4b53-476c-9719-c922c0dcbde0', '82fffe14-a7a3-4507-a5cb-fad52a75922c', '475f3aee-6ca7-4080-adee-e6c48b3ea5bf', 'fc4973c3-13a1-46d0-80e5-2a7954bfab54']
+usePayrollCalculations.js:112 📋 STEP 4: Loading employees from users table...
+usePayrollCalculations.js:113 Query: SELECT * FROM users WHERE id IN (... 11 ids)
+usePOSAuth.js:106 HR Payroll Dashboard: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 HR Payroll Dashboard: Authentication completed successfully
+usePOSAuth.js:84 PayrollEntryTab: User role verified: owner
+HRPayrollDashboard.jsx:198 Dashboard stats updated: {totalEmployees: 11, activePayrollRuns: 8, monthlyPayroll: 897.77, pendingStatements: 2}
+usePayrollCalculations.js:86 🔍 USER_ROLES QUERY COMPLETE
+usePayrollCalculations.js:87    Error: null
+usePayrollCalculations.js:88    Data count: 11
+usePayrollCalculations.js:89    Full data: (11) [{…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}]
+usePayrollCalculations.js:98 🔍 EXTRACTED USER IDS:
+usePayrollCalculations.js:99    Count: 11
+usePayrollCalculations.js:100    IDs: (11) ['e861f114-7a95-47c3-a4ca-465e7c405aac', '4cd91ad9-ddda-4cd4-9c9e-3a1f2833fcc9', '07b7210b-98e3-49aa-8a87-06f67dcbf91f', 'bc375015-abf9-4734-80eb-b0d5742d07d0', '4cd55d3c-c5b5-44ec-982d-0f1504a191d1', 'f3693c3b-7650-40b8-a93d-b0bac4c61d79', '198e6d4b-88a3-4efc-921f-0a3348ab482e', '5216922b-4b53-476c-9719-c922c0dcbde0', '82fffe14-a7a3-4507-a5cb-fad52a75922c', '475f3aee-6ca7-4080-adee-e6c48b3ea5bf', 'fc4973c3-13a1-46d0-80e5-2a7954bfab54']
+usePayrollCalculations.js:112 📋 STEP 4: Loading employees from users table...
+usePayrollCalculations.js:113 Query: SELECT * FROM users WHERE id IN (... 11 ids)
+usePayrollCalculations.js:74 Runs result: {count: 10, runsError: null}
+usePayrollCalculations.js:77 📋 STEP 3: Loading user_roles...
+usePayrollCalculations.js:78 Query params: {business_id: 'cb982fca-cf7a-4f59-b9c7-55ca0364eddc', active: true}
+usePayrollCalculations.js:136 🔍 EMPLOYEES QUERY COMPLETE
+usePayrollCalculations.js:137    Error: null
+usePayrollCalculations.js:138    Data count: 1
+usePayrollCalculations.js:139    Expected count: 11
+usePayrollCalculations.js:140    Full employee data: [{…}]
+usePayrollCalculations.js:154 📋 STEP 5: Loading employee premiums...
+usePOSAuth.js:84 PayrollEntryTab: User role verified: owner
+usePOSAuth.js:106 usePayrollCalculations: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 usePayrollCalculations: Authentication completed successfully
+usePayrollCalculations.js:136 🔍 EMPLOYEES QUERY COMPLETE
+usePayrollCalculations.js:137    Error: null
+usePayrollCalculations.js:138    Data count: 1
+usePayrollCalculations.js:139    Expected count: 11
+usePayrollCalculations.js:140    Full employee data: [{…}]
+usePayrollCalculations.js:154 📋 STEP 5: Loading employee premiums...
+usePayrollCalculations.js:86 🔍 USER_ROLES QUERY COMPLETE
+usePayrollCalculations.js:87    Error: null
+usePayrollCalculations.js:88    Data count: 11
+usePayrollCalculations.js:89    Full data: (11) [{…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}]
+usePayrollCalculations.js:98 🔍 EXTRACTED USER IDS:
+usePayrollCalculations.js:99    Count: 11
+usePayrollCalculations.js:100    IDs: (11) ['e861f114-7a95-47c3-a4ca-465e7c405aac', '4cd91ad9-ddda-4cd4-9c9e-3a1f2833fcc9', '07b7210b-98e3-49aa-8a87-06f67dcbf91f', 'bc375015-abf9-4734-80eb-b0d5742d07d0', '4cd55d3c-c5b5-44ec-982d-0f1504a191d1', 'f3693c3b-7650-40b8-a93d-b0bac4c61d79', '198e6d4b-88a3-4efc-921f-0a3348ab482e', '5216922b-4b53-476c-9719-c922c0dcbde0', '82fffe14-a7a3-4507-a5cb-fad52a75922c', '475f3aee-6ca7-4080-adee-e6c48b3ea5bf', 'fc4973c3-13a1-46d0-80e5-2a7954bfab54']
+usePayrollCalculations.js:112 📋 STEP 4: Loading employees from users table...
+usePayrollCalculations.js:113 Query: SELECT * FROM users WHERE id IN (... 11 ids)
+usePOSAuth.js:106 PayrollEntryTab: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 PayrollEntryTab: Authentication completed successfully
+usePOSAuth.js:84 usePayrollCalculations: User role verified: owner
+usePayrollCalculations.js:162 Premium result: {count: 12, premiumError: null}
+usePayrollCalculations.js:165 📋 STEP 6: Attaching premiums to employees...
+usePayrollCalculations.js:170    Employee Test Test: 2 premiums
+usePayrollCalculations.js:175 ════════════════════════════════════════
+usePayrollCalculations.js:176 ✅ LOAD DATA COMPLETE
+usePayrollCalculations.js:177    Settings: true
+usePayrollCalculations.js:178    Employees loaded: 1
+usePayrollCalculations.js:179    Payroll runs: 10
+usePayrollCalculations.js:180    Employee names: ['Test Test']
+usePayrollCalculations.js:181 ════════════════════════════════════════
+usePOSAuth.js:39 usePayrollCalculations: Initializing authentication...
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:56 📋 STEP 1: Loading payroll settings...
+usePOSAuth.js:39 PETDraftLookupModal: Initializing authentication...
+usePOSAuth.js:39 usePayrollCalculations: Initializing authentication...
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:56 📋 STEP 1: Loading payroll settings...
+usePOSAuth.js:39 PETDraftLookupModal: Initializing authentication...
+usePayrollCalculations.js:40 ════════════════════════════════════════
+usePayrollCalculations.js:41 🚀 STARTING loadData
+usePayrollCalculations.js:42 Business ID: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePayrollCalculations.js:43 ════════════════════════════════════════
+usePayrollCalculations.js:56 📋 STEP 1: Loading payroll settings...
+usePOSAuth.js:43 usePayrollCalculations: Session check result: {session: true, error: null}
+usePOSAuth.js:52 usePayrollCalculations: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 usePayrollCalculations: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 PETDraftLookupModal: Session check result: {session: true, error: null}
+usePOSAuth.js:52 PETDraftLookupModal: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 PETDraftLookupModal: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 usePayrollCalculations: Session check result: {session: true, error: null}
+usePOSAuth.js:52 usePayrollCalculations: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 usePayrollCalculations: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:43 PETDraftLookupModal: Session check result: {session: true, error: null}
+usePOSAuth.js:52 PETDraftLookupModal: Authenticated as: 5@tanggo.ca
+usePOSAuth.js:57 PETDraftLookupModal: Business ID from localStorage: cb982fca-cf7a-4f59-b9c7-55ca0364eddc
+usePOSAuth.js:106 PayrollEntryTab: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 PayrollEntryTab: Authentication completed successfully
+usePOSAuth.js:84 useYTDCalculations: User role verified: owner
+usePayrollCalculations.js:162 Premium result: {count: 12, premiumError: null}
+usePayrollCalculations.js:165 📋 STEP 6: Attaching premiums to employees...
+usePayrollCalculations.js:170    Employee Test Test: 2 premiums
+usePayrollCalculations.js:175 ════════════════════════════════════════
+usePayrollCalculations.js:176 ✅ LOAD DATA COMPLETE
+usePayrollCalculations.js:177    Settings: true
+usePayrollCalculations.js:178    Employees loaded: 1
+usePayrollCalculations.js:179    Payroll runs: 10
+usePayrollCalculations.js:180    Employee names: ['Test Test']
+usePayrollCalculations.js:181 ════════════════════════════════════════
+usePayrollCalculations.js:136 🔍 EMPLOYEES QUERY COMPLETE
+usePayrollCalculations.js:137    Error: null
+usePayrollCalculations.js:138    Data count: 1
+usePayrollCalculations.js:139    Expected count: 11
+usePayrollCalculations.js:140    Full employee data: [{…}]
+usePayrollCalculations.js:154 📋 STEP 5: Loading employee premiums...
+usePayrollCalculations.js:63 Settings result: {settingsData: {…}, settingsError: null}
+usePayrollCalculations.js:66 📋 STEP 2: Loading payroll runs...
+usePOSAuth.js:84 PayrollEntryTab: User role verified: owner
+usePOSAuth.js:106 usePayrollCalculations: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 usePayrollCalculations: Authentication completed successfully
+usePayrollCalculations.js:162 Premium result: {count: 12, premiumError: null}
+usePayrollCalculations.js:165 📋 STEP 6: Attaching premiums to employees...
+usePayrollCalculations.js:170    Employee Test Test: 2 premiums
+usePayrollCalculations.js:175 ════════════════════════════════════════
+usePayrollCalculations.js:176 ✅ LOAD DATA COMPLETE
+usePayrollCalculations.js:177    Settings: true
+usePayrollCalculations.js:178    Employees loaded: 1
+usePayrollCalculations.js:179    Payroll runs: 10
+usePayrollCalculations.js:180    Employee names: ['Test Test']
+usePayrollCalculations.js:181 ════════════════════════════════════════
+usePayrollCalculations.js:63 Settings result: {settingsData: {…}, settingsError: null}
+usePayrollCalculations.js:66 📋 STEP 2: Loading payroll runs...
+usePOSAuth.js:106 useYTDCalculations: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 useYTDCalculations: Authentication completed successfully
+usePOSAuth.js:84 PayrollEntryTab: User role verified: owner
+usePayrollCalculations.js:74 Runs result: {count: 10, runsError: null}
+usePayrollCalculations.js:77 📋 STEP 3: Loading user_roles...
+usePayrollCalculations.js:78 Query params: {business_id: 'cb982fca-cf7a-4f59-b9c7-55ca0364eddc', active: true}
+usePayrollCalculations.js:63 Settings result: {settingsData: {…}, settingsError: null}
+usePayrollCalculations.js:66 📋 STEP 2: Loading payroll runs...
+usePOSAuth.js:106 PayrollEntryTab: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 PayrollEntryTab: Authentication completed successfully
+usePOSAuth.js:84 usePayrollCalculations: User role verified: owner
+usePayrollCalculations.js:74 Runs result: {count: 10, runsError: null}
+usePayrollCalculations.js:77 📋 STEP 3: Loading user_roles...
+usePayrollCalculations.js:78 Query params: {business_id: 'cb982fca-cf7a-4f59-b9c7-55ca0364eddc', active: true}
+usePayrollCalculations.js:86 🔍 USER_ROLES QUERY COMPLETE
+usePayrollCalculations.js:87    Error: null
+usePayrollCalculations.js:88    Data count: 11
+usePayrollCalculations.js:89    Full data: (11) [{…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}]
+usePayrollCalculations.js:98 🔍 EXTRACTED USER IDS:
+usePayrollCalculations.js:99    Count: 11
+usePayrollCalculations.js:100    IDs: (11) ['e861f114-7a95-47c3-a4ca-465e7c405aac', '4cd91ad9-ddda-4cd4-9c9e-3a1f2833fcc9', '07b7210b-98e3-49aa-8a87-06f67dcbf91f', 'bc375015-abf9-4734-80eb-b0d5742d07d0', '4cd55d3c-c5b5-44ec-982d-0f1504a191d1', 'f3693c3b-7650-40b8-a93d-b0bac4c61d79', '198e6d4b-88a3-4efc-921f-0a3348ab482e', '5216922b-4b53-476c-9719-c922c0dcbde0', '82fffe14-a7a3-4507-a5cb-fad52a75922c', '475f3aee-6ca7-4080-adee-e6c48b3ea5bf', 'fc4973c3-13a1-46d0-80e5-2a7954bfab54']
+usePayrollCalculations.js:112 📋 STEP 4: Loading employees from users table...
+usePayrollCalculations.js:113 Query: SELECT * FROM users WHERE id IN (... 11 ids)
+usePOSAuth.js:106 PayrollEntryTab: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 PayrollEntryTab: Authentication completed successfully
+usePOSAuth.js:84 useYTDCalculations: User role verified: owner
+usePayrollCalculations.js:74 Runs result: {count: 10, runsError: null}
+usePayrollCalculations.js:77 📋 STEP 3: Loading user_roles...
+usePayrollCalculations.js:78 Query params: {business_id: 'cb982fca-cf7a-4f59-b9c7-55ca0364eddc', active: true}
+usePayrollCalculations.js:136 🔍 EMPLOYEES QUERY COMPLETE
+usePayrollCalculations.js:137    Error: null
+usePayrollCalculations.js:138    Data count: 1
+usePayrollCalculations.js:139    Expected count: 11
+usePayrollCalculations.js:140    Full employee data: [{…}]
+usePayrollCalculations.js:154 📋 STEP 5: Loading employee premiums...
+usePayrollCalculations.js:86 🔍 USER_ROLES QUERY COMPLETE
+usePayrollCalculations.js:87    Error: null
+usePayrollCalculations.js:88    Data count: 11
+usePayrollCalculations.js:89    Full data: (11) [{…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}]
+usePayrollCalculations.js:98 🔍 EXTRACTED USER IDS:
+usePayrollCalculations.js:99    Count: 11
+usePayrollCalculations.js:100    IDs: (11) ['e861f114-7a95-47c3-a4ca-465e7c405aac', '4cd91ad9-ddda-4cd4-9c9e-3a1f2833fcc9', '07b7210b-98e3-49aa-8a87-06f67dcbf91f', 'bc375015-abf9-4734-80eb-b0d5742d07d0', '4cd55d3c-c5b5-44ec-982d-0f1504a191d1', 'f3693c3b-7650-40b8-a93d-b0bac4c61d79', '198e6d4b-88a3-4efc-921f-0a3348ab482e', '5216922b-4b53-476c-9719-c922c0dcbde0', '82fffe14-a7a3-4507-a5cb-fad52a75922c', '475f3aee-6ca7-4080-adee-e6c48b3ea5bf', 'fc4973c3-13a1-46d0-80e5-2a7954bfab54']
+usePayrollCalculations.js:112 📋 STEP 4: Loading employees from users table...
+usePayrollCalculations.js:113 Query: SELECT * FROM users WHERE id IN (... 11 ids)
+usePOSAuth.js:106 usePayrollCalculations: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 usePayrollCalculations: Authentication completed successfully
+usePOSAuth.js:84 usePayrollCalculations: User role verified: owner
+usePayrollCalculations.js:86 🔍 USER_ROLES QUERY COMPLETE
+usePayrollCalculations.js:87    Error: null
+usePayrollCalculations.js:88    Data count: 11
+usePayrollCalculations.js:89    Full data: (11) [{…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}, {…}]
+usePayrollCalculations.js:98 🔍 EXTRACTED USER IDS:
+usePayrollCalculations.js:99    Count: 11
+usePayrollCalculations.js:100    IDs: (11) ['e861f114-7a95-47c3-a4ca-465e7c405aac', '4cd91ad9-ddda-4cd4-9c9e-3a1f2833fcc9', '07b7210b-98e3-49aa-8a87-06f67dcbf91f', 'bc375015-abf9-4734-80eb-b0d5742d07d0', '4cd55d3c-c5b5-44ec-982d-0f1504a191d1', 'f3693c3b-7650-40b8-a93d-b0bac4c61d79', '198e6d4b-88a3-4efc-921f-0a3348ab482e', '5216922b-4b53-476c-9719-c922c0dcbde0', '82fffe14-a7a3-4507-a5cb-fad52a75922c', '475f3aee-6ca7-4080-adee-e6c48b3ea5bf', 'fc4973c3-13a1-46d0-80e5-2a7954bfab54']
+usePayrollCalculations.js:112 📋 STEP 4: Loading employees from users table...
+usePayrollCalculations.js:113 Query: SELECT * FROM users WHERE id IN (... 11 ids)
+usePayrollCalculations.js:136 🔍 EMPLOYEES QUERY COMPLETE
+usePayrollCalculations.js:137    Error: null
+usePayrollCalculations.js:138    Data count: 1
+usePayrollCalculations.js:139    Expected count: 11
+usePayrollCalculations.js:140    Full employee data: [{…}]
+usePayrollCalculations.js:154 📋 STEP 5: Loading employee premiums...
+usePayrollCalculations.js:162 Premium result: {count: 12, premiumError: null}
+usePayrollCalculations.js:165 📋 STEP 6: Attaching premiums to employees...
+usePayrollCalculations.js:170    Employee Test Test: 2 premiums
+usePayrollCalculations.js:175 ════════════════════════════════════════
+usePayrollCalculations.js:176 ✅ LOAD DATA COMPLETE
+usePayrollCalculations.js:177    Settings: true
+usePayrollCalculations.js:178    Employees loaded: 1
+usePayrollCalculations.js:179    Payroll runs: 10
+usePayrollCalculations.js:180    Employee names: ['Test Test']
+usePayrollCalculations.js:181 ════════════════════════════════════════
+usePOSAuth.js:84 PETDraftLookupModal: User role verified: owner
+usePOSAuth.js:106 useYTDCalculations: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 useYTDCalculations: Authentication completed successfully
+usePayrollCalculations.js:136 🔍 EMPLOYEES QUERY COMPLETE
+usePayrollCalculations.js:137    Error: null
+usePayrollCalculations.js:138    Data count: 1
+usePayrollCalculations.js:139    Expected count: 11
+usePayrollCalculations.js:140    Full employee data: [{…}]
+usePayrollCalculations.js:154 📋 STEP 5: Loading employee premiums...
+usePayrollCalculations.js:162 Premium result: {count: 12, premiumError: null}
+usePayrollCalculations.js:165 📋 STEP 6: Attaching premiums to employees...
+usePayrollCalculations.js:170    Employee Test Test: 2 premiums
+usePayrollCalculations.js:175 ════════════════════════════════════════
+usePayrollCalculations.js:176 ✅ LOAD DATA COMPLETE
+usePayrollCalculations.js:177    Settings: true
+usePayrollCalculations.js:178    Employees loaded: 1
+usePayrollCalculations.js:179    Payroll runs: 10
+usePayrollCalculations.js:180    Employee names: ['Test Test']
+usePayrollCalculations.js:181 ════════════════════════════════════════
+usePOSAuth.js:84 usePayrollCalculations: User role verified: owner
+usePOSAuth.js:106 usePayrollCalculations: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 usePayrollCalculations: Authentication completed successfully
+usePayrollCalculations.js:162 Premium result: {count: 12, premiumError: null}
+usePayrollCalculations.js:165 📋 STEP 6: Attaching premiums to employees...
+usePayrollCalculations.js:170    Employee Test Test: 2 premiums
+usePayrollCalculations.js:175 ════════════════════════════════════════
+usePayrollCalculations.js:176 ✅ LOAD DATA COMPLETE
+usePayrollCalculations.js:177    Settings: true
+usePayrollCalculations.js:178    Employees loaded: 1
+usePayrollCalculations.js:179    Payroll runs: 10
+usePayrollCalculations.js:180    Employee names: ['Test Test']
+usePayrollCalculations.js:181 ════════════════════════════════════════
+usePOSAuth.js:84 PETDraftLookupModal: User role verified: owner
+usePOSAuth.js:106 PETDraftLookupModal: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 PETDraftLookupModal: Authentication completed successfully
+usePOSAuth.js:106 usePayrollCalculations: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 usePayrollCalculations: Authentication completed successfully
+usePOSAuth.js:106 PETDraftLookupModal: Business data loaded: Off The Wall Kids London
+usePOSAuth.js:114 PETDraftLookupModal: Authentication completed successfully

@@ -1,10 +1,48 @@
-// src/screens/TavariModules.jsx
-import React from 'react';
+// src/screens/TavariModules.jsx - WITH SECURITY TRACKING
+import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { SecurityWrapper, useSecurityContext } from '../Security';
 import { TavariStyles } from '../utils/TavariStyles';
 
 const TavariModules = () => {
   const navigate = useNavigate();
+
+  // Security context for page analytics
+  const {
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'TavariModules',
+    sensitiveComponent: false,
+    enableRateLimiting: false,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Track page view on mount
+  useEffect(() => {
+    const trackPageView = async () => {
+      await recordAction('modules_page_view', null, false);
+      await logSecurityEvent('modules_page_accessed', {
+        timestamp: new Date().toISOString(),
+        user_agent: navigator.userAgent,
+        screen_width: window.innerWidth,
+        referrer: document.referrer || 'direct'
+      }, 'low');
+    };
+
+    trackPageView();
+  }, []);
+
+  const handleBackToHome = async () => {
+    await recordAction('modules_back_to_home', null, false);
+    await logSecurityEvent('modules_navigation', {
+      action: 'back_to_home',
+      timestamp: new Date().toISOString()
+    }, 'low');
+    
+    navigate('/');
+  };
 
   const moduleCategories = [
     {
@@ -110,6 +148,7 @@ const TavariModules = () => {
     {
       title: "Web, App & Communications",
       items: [
+        "White-Label App Builder: Create custom iOS/Android apps with your branding, configure modules, manage builds and deployments",
         "Website/App Builder: CMS, SEO, online ordering, bookings",
         "Support Center & Chat: Help articles, bots, ticket handoff",
         "VoIP & SMS: Numbers, call routing, click-to-text, broadcasts"
@@ -158,7 +197,8 @@ const TavariModules = () => {
       color: TavariStyles.colors.white,
       border: `2px solid rgba(255, 255, 255, 0.3)`,
       backdropFilter: 'blur(10px)',
-      fontSize: TavariStyles.typography.fontSize.sm
+      fontSize: TavariStyles.typography.fontSize.sm,
+      transition: 'all 0.3s ease'
     },
 
     title: {
@@ -216,14 +256,7 @@ const TavariModules = () => {
       marginBottom: TavariStyles.spacing.sm,
       paddingLeft: TavariStyles.spacing.md,
       position: 'relative',
-      opacity: 0.95,
-      '&:before': {
-        content: '"•"',
-        position: 'absolute',
-        left: 0,
-        color: '#20b2aa',
-        fontWeight: TavariStyles.typography.fontWeight.bold
-      }
+      opacity: 0.95
     },
 
     footer: {
@@ -237,75 +270,83 @@ const TavariModules = () => {
   };
 
   return (
-    <div style={styles.container}>
-      <button 
-        style={styles.backButton}
-        onClick={() => navigate('/')}
-      >
-        ← Back to Home
-      </button>
+    <SecurityWrapper>
+      <div style={styles.container}>
+        <button 
+          style={styles.backButton}
+          onClick={handleBackToHome}
+          onMouseOver={(e) => {
+            e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.3)';
+            e.target.style.transform = 'translateX(-2px)';
+          }}
+          onMouseOut={(e) => {
+            e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.2)';
+            e.target.style.transform = 'translateX(0)';
+          }}
+        >
+          ← Back to Home
+        </button>
 
-      <header style={styles.header}>
-        <h1 style={styles.title}>Tavari Modules</h1>
-        <p style={styles.subtitle}>Complete Business Management Platform</p>
-      </header>
+        <header style={styles.header}>
+          <h1 style={styles.title}>Tavari Modules</h1>
+          <p style={styles.subtitle}>Complete Business Management Platform</p>
+        </header>
 
-      <div style={styles.grid}>
-        {moduleCategories.map((category, index) => (
-          <div key={category.title} style={styles.moduleCard}>
-            <h2 style={styles.moduleTitle}>{category.title}</h2>
-            <ul style={styles.moduleList}>
-              {category.items.map((item, itemIndex) => (
-                <li key={itemIndex} style={styles.moduleItem}>
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
+        <div style={styles.grid}>
+          {moduleCategories.map((category, index) => (
+            <div 
+              key={category.title} 
+              style={styles.moduleCard}
+              onMouseOver={(e) => {
+                e.currentTarget.style.transform = 'translateY(-2px)';
+                e.currentTarget.style.boxShadow = '0 12px 40px rgba(0,0,0,0.15)';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.boxShadow = '0 8px 32px rgba(0,0,0,0.1)';
+              }}
+            >
+              <h2 style={styles.moduleTitle}>{category.title}</h2>
+              <ul style={styles.moduleList}>
+                {category.items.map((item, itemIndex) => (
+                  <li key={itemIndex} style={styles.moduleItem}>
+                    • {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+
+        <footer style={styles.footer}>
+          <p>Tavari - Your Business's Command Centre</p>
+          <p style={{ fontSize: TavariStyles.typography.fontSize.sm, marginTop: TavariStyles.spacing.md }}>
+            Comprehensive solution for entertainment venues, restaurants, and retail businesses
+          </p>
+        </footer>
+
+        <style jsx global>{`
+          @media (max-width: 768px) {
+            .module-grid {
+              grid-template-columns: 1fr !important;
+              gap: ${TavariStyles.spacing.lg} !important;
+              padding: 0 ${TavariStyles.spacing.md} !important;
+            }
+            
+            .module-card {
+              padding: ${TavariStyles.spacing.lg} !important;
+            }
+            
+            .back-button {
+              position: relative !important;
+              top: auto !important;
+              left: auto !important;
+              margin-bottom: ${TavariStyles.spacing.lg} !important;
+            }
+          }
+        `}</style>
       </div>
-
-      <footer style={styles.footer}>
-        <p>Tavari - Your Business's Command Centre</p>
-        <p style={{ fontSize: TavariStyles.typography.fontSize.sm, marginTop: TavariStyles.spacing.md }}>
-          Comprehensive solution for entertainment venues, restaurants, and retail businesses
-        </p>
-      </footer>
-
-      <style jsx global>{`
-        @media (max-width: 768px) {
-          .module-grid {
-            grid-template-columns: 1fr !important;
-            gap: ${TavariStyles.spacing.lg} !important;
-            padding: 0 ${TavariStyles.spacing.md} !important;
-          }
-          
-          .module-card {
-            padding: ${TavariStyles.spacing.lg} !important;
-          }
-          
-          .back-button {
-            position: relative !important;
-            top: auto !important;
-            left: auto !important;
-            margin-bottom: ${TavariStyles.spacing.lg} !important;
-          }
-        }
-        
-        .module-item::before {
-          content: "•";
-          position: absolute;
-          left: 0;
-          color: #20b2aa;
-          font-weight: bold;
-        }
-        
-        .module-card:hover {
-          transform: translateY(-2px);
-          box-shadow: 0 12px 40px rgba(0,0,0,0.15);
-        }
-      `}</style>
-    </div>
+    </SecurityWrapper>
   );
 };
 

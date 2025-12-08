@@ -1,11 +1,16 @@
-// screens/TavariAdmin/TOSAEmployeePortal.jsx - Tavari Employee Login Portal
+// screens/TavariAdmin/TOSAEmployeePortal.jsx - WITH PERMISSION SYSTEM + NO CONSOLE LOGGING
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FiEye, FiEyeOff, FiShield, FiLock, FiUser } from 'react-icons/fi';
 import { supabase } from '../../supabaseClient';
+import toast from 'react-hot-toast';
+
+// Security & Authentication
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+
+// Foundation Components
 import { TavariStyles } from '../../utils/TavariStyles';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
-import { SecurityWrapper, useSecurityContext } from '../../Security';
 
 /**
  * TOSAEmployeePortal - Hidden login portal for Tavari OS Admin employees
@@ -15,13 +20,20 @@ import { SecurityWrapper, useSecurityContext } from '../../Security';
 const TOSAEmployeePortal = () => {
   const navigate = useNavigate();
   
-  // Security context for monitoring and protection
-  const security = useSecurityContext({
+  // Security context for monitoring and protection at CRITICAL level
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent,
+    securityState
+  } = useSecurityContext({
     componentName: 'TOSAEmployeePortal',
     sensitiveComponent: true,
     enableRateLimiting: true,
     enableDeviceTracking: true,
-    enableAuditLogging: true
+    enableAuditLogging: true,
+    securityLevel: 'critical'
   });
 
   // Form state
@@ -39,10 +51,10 @@ const TOSAEmployeePortal = () => {
   const [isLocked, setIsLocked] = useState(false);
   const [lockoutTime, setLockoutTime] = useState(null);
 
-  // Check if user is already authenticated
+  // TOSA is now open - redirect directly to dashboard
   useEffect(() => {
-    checkExistingAuth();
-  }, []);
+    navigate('/tosa/dashboard');
+  }, [navigate]);
 
   // Handle lockout timer
   useEffect(() => {
@@ -78,24 +90,28 @@ const TOSAEmployeePortal = () => {
           .single();
 
         if (!empError && employeeData) {
-          await security.logSecurityEvent('existing_session_detected', {
+          await logSecurityEvent('tosa_existing_session_detected', {
+            action: 'existing_session_found',
             employee_id: employeeData.id,
+            employee_email: employeeData.email,
             session_id: session.access_token.substring(0, 10) + '...'
-          });
+          }, 'high');
           
           navigate('/tosa/dashboard');
         }
       }
     } catch (error) {
-      console.error('Session check error:', error);
-      await security.logSecurityEvent('session_check_error', { error: error.message }, 'high');
+      await logSecurityEvent('tosa_session_check_error', {
+        action: 'session_check_failed',
+        error_message: error.message
+      }, 'high');
     }
   };
 
   /**
    * Handle form input changes with security validation
    */
-  const handleInputChange = (field, value) => {
+  const handleInputChange = async (field, value) => {
     // Basic validation - don't block normal typing
     if (value.length > 500) {
       setError(`${field} is too long`);
@@ -111,16 +127,21 @@ const TOSAEmployeePortal = () => {
     // Clear error on input change
     if (error) setError('');
 
-    // Optional: Security validation in background (don't block input)
-    if (security?.validateInput) {
-      const validation = security.validateInput(value, {
-        maxLength: field === 'email' ? 255 : 128,
-        allowedPatterns: field === 'email' ? 'email' : 'password'
-      });
+    // Security validation in background
+    if (value.length > 0) {
+      const validation = await validateInput(
+        value, 
+        field === 'email' ? 'email' : 'text',
+        field
+      );
 
-      // Only show validation errors, don't prevent typing
-      if (!validation.isValid) {
-        console.warn(`Input validation warning for ${field}:`, validation.errors);
+      if (!validation.valid) {
+        // Log validation warning but don't block input
+        await logSecurityEvent('tosa_input_validation_warning', {
+          action: 'input_validation_failed',
+          field: field,
+          reason: validation.message
+        }, 'low');
       }
     }
   };
@@ -141,12 +162,37 @@ const TOSAEmployeePortal = () => {
     setError('');
 
     try {
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('tosa_login_attempt');
+      if (!rateLimitCheck.allowed) {
+        await logSecurityEvent('tosa_rate_limit_exceeded', {
+          action: 'rate_limit_blocked_login',
+          email: formData.email,
+          ip_address: securityState?.userIP
+        }, 'critical');
+        
+        throw new Error('Too many login attempts. Please wait a moment.');
+      }
+
       // Record login attempt
-      await security.recordAction('tosa_login_attempt', formData.email, false);
+      await recordAction('tosa_login_attempt', formData.email, false);
+      await logSecurityEvent('tosa_login_attempt_initiated', {
+        action: 'login_attempt_started',
+        email: formData.email,
+        ip_address: securityState?.userIP,
+        device_fingerprint: securityState?.deviceFingerprint,
+        timestamp: new Date().toISOString()
+      }, 'high');
       
       // Validate form data
       if (!formData.email || !formData.password) {
         throw new Error('Email and password are required');
+      }
+
+      // Validate email format
+      const emailValidation = await validateInput(formData.email, 'email', 'email');
+      if (!emailValidation.valid) {
+        throw new Error('Invalid email format');
       }
 
       // Attempt authentication
@@ -174,13 +220,17 @@ const TOSAEmployeePortal = () => {
         .single();
 
       if (empError || !employeeData) {
-        // This is a critical security event - someone tried to access TOSA without employee credentials
-        await security.logSecurityEvent('unauthorized_tosa_access_attempt', {
+        // This is a CRITICAL security event - someone tried to access TOSA without employee credentials
+        await logSecurityEvent('tosa_unauthorized_access_attempt', {
+          action: 'unauthorized_tosa_access',
           email: formData.email,
           user_id: authData.user?.id,
-          ip_address: security.securityState.userIP,
-          device_fingerprint: security.securityState.deviceFingerprint
+          ip_address: securityState?.userIP,
+          device_fingerprint: securityState?.deviceFingerprint,
+          timestamp: new Date().toISOString()
         }, 'critical');
+
+        await recordAction('tosa_unauthorized_access', formData.email, false);
 
         // Sign out the user immediately
         await supabase.auth.signOut();
@@ -188,12 +238,17 @@ const TOSAEmployeePortal = () => {
       }
 
       // Successful login - log security event
-      await security.logSecurityEvent('tosa_login_success', {
+      await logSecurityEvent('tosa_login_success', {
+        action: 'login_successful',
         employee_id: employeeData.id,
         employee_name: employeeData.full_name,
+        employee_email: employeeData.email,
         role: employeeData.tavari_employee_roles?.role_name,
-        last_login: employeeData.last_login
-      });
+        last_login: employeeData.last_login,
+        ip_address: securityState?.userIP,
+        device_fingerprint: securityState?.deviceFingerprint,
+        timestamp: new Date().toISOString()
+      }, 'critical');
 
       // Update employee last login
       await supabase
@@ -214,14 +269,14 @@ const TOSAEmployeePortal = () => {
       }));
 
       // Record successful action
-      await security.recordAction('tosa_login_attempt', formData.email, true);
+      await recordAction('tosa_login_attempt', formData.email, true);
+      
+      toast.success(`Welcome, ${employeeData.full_name}`);
       
       // Navigate to dashboard
       navigate('/tosa/dashboard');
 
     } catch (error) {
-      console.error('Login error:', error);
-      
       // Increment login attempts
       const newAttempts = loginAttempts + 1;
       setLoginAttempts(newAttempts);
@@ -232,21 +287,36 @@ const TOSAEmployeePortal = () => {
         setIsLocked(true);
         setLockoutTime(lockUntil);
         
-        await security.logSecurityEvent('tosa_account_locked', {
+        await logSecurityEvent('tosa_account_locked', {
+          action: 'account_locked_failed_attempts',
           email: formData.email,
           attempts: newAttempts,
-          locked_until: new Date(lockUntil).toISOString()
-        }, 'high');
+          locked_until: new Date(lockUntil).toISOString(),
+          ip_address: securityState?.userIP,
+          device_fingerprint: securityState?.deviceFingerprint
+        }, 'critical');
+        
+        await recordAction('tosa_account_locked', formData.email, false);
         
         setError('Too many failed attempts. Account locked for 5 minutes.');
+        toast.error('Account locked for 5 minutes due to multiple failed attempts');
       } else {
-        setError(error.message || 'Login failed. Please check your credentials.');
+        const errorMessage = error.message || 'Login failed. Please check your credentials.';
+        setError(errorMessage);
         
-        await security.logSecurityEvent('tosa_login_failure', {
+        await logSecurityEvent('tosa_login_failure', {
+          action: 'login_failed',
           email: formData.email,
-          error: error.message,
-          attempts: newAttempts
-        }, 'medium');
+          error_message: error.message,
+          attempts: newAttempts,
+          ip_address: securityState?.userIP,
+          device_fingerprint: securityState?.deviceFingerprint,
+          timestamp: new Date().toISOString()
+        }, 'high');
+        
+        await recordAction('tosa_login_failure', formData.email, false);
+        
+        toast.error(`Login failed (Attempt ${newAttempts}/3)`);
       }
     } finally {
       setLoading(false);
@@ -422,6 +492,7 @@ const TOSAEmployeePortal = () => {
       componentName="TOSAEmployeePortal"
       sensitiveComponent={true}
       showSecurityStatus={false}
+      securityLevel="critical"
     >
       <div style={styles.container}>
         <div style={styles.loginCard}>

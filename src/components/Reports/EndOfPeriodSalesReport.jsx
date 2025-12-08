@@ -968,7 +968,8 @@ This comprehensive report summarizes all business activity for the selected peri
               <div style={styles.summaryLabel}>Actual Cash</div>
             </div>
             <div style={styles.summaryCard}>
-              <div style={styles.summaryValue} style={{
+              <div style={{
+                ...styles.summaryValue,
                 color: Math.abs(periodData.drawerSummary.variance) > 5 ? TavariStyles.colors.danger : TavariStyles.colors.success
               }}>
                 {formatCurrency(periodData.drawerSummary.variance)}

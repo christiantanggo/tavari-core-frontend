@@ -1,11 +1,15 @@
-// src/screens/POS/POSInventory.jsx - FIXED: Allow $0.00 items
+// src/screens/POS/POSInventory.jsx - FIXED: Allow $0.00 items + Liquor Item Tracking
 import React, { useEffect, useState } from 'react';
 import { supabase } from '../../supabaseClient';
 import { logAction } from '../../helpers/posAudit';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import { TavariStyles } from '../../utils/TavariStyles';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
+import { SecurityWrapper } from '../../Security';
+import { useSecurityContext } from '../../Security';
 
 const POSInventory = () => {
   const auth = usePOSAuth({
@@ -13,6 +17,41 @@ const POSInventory = () => {
     requireBusiness: true,
     componentName: 'POSInventory'
   });
+
+  // Security context for inventory operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSInventory',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'medium'
+  });
+
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks
+  const canViewInventory = hasAnyPermission([
+    'pos.inventory.view',
+    'pos.inventory.create',
+    'pos.inventory.edit'
+  ]) || hasElevatedPrivileges();
+
+  const canCreateInventory = hasPermission('pos.inventory.create') || hasElevatedPrivileges();
+  const canEditInventory = hasPermission('pos.inventory.edit') || hasElevatedPrivileges();
+  const canDeleteInventory = hasPermission('pos.inventory.delete') || hasElevatedPrivileges();
+  const canManageStock = hasPermission('pos.inventory.manage_stock') || hasElevatedPrivileges();
+  const canViewCost = hasPermission('pos.inventory.view_cost') || hasElevatedPrivileges();
 
   // Data state
   const [inventory, setInventory] = useState([]);
@@ -36,7 +75,7 @@ const POSInventory = () => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
 
-  // Form state - only fields that exist in actual database
+  // Form state
   const [formData, setFormData] = useState({
     name: '',
     price: '',
@@ -65,7 +104,8 @@ const POSInventory = () => {
     min_quantity_per_sale: '1',
     prep_time_minutes: '',
     calories: '',
-    item_tax_overrides: []
+    item_tax_overrides: [],
+    is_liquor_item: false
   });
 
   // Calculate pagination values
@@ -75,25 +115,21 @@ const POSInventory = () => {
 
   // Load ALL supporting data when authenticated
   useEffect(() => {
-    if (auth.selectedBusinessId && auth.authUser) {
-      console.log('POSInventory: Loading data for business:', auth.selectedBusinessId);
-      
-      // Load all supporting data first
+    if (auth.selectedBusinessId && auth.authUser && canViewInventory) {
       Promise.all([
         fetchCategories(),
         fetchStations(),
         fetchTaxCategories(),
         fetchModifierGroups()
       ]).then(() => {
-        console.log('POSInventory: All supporting data loaded');
         fetchInventory();
       });
     }
-  }, [auth.selectedBusinessId, auth.authUser]);
+  }, [auth.selectedBusinessId, auth.authUser, canViewInventory]);
 
   // Reload inventory when pagination/search changes
   useEffect(() => {
-    if (auth.selectedBusinessId && !loading) {
+    if (auth.selectedBusinessId && !loading && canViewInventory) {
       fetchInventory();
     }
   }, [currentPage, itemsPerPage, searchTerm, sortBy, sortOrder]);
@@ -109,6 +145,13 @@ const POSInventory = () => {
     setError(null);
     
     try {
+      await logSecurityEvent('inventory_accessed', {
+        action: 'fetch_inventory',
+        business_id: auth.selectedBusinessId,
+        search_term: searchTerm,
+        page: currentPage
+      }, 'low');
+
       let query = supabase
         .from('pos_inventory')
         .select('*', { count: 'exact' })
@@ -130,8 +173,6 @@ const POSInventory = () => {
       const { data, error, count } = await query;
       if (error) throw error;
 
-      console.log('POSInventory: Loaded', data?.length, 'items');
-      console.log('POSInventory: Sample item station_ids:', data?.[0]?.station_ids);
       setInventory(data || []);
       setTotalItems(count || 0);
 
@@ -146,7 +187,11 @@ const POSInventory = () => {
         }
       });
     } catch (err) {
-      console.error('POSInventory: Error fetching inventory:', err);
+      await logSecurityEvent('inventory_fetch_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Error fetching inventory: ' + err.message);
     } finally {
       setLoading(false);
@@ -162,10 +207,12 @@ const POSInventory = () => {
         .eq('business_id', auth.selectedBusinessId)
         .order('name', { ascending: true });
       if (error) throw error;
-      console.log('POSInventory: Loaded', data?.length, 'categories');
       setCategories(data || []);
     } catch (err) {
-      console.error('Error fetching categories:', err);
+      await logSecurityEvent('categories_fetch_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'low');
     }
   };
 
@@ -181,12 +228,10 @@ const POSInventory = () => {
       
       if (error) throw error;
       
-      console.log('POSInventory: Loaded stations:', data);
       setStations(data || []);
       
       // If no stations exist, create default Kitchen station
       if (!data || data.length === 0) {
-        console.log('POSInventory: No stations found, creating default Kitchen station');
         const { data: newStation, error: createError } = await supabase
           .from('pos_stations')
           .insert({
@@ -201,12 +246,20 @@ const POSInventory = () => {
           .single();
         
         if (!createError && newStation) {
-          console.log('POSInventory: Created default Kitchen station');
           setStations([newStation]);
+          
+          await logSecurityEvent('default_station_created', {
+            station_name: 'Kitchen',
+            business_id: auth.selectedBusinessId
+          }, 'low');
         }
       }
     } catch (err) {
-      console.error('Error fetching stations:', err);
+      await logSecurityEvent('stations_fetch_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Unable to load stations. Please check your station configuration.');
     }
   };
@@ -221,18 +274,18 @@ const POSInventory = () => {
         .eq('is_active', true)
         .order('name', { ascending: true });
       if (error) throw error;
-      console.log('POSInventory: Loaded', data?.length, 'tax categories');
       setTaxCategories(data || []);
     } catch (err) {
-      console.error('Error fetching tax categories:', err);
+      await logSecurityEvent('tax_categories_fetch_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'low');
     }
   };
 
   const fetchModifierGroups = async () => {
     if (!auth.selectedBusinessId) return;
     try {
-      console.log('POSInventory: Fetching modifier groups for business:', auth.selectedBusinessId);
-      
       const { data, error } = await supabase
         .from('pos_modifier_groups')
         .select('id, name, is_required, max_selections, sort_order')
@@ -240,25 +293,21 @@ const POSInventory = () => {
         .eq('is_active', true)
         .order('sort_order', { ascending: true, nullsLast: true });
       
-      if (error) {
-        console.error('Error fetching modifier groups:', error);
-        throw error;
-      }
+      if (error) throw error;
       
-      console.log('POSInventory: Loaded modifier groups:', data);
-      console.log('POSInventory: Modifier groups count:', data?.length || 0);
-      
-      // Transform the data to match what the component expects
       const transformedData = (data || []).map(group => ({
         ...group,
-        required: group.is_required || false // Map is_required to required for backward compatibility
+        required: group.is_required || false
       }));
       
       setModifierGroups(transformedData);
       
     } catch (err) {
-      console.error('Error fetching modifier groups:', err);
-      // Don't set error here, just log it - modifier groups are optional
+      await logSecurityEvent('modifier_groups_fetch_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'low');
+      
       setModifierGroups([]);
     }
   };
@@ -302,48 +351,44 @@ const POSInventory = () => {
       min_quantity_per_sale: '1',
       prep_time_minutes: '',
       calories: '',
-      item_tax_overrides: []
+      item_tax_overrides: [],
+      is_liquor_item: false
     });
   };
 
   const openAddModal = () => {
-    console.log('Opening add modal with stations:', stations);
-    console.log('Opening add modal with modifier groups:', modifierGroups);
+    if (!canCreateInventory) {
+      setError('You do not have permission to create inventory items');
+      return;
+    }
     resetForm();
     setShowAddModal(true);
   };
 
   const openEditModal = async (item) => {
-    console.log('Opening edit modal for item:', item);
-    console.log('Available stations:', stations);
-    console.log('Available modifier groups:', modifierGroups);
-    console.log('Item station_ids from DB:', item.station_ids, typeof item.station_ids);
-    
+    if (!canEditInventory) {
+      setError('You do not have permission to edit inventory items');
+      return;
+    }
+
     setEditingItem(item);
     
-    // Enhanced station_ids handling with debugging
+    // Enhanced station_ids handling
     let stationIds = [];
     
     if (item.station_ids) {
       if (Array.isArray(item.station_ids)) {
         stationIds = item.station_ids;
-        console.log('station_ids is already an array:', stationIds);
       } else if (typeof item.station_ids === 'string') {
         try {
           stationIds = JSON.parse(item.station_ids);
-          console.log('Parsed station_ids from string:', stationIds);
         } catch (e) {
-          console.error('Failed to parse station_ids string:', e);
           stationIds = [];
         }
       } else if (typeof item.station_ids === 'object') {
-        // Handle JSONB object/array
         stationIds = Array.isArray(item.station_ids) ? item.station_ids : [];
-        console.log('station_ids from JSONB object:', stationIds);
       }
     }
-    
-    console.log('Final parsed station_ids for form:', stationIds);
     
     setFormData({
       name: item.name || '',
@@ -373,7 +418,8 @@ const POSInventory = () => {
       min_quantity_per_sale: item.min_quantity_per_sale || '1',
       prep_time_minutes: item.prep_time_minutes || '',
       calories: item.calories || '',
-      item_tax_overrides: item.item_tax_overrides || []
+      item_tax_overrides: item.item_tax_overrides || [],
+      is_liquor_item: item.is_liquor_item || false
     });
     
     setShowEditModal(true);
@@ -387,7 +433,6 @@ const POSInventory = () => {
   };
 
   const handleInputChange = (field, value) => {
-    console.log(`Form field changed: ${field} = ${value}`);
     setFormData(prev => ({
       ...prev,
       [field]: value
@@ -395,18 +440,14 @@ const POSInventory = () => {
   };
 
   const toggleArrayField = (field, value) => {
-    console.log(`Toggling array field: ${field}, value: ${value}`);
     setFormData(prev => {
       const currentArray = prev[field] || [];
-      console.log(`Current ${field}:`, currentArray);
       
       let newArray;
       if (currentArray.includes(value)) {
         newArray = currentArray.filter(v => v !== value);
-        console.log(`Removed ${value} from ${field}:`, newArray);
       } else {
         newArray = [...currentArray, value];
-        console.log(`Added ${value} to ${field}:`, newArray);
       }
       
       return {
@@ -417,12 +458,31 @@ const POSInventory = () => {
   };
 
   const saveItem = async () => {
-    if (!formData.name.trim()) {
+    // Permission checks
+    if (editingItem && !canEditInventory) {
+      setError('You do not have permission to edit inventory items');
+      return;
+    }
+    if (!editingItem && !canCreateInventory) {
+      setError('You do not have permission to create inventory items');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('inventory_save', 10, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many save attempts. Please wait a moment.');
+      return;
+    }
+
+    // Validate input
+    const nameValidation = validateInput(formData.name, 'text', 'item_name');
+    if (!nameValidation.valid || !formData.name.trim()) {
       setError('Item name is required');
       return;
     }
 
-    // FIXED: Allow $0.00 items - only check for negative prices or invalid values
+    // Allow $0.00 items - only check for negative prices or invalid values
     const priceValue = parseFloat(formData.price);
     if (formData.price === '' || isNaN(priceValue) || priceValue < 0) {
       setError('Price must be $0.00 or greater');
@@ -431,12 +491,6 @@ const POSInventory = () => {
 
     setError(null);
     try {
-      console.log('=== SAVE ITEM DEBUG ===');
-      console.log('Form data station_ids:', formData.station_ids);
-      console.log('Form data station_ids type:', typeof formData.station_ids);
-      console.log('Form data station_ids is array:', Array.isArray(formData.station_ids));
-      console.log('Form data station_ids length:', formData.station_ids?.length);
-
       // Build itemData using ONLY columns that exist in your actual schema
       const itemData = {
         business_id: auth.selectedBusinessId,
@@ -452,52 +506,48 @@ const POSInventory = () => {
         low_stock_threshold: formData.track_stock ? (parseInt(formData.low_stock_threshold) || 5) : null,
         description: formData.description ? formData.description.trim() : null,
         
-        // These columns exist in your schema
         allow_price_override: formData.allow_price_override || false,
         require_manager_override: formData.require_manager_override || false,
         display_on_pos: formData.display_on_pos !== undefined ? formData.display_on_pos : true,
         online_ordering_available: formData.online_ordering_available || false,
         
-        // Tax and rebate fields that exist
         tax_category_ids: formData.tax_category_ids && formData.tax_category_ids.length > 0 ? formData.tax_category_ids : null,
         tax_exempt: formData.tax_exempt || false,
         rebate_eligible: formData.rebate_eligible || false,
         rebate_amount: formData.rebate_eligible ? (parseFloat(formData.rebate_amount) || null) : null,
         rebate_type: formData.rebate_eligible ? (formData.rebate_type || 'fixed') : null,
         
-        // Modifier and loyalty fields that exist
         modifier_group_ids: formData.modifier_group_ids && formData.modifier_group_ids.length > 0 ? formData.modifier_group_ids : null,
         loyalty_points_earned: parseInt(formData.loyalty_points_earned) || 0,
         loyalty_points_cost: parseInt(formData.loyalty_points_cost) || 0,
         
-        // Quantity and timing fields that exist
         max_quantity_per_sale: formData.max_quantity_per_sale ? parseInt(formData.max_quantity_per_sale) : null,
         min_quantity_per_sale: parseInt(formData.min_quantity_per_sale) || 1,
         prep_time_minutes: formData.prep_time_minutes ? parseInt(formData.prep_time_minutes) : null,
         calories: formData.calories ? parseInt(formData.calories) : null,
         
-        // Tax overrides field that exists
-        item_tax_overrides: formData.item_tax_overrides && formData.item_tax_overrides.length > 0 ? formData.item_tax_overrides : null
+        item_tax_overrides: formData.item_tax_overrides && formData.item_tax_overrides.length > 0 ? formData.item_tax_overrides : null,
+        
+        is_liquor_item: formData.is_liquor_item || false
       };
 
-      console.log('Final itemData being sent to database:', itemData);
-      console.log('Station IDs specifically:', itemData.station_ids);
-
       if (editingItem) {
-        console.log('Updating existing item with ID:', editingItem.id);
-        
         const { data, error } = await supabase
           .from('pos_inventory')
           .update({ ...itemData, updated_at: new Date().toISOString() })
           .eq('id', editingItem.id)
           .select();
 
-        if (error) {
-          console.error('Update error details:', error);
-          throw error;
-        }
+        if (error) throw error;
 
-        console.log('Updated item returned from DB:', data);
+        await logSecurityEvent('inventory_item_updated', {
+          item_id: editingItem.id,
+          item_name: itemData.name,
+          station_ids: itemData.station_ids,
+          is_liquor_item: itemData.is_liquor_item,
+          business_id: auth.selectedBusinessId,
+          updated_by: auth.authUser?.id
+        }, 'low');
 
         await logAction({
           action: 'inventory_item_updated',
@@ -506,23 +556,27 @@ const POSInventory = () => {
             item_id: editingItem.id, 
             item_name: itemData.name,
             station_ids: itemData.station_ids,
+            is_liquor_item: itemData.is_liquor_item,
             changes: Object.keys(itemData).filter(key => itemData[key] !== editingItem[key])
           }
         });
       } else {
-        console.log('Creating new item');
-        
         const { data, error } = await supabase
           .from('pos_inventory')
           .insert([itemData])
           .select();
 
-        if (error) {
-          console.error('Insert error details:', error);
-          throw error;
-        }
+        if (error) throw error;
 
-        console.log('Inserted item returned from DB:', data);
+        await logSecurityEvent('inventory_item_created', {
+          item_name: itemData.name,
+          price: itemData.price,
+          station_ids: itemData.station_ids,
+          stations: itemData.station_ids?.length || 0,
+          is_liquor_item: itemData.is_liquor_item,
+          business_id: auth.selectedBusinessId,
+          created_by: auth.authUser?.id
+        }, 'low');
 
         await logAction({
           action: 'inventory_item_created',
@@ -531,23 +585,32 @@ const POSInventory = () => {
             item_name: itemData.name,
             price: itemData.price,
             station_ids: itemData.station_ids,
-            stations: itemData.station_ids?.length || 0
+            stations: itemData.station_ids?.length || 0,
+            is_liquor_item: itemData.is_liquor_item
           }
         });
       }
 
+      await recordAction('inventory_saved', { item_name: itemData.name }, true);
       closeModals();
       fetchInventory();
     } catch (err) {
-      console.error('Save error:', err);
-      console.error('Error code:', err.code);
-      console.error('Error message:', err.message);
-      console.error('Error details:', err.details);
+      await logSecurityEvent('inventory_save_error', {
+        error: err.message,
+        item_name: formData.name,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Error saving item: ' + err.message);
     }
   };
 
   const deleteItem = async (id) => {
+    if (!canDeleteInventory) {
+      setError('You do not have permission to delete inventory items');
+      return;
+    }
+
     if (!window.confirm('Are you sure you want to delete this item? This action cannot be undone.')) return;
     
     setError(null);
@@ -555,14 +618,27 @@ const POSInventory = () => {
       const { error } = await supabase.from('pos_inventory').delete().eq('id', id);
       if (error) throw error;
 
+      await logSecurityEvent('inventory_item_deleted', {
+        item_id: id,
+        business_id: auth.selectedBusinessId,
+        deleted_by: auth.authUser?.id
+      }, 'medium');
+
       await logAction({
         action: 'inventory_item_deleted',
         context: 'POSInventory',
         metadata: { item_id: id }
       });
 
+      await recordAction('inventory_deleted', { item_id: id }, true);
       fetchInventory();
     } catch (err) {
+      await logSecurityEvent('inventory_delete_error', {
+        error: err.message,
+        item_id: id,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Error deleting item: ' + err.message);
     }
   };
@@ -583,11 +659,8 @@ const POSInventory = () => {
   };
 
   const getStationNames = (stationIds) => {
-    console.log('getStationNames called with:', stationIds, typeof stationIds);
-    
     if (!stationIds) {
-      console.log('No station_ids provided');
-      return 'â€”';
+      return '—';
     }
     
     let idsArray = [];
@@ -599,30 +672,23 @@ const POSInventory = () => {
       try {
         idsArray = JSON.parse(stationIds);
       } catch (e) {
-        console.error('Failed to parse station_ids string:', e);
-        return 'â€”';
+        return '—';
       }
     } else if (typeof stationIds === 'object') {
       idsArray = Array.isArray(stationIds) ? stationIds : [];
     }
     
     if (idsArray.length === 0) {
-      console.log('Empty station_ids array');
-      return 'â€”';
+      return '—';
     }
-    
-    console.log('Processing station IDs:', idsArray);
-    console.log('Available stations:', stations);
     
     const stationNames = idsArray
       .map(id => {
         const station = stations.find(s => s.id === id);
-        console.log(`Looking for station ${id}, found:`, station);
         return station ? station.name : `Unknown (${id})`;
       })
       .join(', ');
     
-    console.log('Final station names:', stationNames);
     return stationNames;
   };
 
@@ -818,6 +884,12 @@ const POSInventory = () => {
       gap: TavariStyles.spacing.md,
       marginTop: TavariStyles.spacing.sm
     },
+    checkboxHint: {
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray600,
+      marginTop: TavariStyles.spacing.xs,
+      fontStyle: 'italic'
+    },
     saveButton: {
       ...TavariStyles.components.button.base,
       ...TavariStyles.components.button.variants.primary,
@@ -878,6 +950,24 @@ const POSInventory = () => {
       borderRadius: TavariStyles.borderRadius.md,
       marginTop: TavariStyles.spacing.sm,
       fontSize: TavariStyles.typography.fontSize.sm
+    },
+    liquorBadge: {
+      fontSize: TavariStyles.typography.fontSize.xs,
+      padding: `${TavariStyles.spacing.xs} ${TavariStyles.spacing.sm}`,
+      borderRadius: TavariStyles.borderRadius.sm,
+      backgroundColor: TavariStyles.colors.primary,
+      color: TavariStyles.colors.white,
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      marginLeft: TavariStyles.spacing.xs
+    },
+    noAccessContainer: {
+      padding: TavariStyles.spacing['3xl'],
+      textAlign: 'center'
+    },
+    noAccessText: {
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600,
+      margin: 0
     }
   };
 
@@ -886,6 +976,28 @@ const POSInventory = () => {
       <div style={TavariStyles.components.loading.container}>Loading inventory...</div>
     </div>
   );
+
+  // Check overall access permission
+  if (!loading && !permissionsLoading && !canViewInventory) {
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['employee', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="POSInventory"
+        >
+          <div style={styles.container}>
+            <div style={styles.noAccessContainer}>
+              <h3 style={styles.error}>Access Denied</h3>
+              <p style={styles.noAccessText}>
+                You do not have permission to view inventory.
+              </p>
+            </div>
+          </div>
+        </POSAuthWrapper>
+      </SecurityWrapper>
+    );
+  }
 
   const renderEditModal = () => {
     if (!showEditModal && !showAddModal) return null;
@@ -898,7 +1010,7 @@ const POSInventory = () => {
         <div style={styles.modalContent}>
           <div style={styles.modalHeader}>
             <h2>{modalTitle}</h2>
-            <button onClick={closeModals} style={{ fontSize: '24px', cursor: 'pointer', border: 'none', background: 'none' }}>Ã—</button>
+            <button onClick={closeModals} style={{ fontSize: '24px', cursor: 'pointer', border: 'none', background: 'none' }}>×</button>
           </div>
 
           <div style={styles.modalBody}>
@@ -928,18 +1040,20 @@ const POSInventory = () => {
                     placeholder="0.00"
                   />
                 </div>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Cost</label>
-                  <input
-                    type="number"
-                    value={formData.cost}
-                    onChange={(e) => handleInputChange('cost', e.target.value)}
-                    style={styles.input}
-                    step="0.01"
-                    min="0"
-                    placeholder="0.00"
-                  />
-                </div>
+                {canViewCost && (
+                  <div style={styles.formGroup}>
+                    <label style={styles.label}>Cost</label>
+                    <input
+                      type="number"
+                      value={formData.cost}
+                      onChange={(e) => handleInputChange('cost', e.target.value)}
+                      style={styles.input}
+                      step="0.01"
+                      min="0"
+                      placeholder="0.00"
+                    />
+                  </div>
+                )}
                 <div style={styles.formGroup}>
                   <label style={styles.label}>SKU</label>
                   <input
@@ -996,11 +1110,7 @@ const POSInventory = () => {
                     <TavariCheckbox
                       key={station.id}
                       checked={formData.station_ids.includes(station.id)}
-                      onChange={() => {
-                        console.log('Checkbox toggled for station:', station.id, station.name);
-                        console.log('Current station_ids before toggle:', formData.station_ids);
-                        toggleArrayField('station_ids', station.id);
-                      }}
+                      onChange={() => toggleArrayField('station_ids', station.id)}
                       label={`${station.name}${station.description ? ` - ${station.description}` : ''}`}
                       id={`station-${station.id}`}
                     />
@@ -1014,60 +1124,64 @@ const POSInventory = () => {
               <p style={{ fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray600, marginTop: TavariStyles.spacing.sm }}>
                 Select which stations should receive this item when ordered. Items will appear on the kitchen display screens for selected stations.
               </p>
-              
-              {/* DEBUG INFO */}
-              <div style={{ 
-                marginTop: TavariStyles.spacing.sm, 
-                padding: TavariStyles.spacing.sm, 
-                backgroundColor: TavariStyles.colors.gray100, 
-                borderRadius: TavariStyles.borderRadius.sm,
-                fontSize: TavariStyles.typography.fontSize.xs,
-                color: TavariStyles.colors.gray700
-              }}>
-                <strong>Debug:</strong> Current station_ids: [{formData.station_ids.join(', ')}]
-              </div>
             </div>
 
             {/* Inventory & Stock */}
-            <div style={styles.formSection}>
-              <h3 style={styles.formSectionTitle}>Inventory & Stock</h3>
-              <div style={styles.formGrid}>
-                <div style={styles.formGroup}>
-                  <TavariCheckbox
-                    checked={formData.track_stock}
-                    onChange={(checked) => handleInputChange('track_stock', checked)}
-                    label="Track Stock"
-                    id="track-stock"
-                  />
+            {canManageStock && (
+              <div style={styles.formSection}>
+                <h3 style={styles.formSectionTitle}>Inventory & Stock</h3>
+                <div style={styles.formGrid}>
+                  <div style={styles.formGroup}>
+                    <TavariCheckbox
+                      checked={formData.track_stock}
+                      onChange={(checked) => handleInputChange('track_stock', checked)}
+                      label="Track Stock"
+                      id="track-stock"
+                    />
+                  </div>
+                  {formData.track_stock && (
+                    <>
+                      <div style={styles.formGroup}>
+                        <label style={styles.label}>Stock Quantity</label>
+                        <input
+                          type="number"
+                          value={formData.stock_quantity}
+                          onChange={(e) => handleInputChange('stock_quantity', e.target.value)}
+                          style={styles.input}
+                          min="0"
+                          placeholder="0"
+                        />
+                      </div>
+                      <div style={styles.formGroup}>
+                        <label style={styles.label}>Low Stock Threshold</label>
+                        <input
+                          type="number"
+                          value={formData.low_stock_threshold}
+                          onChange={(e) => handleInputChange('low_stock_threshold', e.target.value)}
+                          style={styles.input}
+                          min="0"
+                          placeholder="5"
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
-                {formData.track_stock && (
-                  <>
-                    <div style={styles.formGroup}>
-                      <label style={styles.label}>Stock Quantity</label>
-                      <input
-                        type="number"
-                        value={formData.stock_quantity}
-                        onChange={(e) => handleInputChange('stock_quantity', e.target.value)}
-                        style={styles.input}
-                        min="0"
-                        placeholder="0"
-                      />
-                    </div>
-                    <div style={styles.formGroup}>
-                      <label style={styles.label}>Low Stock Threshold</label>
-                      <input
-                        type="number"
-                        value={formData.low_stock_threshold}
-                        onChange={(e) => handleInputChange('low_stock_threshold', e.target.value)}
-                        style={styles.input}
-                        min="0"
-                        placeholder="5"
-                      />
-                    </div>
-                  </>
-                )}
+                
+                {/* Liquor Item Checkbox */}
+                <div style={{ marginTop: TavariStyles.spacing.md }}>
+                  <TavariCheckbox
+                    checked={formData.is_liquor_item}
+                    onChange={(checked) => handleInputChange('is_liquor_item', checked)}
+                    label="🍾 Liquor Item (Weight Tracking)"
+                    id="is-liquor-item"
+                  />
+                  <p style={styles.checkboxHint}>
+                    Enable for liquor inventory that requires weight-based tracking and variance reporting. 
+                    Items marked as liquor will appear in the Liquor Management system for bottle weight tracking and shrinkage monitoring.
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Modifiers */}
             <div style={styles.formSection}>
@@ -1078,10 +1192,7 @@ const POSInventory = () => {
                     <TavariCheckbox
                       key={group.id}
                       checked={formData.modifier_group_ids.includes(group.id)}
-                      onChange={() => {
-                        console.log('Toggling modifier group:', group.id, group.name);
-                        toggleArrayField('modifier_group_ids', group.id);
-                      }}
+                      onChange={() => toggleArrayField('modifier_group_ids', group.id)}
                       label={`${group.name}${group.required ? ' (Required)' : ''}`}
                       id={`modifier-${group.id}`}
                     />
@@ -1095,20 +1206,6 @@ const POSInventory = () => {
               <p style={{ fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray600, marginTop: TavariStyles.spacing.sm }}>
                 Select modifier groups that should be available for this item. Required modifier groups must be selected by customers.
               </p>
-              
-              {/* DEBUG INFO for modifiers */}
-              <div style={{ 
-                marginTop: TavariStyles.spacing.sm, 
-                padding: TavariStyles.spacing.sm, 
-                backgroundColor: TavariStyles.colors.gray100, 
-                borderRadius: TavariStyles.borderRadius.sm,
-                fontSize: TavariStyles.typography.fontSize.xs,
-                color: TavariStyles.colors.gray700
-              }}>
-                <strong>Debug:</strong> 
-                <br />Loaded modifier groups: {modifierGroups.length}
-                <br />Current modifier_group_ids: [{formData.modifier_group_ids.join(', ')}]
-              </div>
             </div>
 
             {/* Settings & Options */}
@@ -1149,205 +1246,225 @@ const POSInventory = () => {
   };
 
   return (
-    <POSAuthWrapper
-      requiredRoles={['employee', 'manager', 'owner']}
-      requireBusiness={true}
-      componentName="POSInventory"
-      loadingContent={loadingContent}
-    >
-      <div style={styles.container}>
-        <div style={styles.header}>
-          <h2 style={styles.title}>POS Inventory Management</h2>
-          <p style={styles.subtitle}>Manage products, pricing, and station routing</p>
-        </div>
-
-        {error && <div style={styles.error}>{error}</div>}
-
-        {/* Search and Controls */}
-        <div style={styles.searchSection}>
-          <input
-            type="text"
-            placeholder="Search items by name, SKU, or barcode..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            style={styles.searchInput}
-          />
-          <button onClick={openAddModal} style={styles.addButton}>
-            Add New Item
-          </button>
-          <div style={{ display: 'flex', alignItems: 'center', gap: TavariStyles.spacing.sm }}>
-            <label style={{ fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray600 }}>
-              Items per page:
-            </label>
-            <select
-              value={itemsPerPage}
-              onChange={(e) => {
-                setItemsPerPage(Number(e.target.value));
-                setCurrentPage(1);
-              }}
-              style={styles.itemsPerPageSelect}
-            >
-              <option value="10">10</option>
-              <option value="25">25</option>
-              <option value="50">50</option>
-              <option value="100">100</option>
-            </select>
+    <SecurityWrapper>
+      <POSAuthWrapper
+        requiredRoles={['employee', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="POSInventory"
+        loadingContent={loadingContent}
+      >
+        <div style={styles.container}>
+          <div style={styles.header}>
+            <h2 style={styles.title}>POS Inventory Management</h2>
+            <p style={styles.subtitle}>Manage products, pricing, and station routing</p>
           </div>
-        </div>
 
-        {/* Inventory Table */}
-        {loading ? (
-          <div style={TavariStyles.components.loading.container}>Loading items...</div>
-        ) : (
-          <>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th} onClick={() => handleSort('name')}>
-                    Name {sortBy === 'name' && (sortOrder === 'asc' ? 'â–²' : 'â–¼')}
-                  </th>
-                  <th style={styles.th} onClick={() => handleSort('price')}>
-                    Price {sortBy === 'price' && (sortOrder === 'asc' ? 'â–²' : 'â–¼')}
-                  </th>
-                  <th style={styles.th}>Category</th>
-                  <th style={styles.th}>Stations</th>
-                  <th style={styles.th}>Stock</th>
-                  <th style={styles.th}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {inventory.length === 0 ? (
-                  <tr>
-                    <td colSpan="6" style={{ ...styles.td, textAlign: 'center', color: TavariStyles.colors.gray500, fontStyle: 'italic' }}>
-                      {searchTerm ? `No items match your search "${searchTerm}"` : 'No inventory items found'}
-                    </td>
-                  </tr>
-                ) : (
-                  inventory.map((item, i) => {
-                    const stockStatus = getStockStatus(item);
-                    const category = categories.find(c => c.id === item.category_id);
-                    const stationNames = getStationNames(item.station_ids);
-                    
-                    return (
-                      <tr key={item.id} style={{
-                        ...styles.row,
-                        backgroundColor: i % 2 === 0 ? TavariStyles.colors.gray50 : TavariStyles.colors.white
-                      }}>
-                        <td style={styles.td}>
-                          <div style={{ fontWeight: TavariStyles.typography.fontWeight.bold }}>
-                            {item.name}
-                          </div>
-                          {item.sku && (
-                            <div style={{ fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray600 }}>
-                              SKU: {item.sku}
-                            </div>
-                          )}
-                        </td>
-                        
-                        <td style={styles.td}>
-                          ${Number(item.price || 0).toFixed(2)}
-                          {Number(item.price || 0) === 0 && (
-                            <div style={{ 
-                              fontSize: TavariStyles.typography.fontSize.xs, 
-                              color: TavariStyles.colors.success,
-                              fontWeight: TavariStyles.typography.fontWeight.bold
-                            }}>
-                              FREE
-                            </div>
-                          )}
-                        </td>
-                        
-                        <td style={styles.td}>
-                          {category ? (
-                            <>
-                              {category.emoji} {category.name}
-                            </>
-                          ) : 'â€”'}
-                        </td>
-                        
-                        <td style={styles.td}>
-                          {stationNames !== 'â€”' ? (
-                            <span style={styles.stationBadge}>
-                              {stationNames}
-                            </span>
-                          ) : (
-                            <span style={{ color: TavariStyles.colors.gray500, fontSize: TavariStyles.typography.fontSize.xs }}>
-                              No stations
-                            </span>
-                          )}
-                        </td>
-                        
-                        <td style={styles.td}>
-                          {stockStatus ? (
-                            <span style={{
-                              ...styles.stockBadge,
-                              backgroundColor: stockStatus.color,
-                              color: 'white'
-                            }}>
-                              {stockStatus.text}
-                            </span>
-                          ) : (
-                            <span style={{ color: TavariStyles.colors.gray500, fontSize: TavariStyles.typography.fontSize.xs }}>
-                              Not tracked
-                            </span>
-                          )}
-                        </td>
-                        
-                        <td style={styles.td}>
-                          <div style={styles.actions}>
-                            <button 
-                              onClick={() => openEditModal(item)} 
-                              style={styles.editButton}
-                            >
-                              Edit
-                            </button>
-                            <button 
-                              onClick={() => deleteItem(item.id)} 
-                              style={styles.deleteButton}
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
+          {error && <div style={styles.error}>{error}</div>}
 
-            {/* Pagination Controls */}
-            {totalItems > 0 && (
-              <div style={styles.paginationSection}>
-                <div>
-                  Showing {startItem} to {endItem} of {totalItems} items
-                </div>
-                <div style={styles.paginationControls}>
-                  <button
-                    onClick={() => setCurrentPage(currentPage - 1)}
-                    disabled={currentPage === 1}
-                    style={styles.pageButton}
-                  >
-                    Previous
-                  </button>
-                  {renderPaginationButtons()}
-                  <button
-                    onClick={() => setCurrentPage(currentPage + 1)}
-                    disabled={currentPage === totalPages}
-                    style={styles.pageButton}
-                  >
-                    Next
-                  </button>
-                </div>
-              </div>
+          {/* Search and Controls */}
+          <div style={styles.searchSection}>
+            <input
+              type="text"
+              placeholder="Search items by name, SKU, or barcode..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              style={styles.searchInput}
+            />
+            {canCreateInventory && (
+              <PermissionGate
+                permissions={['pos.inventory.create']}
+                requireElevated
+              >
+                <button onClick={openAddModal} style={styles.addButton}>
+                  Add New Item
+                </button>
+              </PermissionGate>
             )}
-          </>
-        )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: TavariStyles.spacing.sm }}>
+              <label style={{ fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray600 }}>
+                Items per page:
+              </label>
+              <select
+                value={itemsPerPage}
+                onChange={(e) => {
+                  setItemsPerPage(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
+                style={styles.itemsPerPageSelect}
+              >
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </div>
+          </div>
 
-        {/* Modals */}
-        {renderEditModal()}
-      </div>
-    </POSAuthWrapper>
+          {/* Inventory Table */}
+          {loading || permissionsLoading ? (
+            <div style={TavariStyles.components.loading.container}>Loading items...</div>
+          ) : (
+            <>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th} onClick={() => handleSort('name')}>
+                      Name {sortBy === 'name' && (sortOrder === 'asc' ? '▲' : '▼')}
+                    </th>
+                    <th style={styles.th} onClick={() => handleSort('price')}>
+                      Price {sortBy === 'price' && (sortOrder === 'asc' ? '▲' : '▼')}
+                    </th>
+                    <th style={styles.th}>Category</th>
+                    <th style={styles.th}>Stations</th>
+                    {canManageStock && <th style={styles.th}>Stock</th>}
+                    <th style={styles.th}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {inventory.length === 0 ? (
+                    <tr>
+                      <td colSpan={canManageStock ? "6" : "5"} style={{ ...styles.td, textAlign: 'center', color: TavariStyles.colors.gray500, fontStyle: 'italic' }}>
+                        {searchTerm ? `No items match your search "${searchTerm}"` : 'No inventory items found'}
+                      </td>
+                    </tr>
+                  ) : (
+                    inventory.map((item, i) => {
+                      const stockStatus = getStockStatus(item);
+                      const category = categories.find(c => c.id === item.category_id);
+                      const stationNames = getStationNames(item.station_ids);
+                      
+                      return (
+                        <tr key={item.id} style={{
+                          ...styles.row,
+                          backgroundColor: i % 2 === 0 ? TavariStyles.colors.gray50 : TavariStyles.colors.white
+                        }}>
+                          <td style={styles.td}>
+                            <div style={{ display: 'flex', alignItems: 'center' }}>
+                              <div style={{ fontWeight: TavariStyles.typography.fontWeight.bold }}>
+                                {item.name}
+                              </div>
+                              {item.is_liquor_item && (
+                                <span style={styles.liquorBadge}>🍾 LIQUOR</span>
+                              )}
+                            </div>
+                            {item.sku && (
+                              <div style={{ fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray600 }}>
+                                SKU: {item.sku}
+                              </div>
+                            )}
+                          </td>
+                          
+                          <td style={styles.td}>
+                            ${Number(item.price || 0).toFixed(2)}
+                            {Number(item.price || 0) === 0 && (
+                              <div style={{ 
+                                fontSize: TavariStyles.typography.fontSize.xs, 
+                                color: TavariStyles.colors.success,
+                                fontWeight: TavariStyles.typography.fontWeight.bold
+                              }}>
+                                FREE
+                              </div>
+                            )}
+                          </td>
+                          
+                          <td style={styles.td}>
+                            {category ? (
+                              <>
+                                {category.emoji} {category.name}
+                              </>
+                            ) : '—'}
+                          </td>
+                          
+                          <td style={styles.td}>
+                            {stationNames !== '—' ? (
+                              <span style={styles.stationBadge}>
+                                {stationNames}
+                              </span>
+                            ) : (
+                              <span style={{ color: TavariStyles.colors.gray500, fontSize: TavariStyles.typography.fontSize.xs }}>
+                                No stations
+                              </span>
+                            )}
+                          </td>
+                          
+                          {canManageStock && (
+                            <td style={styles.td}>
+                              {stockStatus ? (
+                                <span style={{
+                                  ...styles.stockBadge,
+                                  backgroundColor: stockStatus.color,
+                                  color: 'white'
+                                }}>
+                                  {stockStatus.text}
+                                </span>
+                              ) : (
+                                <span style={{ color: TavariStyles.colors.gray500, fontSize: TavariStyles.typography.fontSize.xs }}>
+                                  Not tracked
+                                </span>
+                              )}
+                            </td>
+                          )}
+                          
+                          <td style={styles.td}>
+                            <div style={styles.actions}>
+                              {canEditInventory && (
+                                <button 
+                                  onClick={() => openEditModal(item)} 
+                                  style={styles.editButton}
+                                >
+                                  Edit
+                                </button>
+                              )}
+                              {canDeleteInventory && (
+                                <button 
+                                  onClick={() => deleteItem(item.id)} 
+                                  style={styles.deleteButton}
+                                >
+                                  Delete
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+
+              {/* Pagination Controls */}
+              {totalItems > 0 && (
+                <div style={styles.paginationSection}>
+                  <div>
+                    Showing {startItem} to {endItem} of {totalItems} items
+                  </div>
+                  <div style={styles.paginationControls}>
+                    <button
+                      onClick={() => setCurrentPage(currentPage - 1)}
+                      disabled={currentPage === 1}
+                      style={styles.pageButton}
+                    >
+                      Previous
+                    </button>
+                    {renderPaginationButtons()}
+                    <button
+                      onClick={() => setCurrentPage(currentPage + 1)}
+                      disabled={currentPage === totalPages}
+                      style={styles.pageButton}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Modals */}
+          {renderEditModal()}
+        </div>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

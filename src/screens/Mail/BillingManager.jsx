@@ -1,4 +1,4 @@
-// screens/Mail/BillingManager.jsx - With Email Pause Protection (CLEANED)
+// screens/Mail/BillingManager.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
@@ -9,9 +9,55 @@ import {
   FiAlertCircle, FiCheckCircle, FiRefreshCw, FiInfo
 } from 'react-icons/fi';
 
+// Permission System Imports
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import toast from 'react-hot-toast';
+
 const BillingManager = () => {
   const { business } = useBusiness();
   const businessId = business?.id;
+  
+  // Security context for sensitive billing data
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'BillingManager',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
+  // Authentication using standardized hook
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin'],
+    requireBusiness: true,
+    componentName: 'BillingManager'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
   
   const [currentBilling, setCurrentBilling] = useState(null);
   const [usageHistory, setUsageHistory] = useState([]);
@@ -21,12 +67,44 @@ const BillingManager = () => {
   const [showPauseModal, setShowPauseModal] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
 
+  // Permission checks
+  const canViewBilling = hasAnyPermission([
+    'mail.billing.view',
+    'mail.campaigns.view'
+  ]) || hasElevatedPrivileges();
+
+  const canEditBilling = hasPermission('mail.billing.edit') || isOwner();
+  
+  const canPauseAccount = hasPermission('mail.billing.edit') || hasElevatedPrivileges();
+  
+  const canExportBilling = hasPermission('mail.billing.export') || hasElevatedPrivileges();
+
+  const canViewSettings = hasPermission('mail.settings.view') || hasElevatedPrivileges();
+
   const loadBillingData = async () => {
-    console.log('📄 Starting loadBillingData for businessId:', businessId);
+    // Permission check before loading billing data
+    if (!canViewBilling) {
+      toast.error('You do not have permission to view billing information');
+      return;
+    }
+
+    // Rate limiting check
+    if (!checkRateLimit('load_billing', 10, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
+    console.log('📊 Starting loadBillingData for businessId:', businessId);
     setLoading(true);
     setError(null);
     
     try {
+      await logSecurityEvent('billing_data_access', {
+        action: 'load_billing_data',
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
+
       // Get current billing period
       const currentDate = new Date();
       const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
@@ -81,6 +159,11 @@ const BillingManager = () => {
 
       // If no current billing period exists, create one
       if (!currentBillingData) {
+        // Only owners/admins can create billing records
+        if (!hasElevatedPrivileges()) {
+          throw new Error('Insufficient permissions to create billing record');
+        }
+
         console.log('🆕 No billing record found, creating new one...');
         
         const newBillingRecord = {
@@ -111,6 +194,13 @@ const BillingManager = () => {
 
         console.log('✅ Created new billing record:', newBilling);
         setCurrentBilling(newBilling);
+
+        await logSecurityEvent('billing_record_created', {
+          billing_id: newBilling.id,
+          business_id: businessId,
+          period_start: newBillingRecord.billing_period_start,
+          period_end: newBillingRecord.billing_period_end
+        }, 'medium');
       } else {
         console.log('✅ Found existing billing record:', currentBillingData);
         setCurrentBilling(currentBillingData);
@@ -141,9 +231,19 @@ const BillingManager = () => {
 
       console.log('✅ Billing data loaded successfully');
 
+      await recordAction('billing_data_loaded', true, businessId);
+
     } catch (err) {
       console.error('❌ Error loading billing data:', err);
       setError(`Failed to load billing data: ${err.message}`);
+      
+      await logSecurityEvent('billing_load_error', {
+        error_message: err.message,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
+      
+      await recordAction('billing_data_loaded', false, businessId);
     } finally {
       setLoading(false);
     }
@@ -154,14 +254,22 @@ const BillingManager = () => {
     console.log('🏢 Business from context:', business);
     console.log('🆔 BusinessId:', businessId);
     
-    if (businessId) {
-      loadBillingData();
+    if (businessId && !authLoading && !permissionsLoading) {
+      // Check permissions before loading
+      if (canViewBilling) {
+        loadBillingData();
+      } else {
+        setLoading(false);
+        setError('You do not have permission to view billing information. Please contact your system administrator.');
+      }
     } else {
-      console.warn('⚠️ No businessId found - checking business context...');
-      setLoading(false);
-      setError('No business ID found. Please ensure you are logged in and have a business selected.');
+      if (!businessId) {
+        console.warn('⚠️ No businessId found - checking business context...');
+        setLoading(false);
+        setError('No business ID found. Please ensure you are logged in and have a business selected.');
+      }
     }
-  }, [businessId]); // Only depend on businessId, not the whole business object
+  }, [businessId, authLoading, permissionsLoading, canViewBilling]);
 
   const calculateCurrentUsage = () => {
     if (!currentBilling) return { usagePercent: 0, remainingEmails: 0, isOverage: false };
@@ -184,9 +292,30 @@ const BillingManager = () => {
   };
 
   const handlePauseAccount = async () => {
+    // Permission check
+    if (!canPauseAccount) {
+      toast.error('You do not have permission to pause/resume the account');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('pause_account', 3, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
     try {
       const newStatus = isPaused ? 'active' : 'paused';
       
+      await logSecurityEvent('account_status_change', {
+        action: isPaused ? 'resume_account' : 'pause_account',
+        billing_id: currentBilling.id,
+        old_status: isPaused ? 'paused' : 'active',
+        new_status: newStatus,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'high');
+
       const { error } = await supabase
         .from('mail_billing')
         .update({ 
@@ -200,35 +329,64 @@ const BillingManager = () => {
       setIsPaused(!isPaused);
       setShowPauseModal(false);
       await loadBillingData(); // Refresh data
+      
+      toast.success(isPaused ? 'Account resumed successfully' : 'Account paused successfully');
+      
+      await recordAction('account_status_changed', true, newStatus);
     } catch (err) {
       console.error('Error updating account status:', err);
       setError(err.message);
+      toast.error('Failed to update account status');
+      
+      await recordAction('account_status_changed', false, null);
     }
   };
 
   const exportBillingData = () => {
-    const csvData = usageHistory.map(billing => ({
-      Period: `${billing.billing_period_start} to ${billing.billing_period_end}`,
-      'Emails Included': billing.included_emails,
-      'Emails Used': billing.emails_used,
-      'Overage Emails': billing.overage_emails,
-      'Overage Cost': billing.overage_cost || 0,
-      'Total Cost': billing.total_cost || 0,
-      Status: billing.payment_status
-    }));
+    // Permission check
+    if (!canExportBilling) {
+      toast.error('You do not have permission to export billing data');
+      return;
+    }
 
-    const csvContent = [
-      Object.keys(csvData[0]).join(','),
-      ...csvData.map(row => Object.values(row).join(','))
-    ].join('\n');
+    try {
+      logSecurityEvent('billing_export', {
+        action: 'export_billing_csv',
+        business_id: businessId,
+        user_id: authUser?.id,
+        record_count: usageHistory.length
+      }, 'medium');
 
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `tavari-mail-billing-${Date.now()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+      const csvData = usageHistory.map(billing => ({
+        Period: `${billing.billing_period_start} to ${billing.billing_period_end}`,
+        'Emails Included': billing.included_emails,
+        'Emails Used': billing.emails_used,
+        'Overage Emails': billing.overage_emails,
+        'Overage Cost': billing.overage_cost || 0,
+        'Total Cost': billing.total_cost || 0,
+        Status: billing.payment_status
+      }));
+
+      const csvContent = [
+        Object.keys(csvData[0]).join(','),
+        ...csvData.map(row => Object.values(row).join(','))
+      ].join('\n');
+
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `tavari-mail-billing-${Date.now()}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      toast.success('Billing data exported successfully');
+      recordAction('billing_exported', true, businessId);
+    } catch (err) {
+      console.error('Error exporting billing data:', err);
+      toast.error('Failed to export billing data');
+      recordAction('billing_exported', false, businessId);
+    }
   };
 
   const renderOverviewTab = () => {
@@ -300,60 +458,66 @@ const BillingManager = () => {
         </div>
 
         {/* Cost Breakdown */}
-        <div style={styles.costSection}>
-          <h3 style={styles.sectionTitle}>
-            <FiDollarSign style={styles.sectionIcon} />
-            Cost Breakdown
-          </h3>
-          
-          <div style={styles.costGrid}>
-            <div style={styles.costCard}>
-              <div style={styles.costHeader}>
-                <span style={styles.costLabel}>Base Plan</span>
-                <span style={styles.costValue}>
-                  ${costs.monthlyBase.toFixed(2)}
-                </span>
+        <PermissionGate permission="mail.billing.view" fallback={
+          <div style={styles.permissionDenied}>
+            <FiAlertCircle style={styles.permissionIcon} />
+            <p>You do not have permission to view cost breakdown</p>
+          </div>
+        }>
+          <div style={styles.costSection}>
+            <h3 style={styles.sectionTitle}>
+              <FiDollarSign style={styles.sectionIcon} />
+              Cost Breakdown
+            </h3>
+            
+            <div style={styles.costGrid}>
+              <div style={styles.costCard}>
+                <div style={styles.costHeader}>
+                  <span style={styles.costLabel}>Base Plan</span>
+                  <span style={styles.costValue}>
+                    ${costs.monthlyBase.toFixed(2)}
+                  </span>
+                </div>
+                <div style={styles.costSubtext}>
+                  {isPaused ? 'Paused account fee' : 'Pay-per-email (no monthly fee)'}
+                </div>
               </div>
-              <div style={styles.costSubtext}>
-                {isPaused ? 'Paused account fee' : 'Pay-per-email (no monthly fee)'}
-              </div>
-            </div>
 
-            <div style={styles.costCard}>
-              <div style={styles.costHeader}>
-                <span style={styles.costLabel}>Overage Emails</span>
-                <span style={styles.costValue}>
-                  ${costs.overageCost.toFixed(2)}
-                </span>
+              <div style={styles.costCard}>
+                <div style={styles.costHeader}>
+                  <span style={styles.costLabel}>Overage Emails</span>
+                  <span style={styles.costValue}>
+                    ${costs.overageCost.toFixed(2)}
+                  </span>
+                </div>
+                <div style={styles.costSubtext}>
+                  {currentBilling?.overage_emails || 0} emails × $0.0025
+                </div>
               </div>
-              <div style={styles.costSubtext}>
-                {currentBilling?.overage_emails || 0} emails × $0.0025
-              </div>
-            </div>
 
-            <div style={{...styles.costCard, ...styles.totalCostCard}}>
-              <div style={styles.costHeader}>
-                <span style={styles.costLabel}>Total This Month</span>
-                <span style={{...styles.costValue, ...styles.totalCostValue}}>
-                  ${costs.totalCost.toFixed(2)}
-                </span>
-              </div>
-              <div style={styles.costSubtext}>
-                Billing period: {currentBilling?.billing_period_start} to {currentBilling?.billing_period_end}
+              <div style={{...styles.costCard, ...styles.totalCostCard}}>
+                <div style={styles.costHeader}>
+                  <span style={styles.costLabel}>Total This Month</span>
+                  <span style={{...styles.costValue, ...styles.totalCostValue}}>
+                    ${costs.totalCost.toFixed(2)}
+                  </span>
+                </div>
+                <div style={styles.costSubtext}>
+                  Billing period: {currentBilling?.billing_period_start} to {currentBilling?.billing_period_end}
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        </PermissionGate>
 
         {/* Account Status */}
-        <div style={styles.statusSection}>
-          <h3 style={styles.sectionTitle}>
-            <FiSettings style={styles.sectionIcon} />
-            Account Status
-          </h3>
-          
-          <div style={styles.statusCard}>
-            <div style={styles.statusHeader}>
+        <PermissionGate permission="mail.billing.edit" fallback={
+          <div style={styles.statusSection}>
+            <h3 style={styles.sectionTitle}>
+              <FiSettings style={styles.sectionIcon} />
+              Account Status
+            </h3>
+            <div style={styles.statusCard}>
               <div style={styles.statusInfo}>
                 <span style={styles.statusLabel}>
                   {isPaused ? 'Account Paused' : 'Account Active'}
@@ -366,41 +530,69 @@ const BillingManager = () => {
                   )}
                 </div>
               </div>
-              
-              <button
-                style={isPaused ? styles.resumeButton : styles.pauseButton}
-                onClick={() => setShowPauseModal(true)}
-              >
-                {isPaused ? (
-                  <>
-                    <FiPlay style={styles.buttonIcon} />
-                    Resume Account
-                  </>
-                ) : (
-                  <>
-                    <FiPause style={styles.buttonIcon} />
-                    Pause Account
-                  </>
-                )}
-              </button>
-            </div>
-            
-            <div style={styles.statusDescription}>
-              {isPaused ? (
-                <div style={styles.pausedInfo}>
-                  <FiInfo style={styles.infoIcon} />
-                  Account is paused. You're charged $5/month to retain data. 
-                  Resume anytime to start sending emails again.
-                </div>
-              ) : (
-                <div style={styles.activeInfo}>
-                  Pay only for emails sent. First 5,000 emails included, 
-                  then $0.0025 per additional email.
-                </div>
-              )}
+              <div style={styles.permissionNote}>
+                <FiAlertCircle style={styles.infoIcon} />
+                Contact an administrator to pause/resume the account
+              </div>
             </div>
           </div>
-        </div>
+        }>
+          <div style={styles.statusSection}>
+            <h3 style={styles.sectionTitle}>
+              <FiSettings style={styles.sectionIcon} />
+              Account Status
+            </h3>
+            
+            <div style={styles.statusCard}>
+              <div style={styles.statusHeader}>
+                <div style={styles.statusInfo}>
+                  <span style={styles.statusLabel}>
+                    {isPaused ? 'Account Paused' : 'Account Active'}
+                  </span>
+                  <div style={styles.statusIndicator}>
+                    {isPaused ? (
+                      <FiPause style={{...styles.statusIcon, color: '#f39c12'}} />
+                    ) : (
+                      <FiCheckCircle style={{...styles.statusIcon, color: '#27ae60'}} />
+                    )}
+                  </div>
+                </div>
+                
+                <button
+                  style={isPaused ? styles.resumeButton : styles.pauseButton}
+                  onClick={() => setShowPauseModal(true)}
+                >
+                  {isPaused ? (
+                    <>
+                      <FiPlay style={styles.buttonIcon} />
+                      Resume Account
+                    </>
+                  ) : (
+                    <>
+                      <FiPause style={styles.buttonIcon} />
+                      Pause Account
+                    </>
+                  )}
+                </button>
+              </div>
+              
+              <div style={styles.statusDescription}>
+                {isPaused ? (
+                  <div style={styles.pausedInfo}>
+                    <FiInfo style={styles.infoIcon} />
+                    Account is paused. You're charged $5/month to retain data. 
+                    Resume anytime to start sending emails again.
+                  </div>
+                ) : (
+                  <div style={styles.activeInfo}>
+                    Pay only for emails sent. First 5,000 emails included, 
+                    then $0.0025 per additional email.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </PermissionGate>
       </div>
     );
   };
@@ -414,10 +606,12 @@ const BillingManager = () => {
             Billing History
           </h3>
           {usageHistory.length > 0 && (
-            <button style={styles.exportButton} onClick={exportBillingData}>
-              <FiDownload style={styles.buttonIcon} />
-              Export CSV
-            </button>
+            <PermissionGate permission="mail.billing.export" fallback={null}>
+              <button style={styles.exportButton} onClick={exportBillingData}>
+                <FiDownload style={styles.buttonIcon} />
+                Export CSV
+              </button>
+            </PermissionGate>
           )}
         </div>
 
@@ -426,7 +620,9 @@ const BillingManager = () => {
             <div style={styles.tableHeaderCell}>Period</div>
             <div style={styles.tableHeaderCell}>Emails Used</div>
             <div style={styles.tableHeaderCell}>Overage</div>
-            <div style={styles.tableHeaderCell}>Cost</div>
+            <PermissionGate permission="mail.billing.view">
+              <div style={styles.tableHeaderCell}>Cost</div>
+            </PermissionGate>
             <div style={styles.tableHeaderCell}>Status</div>
           </div>
           
@@ -442,9 +638,11 @@ const BillingManager = () => {
               <div style={styles.tableCell}>
                 {billing.overage_emails > 0 ? `+${billing.overage_emails}` : '—'}
               </div>
-              <div style={styles.tableCell}>
-                ${(billing.total_cost || 0).toFixed(2)}
-              </div>
+              <PermissionGate permission="mail.billing.view">
+                <div style={styles.tableCell}>
+                  ${(billing.total_cost || 0).toFixed(2)}
+                </div>
+              </PermissionGate>
               <div style={styles.tableCell}>
                 <span style={{
                   ...styles.statusBadge,
@@ -472,6 +670,19 @@ const BillingManager = () => {
   };
 
   const renderSettingsTab = () => {
+    // Check permission before rendering settings
+    if (!canViewSettings) {
+      return (
+        <div style={styles.tabContent}>
+          <div style={styles.permissionDenied}>
+            <FiAlertCircle style={styles.permissionIcon} />
+            <h3>Access Denied</h3>
+            <p>You do not have permission to view billing settings</p>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div style={styles.tabContent}>
         <h3 style={styles.sectionTitle}>
@@ -495,136 +706,173 @@ const BillingManager = () => {
             Perfect for seasonal businesses. Pause your account for $5/month to retain all data 
             while not sending emails. Resume anytime.
           </p>
+
+          <PermissionGate requireOwner>
+            <div style={styles.dangerZone}>
+              <h4 style={styles.dangerTitle}>Danger Zone</h4>
+              <p style={styles.dangerDescription}>
+                Advanced billing settings and account closure options are only available to business owners.
+              </p>
+            </div>
+          </PermissionGate>
         </div>
       </div>
     );
   };
 
-  if (loading) {
+  if (authLoading || loading || permissionsLoading) {
     return (
-      <div style={styles.container}>
-        <div style={styles.loadingState}>
-          <FiRefreshCw style={{...styles.loadingIcon, animation: 'spin 1s linear infinite'}} />
-          <p>Loading billing information...</p>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.loadingState}>
+            <FiRefreshCw style={{...styles.loadingIcon, animation: 'spin 1s linear infinite'}} />
+            <p>Loading billing information...</p>
+          </div>
         </div>
-      </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  if (authError) {
+    return (
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.errorState}>
+            <FiAlertCircle style={styles.errorIcon} />
+            <h3>Authentication Error</h3>
+            <p>{authError}</p>
+          </div>
+        </div>
+      </POSAuthWrapper>
     );
   }
 
   if (error) {
     return (
-      <div style={styles.container}>
-        <div style={styles.errorState}>
-          <FiAlertCircle style={styles.errorIcon} />
-          <h3>Error Loading Billing Data</h3>
-          <p>{error}</p>
-          <button style={styles.retryButton} onClick={loadBillingData}>
-            <FiRefreshCw style={styles.buttonIcon} />
-            Retry
-          </button>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.errorState}>
+            <FiAlertCircle style={styles.errorIcon} />
+            <h3>Error Loading Billing Data</h3>
+            <p>{error}</p>
+            {canViewBilling && (
+              <button style={styles.retryButton} onClick={loadBillingData}>
+                <FiRefreshCw style={styles.buttonIcon} />
+                Retry
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      </POSAuthWrapper>
     );
   }
 
   return (
-    <div style={styles.container}>
-      {/* Email Pause Banner */}
-      <EmailPauseBanner />
+    <POSAuthWrapper>
+      <SecurityWrapper>
+        <div style={styles.container}>
+          {/* Email Pause Banner */}
+          <EmailPauseBanner />
 
-      <div style={styles.header}>
-        <h2 style={styles.title}>Usage & Billing</h2>
-        <div style={styles.headerActions}>
-          <button style={styles.refreshButton} onClick={loadBillingData}>
-            <FiRefreshCw style={styles.buttonIcon} />
-            Refresh
-          </button>
-        </div>
-      </div>
-
-      {/* Tab Navigation */}
-      <div style={styles.tabs}>
-        <button
-          style={{
-            ...styles.tab,
-            ...(activeTab === 'overview' ? styles.activeTab : {})
-          }}
-          onClick={() => setActiveTab('overview')}
-        >
-          <FiPieChart style={styles.tabIcon} />
-          Overview
-        </button>
-        <button
-          style={{
-            ...styles.tab,
-            ...(activeTab === 'history' ? styles.activeTab : {})
-          }}
-          onClick={() => setActiveTab('history')}
-        >
-          <FiCalendar style={styles.tabIcon} />
-          History
-        </button>
-        <button
-          style={{
-            ...styles.tab,
-            ...(activeTab === 'settings' ? styles.activeTab : {})
-          }}
-          onClick={() => setActiveTab('settings')}
-        >
-          <FiSettings style={styles.tabIcon} />
-          Settings
-        </button>
-      </div>
-
-      {/* Tab Content */}
-      {activeTab === 'overview' && renderOverviewTab()}
-      {activeTab === 'history' && renderHistoryTab()}
-      {activeTab === 'settings' && renderSettingsTab()}
-
-      {/* Pause/Resume Confirmation Modal */}
-      {showPauseModal && (
-        <div style={styles.modalOverlay}>
-          <div style={styles.modal}>
-            <div style={styles.modalHeader}>
-              <h3 style={styles.modalTitle}>
-                {isPaused ? 'Resume Account' : 'Pause Account'}
-              </h3>
-            </div>
-            
-            <div style={styles.modalContent}>
-              {isPaused ? (
-                <div>
-                  <p>Resume your account to start sending emails again.</p>
-                  <p>You'll return to pay-per-email billing (no monthly fee).</p>
-                </div>
-              ) : (
-                <div>
-                  <p>Pausing your account will:</p>
-                  <ul style={styles.modalList}>
-                    <li>Stop all email sending capabilities</li>
-                    <li>Charge $5/month to retain your data</li>
-                    <li>Allow you to resume anytime</li>
-                  </ul>
-                  <p>Perfect for seasonal businesses during off-season.</p>
-                </div>
-              )}
-            </div>
-            
-            <div style={styles.modalActions}>
-              <button style={styles.modalCancel} onClick={() => setShowPauseModal(false)}>
-                Cancel
-              </button>
-              <button
-                style={isPaused ? styles.modalResume : styles.modalPause}
-                onClick={handlePauseAccount}
-              >
-                {isPaused ? 'Resume Account' : 'Pause Account'}
-              </button>
+          <div style={styles.header}>
+            <h2 style={styles.title}>Usage & Billing</h2>
+            <div style={styles.headerActions}>
+              <PermissionGate permission="mail.billing.view">
+                <button style={styles.refreshButton} onClick={loadBillingData}>
+                  <FiRefreshCw style={styles.buttonIcon} />
+                  Refresh
+                </button>
+              </PermissionGate>
             </div>
           </div>
+
+          {/* Tab Navigation */}
+          <div style={styles.tabs}>
+            <button
+              style={{
+                ...styles.tab,
+                ...(activeTab === 'overview' ? styles.activeTab : {})
+              }}
+              onClick={() => setActiveTab('overview')}
+            >
+              <FiPieChart style={styles.tabIcon} />
+              Overview
+            </button>
+            <button
+              style={{
+                ...styles.tab,
+                ...(activeTab === 'history' ? styles.activeTab : {})
+              }}
+              onClick={() => setActiveTab('history')}
+            >
+              <FiCalendar style={styles.tabIcon} />
+              History
+            </button>
+            <PermissionGate permission="mail.settings.view" requireElevated>
+              <button
+                style={{
+                  ...styles.tab,
+                  ...(activeTab === 'settings' ? styles.activeTab : {})
+                }}
+                onClick={() => setActiveTab('settings')}
+              >
+                <FiSettings style={styles.tabIcon} />
+                Settings
+              </button>
+            </PermissionGate>
+          </div>
+
+          {/* Tab Content */}
+          {activeTab === 'overview' && renderOverviewTab()}
+          {activeTab === 'history' && renderHistoryTab()}
+          {activeTab === 'settings' && renderSettingsTab()}
+
+          {/* Pause/Resume Confirmation Modal */}
+          {showPauseModal && canPauseAccount && (
+            <div style={styles.modalOverlay}>
+              <div style={styles.modal}>
+                <div style={styles.modalHeader}>
+                  <h3 style={styles.modalTitle}>
+                    {isPaused ? 'Resume Account' : 'Pause Account'}
+                  </h3>
+                </div>
+                
+                <div style={styles.modalContent}>
+                  {isPaused ? (
+                    <div>
+                      <p>Resume your account to start sending emails again.</p>
+                      <p>You'll return to pay-per-email billing (no monthly fee).</p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p>Pausing your account will:</p>
+                      <ul style={styles.modalList}>
+                        <li>Stop all email sending capabilities</li>
+                        <li>Charge $5/month to retain your data</li>
+                        <li>Allow you to resume anytime</li>
+                      </ul>
+                      <p>Perfect for seasonal businesses during off-season.</p>
+                    </div>
+                  )}
+                </div>
+                
+                <div style={styles.modalActions}>
+                  <button style={styles.modalCancel} onClick={() => setShowPauseModal(false)}>
+                    Cancel
+                  </button>
+                  <button
+                    style={isPaused ? styles.modalResume : styles.modalPause}
+                    onClick={handlePauseAccount}
+                  >
+                    {isPaused ? 'Resume Account' : 'Pause Account'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
-      )}
-    </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 
@@ -748,6 +996,29 @@ const styles = {
     alignItems: 'center',
     gap: '8px',
     marginTop: '20px',
+  },
+  permissionDenied: {
+    backgroundColor: '#fff3cd',
+    border: '2px solid #f39c12',
+    borderRadius: '8px',
+    padding: '30px',
+    textAlign: 'center',
+    color: '#856404',
+  },
+  permissionIcon: {
+    fontSize: '48px',
+    marginBottom: '16px',
+  },
+  permissionNote: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    backgroundColor: '#fff3cd',
+    color: '#856404',
+    padding: '12px',
+    borderRadius: '4px',
+    marginTop: '12px',
+    fontSize: '14px',
   },
   sectionTitle: {
     fontSize: '18px',
@@ -1030,6 +1301,25 @@ const styles = {
     color: '#666',
     lineHeight: '1.5',
     marginBottom: '16px',
+  },
+  dangerZone: {
+    marginTop: '30px',
+    padding: '20px',
+    backgroundColor: '#fff5f5',
+    border: '2px solid #e74c3c',
+    borderRadius: '8px',
+  },
+  dangerTitle: {
+    fontSize: '16px',
+    fontWeight: 'bold',
+    color: '#e74c3c',
+    marginBottom: '8px',
+  },
+  dangerDescription: {
+    fontSize: '14px',
+    color: '#721c24',
+    lineHeight: '1.5',
+    marginBottom: '0',
   },
   emptyState: {
     display: 'flex',

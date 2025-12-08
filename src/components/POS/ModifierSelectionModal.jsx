@@ -23,8 +23,6 @@ const ModifierSelectionModal = ({
   // Load modifier groups when modal opens
   useEffect(() => {
     if (isOpen && product?.modifier_group_ids && businessId) {
-      console.log('Loading modifiers for product:', product.name);
-      console.log('Product modifier_group_ids:', product.modifier_group_ids);
       loadModifierGroups();
     }
   }, [isOpen, product, businessId]);
@@ -43,8 +41,6 @@ const ModifierSelectionModal = ({
     setError(null);
 
     try {
-      console.log('Starting modifier groups load...');
-      
       // Handle both array and object formats for modifier_group_ids
       let groupIds = [];
       if (Array.isArray(product.modifier_group_ids)) {
@@ -53,10 +49,7 @@ const ModifierSelectionModal = ({
         groupIds = Object.values(product.modifier_group_ids);
       }
       
-      console.log('Extracted group IDs:', groupIds);
-      
       if (groupIds.length === 0) {
-        console.warn('No modifier group IDs found for product');
         setLoading(false);
         return;
       }
@@ -70,26 +63,19 @@ const ModifierSelectionModal = ({
         .eq('is_active', true)
         .order('sort_order', { ascending: true });
 
-      console.log('Modifier groups query result:', { groups, groupsError });
-
       if (groupsError) {
-        console.error('Error loading modifier groups:', groupsError);
         throw groupsError;
       }
 
       if (!groups || groups.length === 0) {
-        console.warn('No modifier groups found');
         setModifierGroups([]);
         setLoading(false);
         return;
       }
 
       // Load modifiers for each group
-      console.log('Loading modifiers for groups:', groups.map(g => g.name));
-      
       const groupsWithModifiers = await Promise.all(
         groups.map(async (group) => {
-          console.log(`Loading modifiers for group: ${group.name} (ID: ${group.id})`);
           
           // First, get the modifier group items
           const { data: groupItems, error: groupItemsError } = await supabase
@@ -119,7 +105,6 @@ const ModifierSelectionModal = ({
 
           // Get the inventory items for these modifiers
           const inventoryIds = groupItems.map(item => item.inventory_id);
-          console.log(`Loading inventory for IDs:`, inventoryIds);
           
           const { data: inventoryItems, error: inventoryError } = await supabase
             .from('pos_inventory')
@@ -128,21 +113,17 @@ const ModifierSelectionModal = ({
             .eq('business_id', businessId);
 
           if (inventoryError) {
-            console.error('Error loading inventory items:', inventoryError);
             return {
               ...group,
               modifiers: []
             };
           }
 
-          console.log(`Inventory items loaded:`, inventoryItems);
-
           // Combine group items with inventory data
           const modifiers = groupItems.map(groupItem => {
             const inventoryItem = inventoryItems.find(inv => inv.id === groupItem.inventory_id);
             
             if (!inventoryItem) {
-              console.warn(`No inventory item found for group item:`, groupItem);
               return null;
             }
 
@@ -156,8 +137,6 @@ const ModifierSelectionModal = ({
             };
           }).filter(Boolean); // Remove any null entries
 
-          console.log(`Final modifiers for ${group.name}:`, modifiers);
-
           return {
             ...group,
             modifiers
@@ -165,7 +144,6 @@ const ModifierSelectionModal = ({
         })
       );
 
-      console.log('All groups with modifiers loaded:', groupsWithModifiers);
       setModifierGroups(groupsWithModifiers);
 
       // Auto-select default modifiers
@@ -182,11 +160,9 @@ const ModifierSelectionModal = ({
         });
       });
       
-      console.log('Auto-selecting default modifiers:', defaultModifiers);
       setSelectedModifiers(defaultModifiers);
 
     } catch (err) {
-      console.error('Error loading modifier groups:', err);
       setError('Failed to load modifier options. Please try again.');
     } finally {
       setLoading(false);
@@ -194,15 +170,12 @@ const ModifierSelectionModal = ({
   };
 
   const handleModifierToggle = (modifier, group) => {
-    console.log('Toggling modifier:', modifier.name, 'in group:', group.name);
-    
     setSelectedModifiers(prev => {
       const existingIndex = prev.findIndex(m => m.id === modifier.id);
       
       if (existingIndex >= 0) {
         // Remove modifier
         const newSelection = prev.filter(m => m.id !== modifier.id);
-        console.log('Removed modifier. New selection:', newSelection);
         return newSelection;
       } else {
         // Add modifier
@@ -212,7 +185,6 @@ const ModifierSelectionModal = ({
           group_name: group.name
         };
         const newSelection = [...prev, newModifier];
-        console.log('Added modifier. New selection:', newSelection);
         return newSelection;
       }
     });
@@ -223,15 +195,11 @@ const ModifierSelectionModal = ({
       if (modifier.is_free) return total;
       return total + (Number(modifier.price) || 0);
     }, 0);
-    console.log('Calculated modifier total:', total);
     return total;
   };
 
   const handleAddToCart = () => {
     if (loading) return;
-
-    console.log('Adding product with modifiers to cart');
-    console.log('Selected modifiers:', selectedModifiers);
 
     // Validate required groups have selections
     const requiredGroups = modifierGroups.filter(group => group.is_required);
@@ -257,8 +225,6 @@ const ModifierSelectionModal = ({
         modifier_group_item_id: modifier.modifier_group_item_id
       }))
     };
-
-    console.log('Final product with modifiers:', productWithModifiers);
     
     onAddToCart(productWithModifiers);
   };

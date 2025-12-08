@@ -1,17 +1,31 @@
-// screens/Mail/SendLogsScreen.jsx - Step 132: Send Logs UI with Pause Protection
+// screens/Mail/SendLogsScreen.jsx - WITH PERMISSION SYSTEM INTEGRATION
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import EmailPauseBanner from '../../components/EmailPauseBanner';
+import toast from 'react-hot-toast';
 import {
   FiSearch, FiFilter, FiDownload, FiRefreshCw, FiAlertTriangle, 
-  FiCheckCircle, FiClock, FiX, FiMail, FiEye, FiCalendar, FiFileText
+  FiCheckCircle, FiClock, FiX, FiMail, FiEye, FiCalendar, FiFileText, FiLock
 } from 'react-icons/fi';
 
 const SendLogsScreen = () => {
   const navigate = useNavigate();
   const { business } = useBusiness();
+  
+  // Permission system integration
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   const [logs, setLogs] = useState([]);
   const [campaigns, setCampaigns] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -37,9 +51,33 @@ const SendLogsScreen = () => {
 
   const businessId = business?.id;
 
+  // Permission checks based on permissionRegistry.js
+  const canViewLogs = hasAnyPermission([
+    'mail.campaigns.view',
+    'reports.export'
+  ]) || hasElevatedPrivileges();
+
+  const canViewCampaigns = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+  const canExportData = hasPermission('reports.export') || hasElevatedPrivileges();
+  const canViewDetails = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewLogs) {
+      toast.error('You do not have permission to view send logs');
+      navigate('/dashboard/mail/dashboard');
+    }
+  }, [permissionsLoading, canViewLogs, navigate]);
+
   // Load campaigns for filter dropdown
   const loadCampaigns = useCallback(async () => {
     if (!businessId) return;
+    
+    // Check permission before loading
+    if (!canViewCampaigns) {
+      console.warn('User does not have permission to view campaigns');
+      return;
+    }
     
     try {
       const { data, error } = await supabase
@@ -52,12 +90,19 @@ const SendLogsScreen = () => {
       setCampaigns(data || []);
     } catch (error) {
       console.error('Error loading campaigns:', error);
+      toast.error('Failed to load campaigns');
     }
-  }, [businessId]);
+  }, [businessId, canViewCampaigns]);
 
   // Load send logs with filters
   const loadSendLogs = useCallback(async () => {
     if (!businessId) return;
+    
+    // Check permission before loading
+    if (!canViewLogs) {
+      toast.error('You do not have permission to view send logs');
+      return;
+    }
     
     try {
       setLoading(true);
@@ -135,10 +180,11 @@ const SendLogsScreen = () => {
       await loadStats();
     } catch (error) {
       console.error('Error loading send logs:', error);
+      toast.error('Failed to load send logs');
     } finally {
       setLoading(false);
     }
-  }, [businessId, campaigns, filters, searchTerm, currentPage, pageSize]);
+  }, [businessId, campaigns, filters, searchTerm, currentPage, pageSize, canViewLogs]);
 
   // Load summary statistics
   const loadStats = useCallback(async () => {
@@ -168,16 +214,16 @@ const SendLogsScreen = () => {
 
   // Load data when business or filters change
   useEffect(() => {
-    if (businessId) {
+    if (businessId && !permissionsLoading) {
       loadCampaigns();
     }
-  }, [businessId, loadCampaigns]);
+  }, [businessId, permissionsLoading, loadCampaigns]);
 
   useEffect(() => {
-    if (campaigns.length > 0) {
+    if (campaigns.length > 0 && !permissionsLoading) {
       loadSendLogs();
     }
-  }, [campaigns, loadSendLogs]);
+  }, [campaigns, permissionsLoading, loadSendLogs]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -189,6 +235,12 @@ const SendLogsScreen = () => {
   };
 
   const handleExportLogs = async () => {
+    // Permission check
+    if (!canExportData) {
+      toast.error('You do not have permission to export data');
+      return;
+    }
+
     try {
       // Export current filtered results
       const csvRows = [
@@ -228,13 +280,21 @@ const SendLogsScreen = () => {
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
       }
+
+      toast.success('Send logs exported successfully');
     } catch (error) {
       console.error('Error exporting logs:', error);
-      alert('Failed to export logs. Please try again.');
+      toast.error('Failed to export logs. Please try again.');
     }
   };
 
   const handleViewDetails = (log) => {
+    // Permission check
+    if (!canViewDetails) {
+      toast.error('You do not have permission to view log details');
+      return;
+    }
+
     setSelectedLog(log);
     setShowDetails(true);
   };
@@ -266,6 +326,42 @@ const SendLogsScreen = () => {
 
   const totalPages = Math.ceil(totalLogs / pageSize);
 
+  // Show loading while permissions are being checked
+  if (permissionsLoading) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.loading}>
+          <FiRefreshCw style={{...styles.loadingIcon, animation: 'spin 1s linear infinite'}} />
+          <div>Loading permissions...</div>
+        </div>
+      </div>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canViewLogs) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.accessDenied}>
+          <FiLock style={styles.accessDeniedIcon} />
+          <h2 style={styles.accessDeniedTitle}>Access Denied</h2>
+          <p style={styles.accessDeniedText}>
+            You do not have permission to view send logs.
+          </p>
+          <p style={styles.accessDeniedSubtext}>
+            Contact your administrator to request access.
+          </p>
+          <button 
+            style={styles.backButton}
+            onClick={() => navigate('/dashboard/mail/dashboard')}
+          >
+            Back to Mail Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.container}>
       {/* Email Pause Banner */}
@@ -284,10 +380,26 @@ const SendLogsScreen = () => {
             <FiRefreshCw style={styles.buttonIcon} />
             Refresh
           </button>
-          <button style={styles.secondaryButton} onClick={handleExportLogs}>
-            <FiDownload style={styles.buttonIcon} />
-            Export CSV
-          </button>
+          
+          {/* Export button - protected by permission */}
+          <PermissionGate 
+            permission="reports.export"
+            fallback={
+              <button 
+                style={{...styles.secondaryButton, ...styles.disabledButton}}
+                disabled
+                title="You don't have permission to export data"
+              >
+                <FiLock style={styles.buttonIcon} />
+                Export CSV
+              </button>
+            }
+          >
+            <button style={styles.secondaryButton} onClick={handleExportLogs}>
+              <FiDownload style={styles.buttonIcon} />
+              Export CSV
+            </button>
+          </PermissionGate>
         </div>
       </div>
 
@@ -353,6 +465,7 @@ const SendLogsScreen = () => {
             style={styles.filterSelect}
             value={filters.campaignId}
             onChange={(e) => handleFilterChange('campaignId', e.target.value)}
+            disabled={!canViewCampaigns}
           >
             <option value="all">All Campaigns</option>
             {campaigns.map(campaign => (
@@ -450,13 +563,27 @@ const SendLogsScreen = () => {
                       )}
                     </td>
                     <td style={styles.actionsColumn}>
-                      <button 
-                        style={styles.actionButton}
-                        onClick={() => handleViewDetails(log)}
-                        title="View Details"
+                      {/* View Details button - protected by permission */}
+                      <PermissionGate 
+                        permission="mail.campaigns.view"
+                        fallback={
+                          <button 
+                            style={{...styles.actionButton, ...styles.disabledActionButton}}
+                            disabled
+                            title="You don't have permission to view details"
+                          >
+                            <FiLock />
+                          </button>
+                        }
                       >
-                        <FiEye />
-                      </button>
+                        <button 
+                          style={styles.actionButton}
+                          onClick={() => handleViewDetails(log)}
+                          title="View Details"
+                        >
+                          <FiEye />
+                        </button>
+                      </PermissionGate>
                     </td>
                   </tr>
                 ))}
@@ -471,7 +598,10 @@ const SendLogsScreen = () => {
             </div>
             <div style={styles.paginationControls}>
               <button 
-                style={styles.paginationButton}
+                style={{
+                  ...styles.paginationButton,
+                  ...(currentPage === 1 ? styles.disabledButton : {})
+                }}
                 disabled={currentPage === 1}
                 onClick={() => setCurrentPage(currentPage - 1)}
               >
@@ -479,7 +609,10 @@ const SendLogsScreen = () => {
               </button>
               <span style={styles.pageInfo}>Page {currentPage} of {totalPages}</span>
               <button 
-                style={styles.paginationButton}
+                style={{
+                  ...styles.paginationButton,
+                  ...(currentPage === totalPages ? styles.disabledButton : {})
+                }}
                 disabled={currentPage === totalPages}
                 onClick={() => setCurrentPage(currentPage + 1)}
               >
@@ -619,9 +752,17 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
+    transition: 'all 0.3s ease',
   },
   buttonIcon: {
     fontSize: '14px',
+  },
+  disabledButton: {
+    opacity: 0.5,
+    cursor: 'not-allowed',
+    backgroundColor: '#f5f5f5',
+    color: '#999',
+    borderColor: '#ddd',
   },
   statsGrid: {
     display: 'grid',
@@ -709,6 +850,49 @@ const styles = {
     fontSize: '48px',
     marginBottom: '20px',
     color: 'teal',
+  },
+  accessDenied: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '80px 20px',
+    textAlign: 'center',
+    backgroundColor: 'white',
+    borderRadius: '8px',
+    border: '1px solid #ddd',
+    marginTop: '40px',
+  },
+  accessDeniedIcon: {
+    fontSize: '64px',
+    color: '#f44336',
+    marginBottom: '20px',
+  },
+  accessDeniedTitle: {
+    fontSize: '24px',
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: '10px',
+  },
+  accessDeniedText: {
+    fontSize: '16px',
+    color: '#666',
+    marginBottom: '8px',
+  },
+  accessDeniedSubtext: {
+    fontSize: '14px',
+    color: '#999',
+    marginBottom: '30px',
+  },
+  backButton: {
+    backgroundColor: 'teal',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    padding: '12px 24px',
+    fontSize: '14px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
   },
   emptyState: {
     display: 'flex',
@@ -819,6 +1003,10 @@ const styles = {
     cursor: 'pointer',
     fontSize: '16px',
     padding: '5px',
+  },
+  disabledActionButton: {
+    color: '#ccc',
+    cursor: 'not-allowed',
   },
   pagination: {
     display: 'flex',

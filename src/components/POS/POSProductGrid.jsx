@@ -7,7 +7,7 @@ import POSAuthWrapper from "../Auth/POSAuthWrapper";
 import { usePOSAuth } from "../../hooks/usePOSAuth";
 import { useTaxCalculations } from "../../hooks/useTaxCalculations";
 
-const POSProductGrid = ({ products, onAddToCart }) => {
+const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [windowWidth, setWindowWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 768);
   
@@ -50,45 +50,16 @@ const POSProductGrid = ({ products, onAddToCart }) => {
 
   // Handle product selection - check for modifiers first
   const handleProductClick = (product) => {
-    console.log('=== PRODUCT CLICK DEBUG ===');
-    console.log('Product clicked:', product.name);
-    console.log('Product ID:', product.id);
-    console.log('Raw modifier_group_ids:', product.modifier_group_ids);
-    console.log('Type of modifier_group_ids:', typeof product.modifier_group_ids);
-    console.log('Is array?:', Array.isArray(product.modifier_group_ids));
-    
-    if (Array.isArray(product.modifier_group_ids)) {
-      console.log('Array length:', product.modifier_group_ids.length);
-      console.log('Array contents:', product.modifier_group_ids);
-    }
-    
     // Check if product has modifier groups - More comprehensive check
     const hasModifierGroups = product.modifier_group_ids && 
       ((Array.isArray(product.modifier_group_ids) && product.modifier_group_ids.length > 0) ||
        (typeof product.modifier_group_ids === 'object' && product.modifier_group_ids !== null && Object.keys(product.modifier_group_ids).length > 0));
     
-    console.log('Has modifier groups?:', hasModifierGroups);
-    console.log('Show modifier modal?:', hasModifierGroups);
-    console.log('Current modal state - showModifierModal:', showModifierModal);
-    console.log('Current modal state - selectedProduct:', selectedProduct?.name);
-    
     if (hasModifierGroups) {
-      console.log('*** SHOULD SHOW MODIFIER MODAL ***');
-      console.log('Setting selectedProduct to:', product.name);
-      console.log('Setting showModifierModal to: true');
-      
       // Show modifier selection modal
       setSelectedProduct(product);
       setShowModifierModal(true);
-      
-      // Verify state was set
-      setTimeout(() => {
-        console.log('After setState - showModifierModal should be true');
-        console.log('After setState - selectedProduct should be set');
-      }, 100);
-      
     } else {
-      console.log('*** ADDING DIRECTLY TO CART ***');
       // Add directly to cart with proper structure
       const cartItem = {
         id: product.id,
@@ -105,18 +76,12 @@ const POSProductGrid = ({ products, onAddToCart }) => {
         quantity: 1,
         modifiers: [] // Empty modifiers array for products without modifiers
       };
-      console.log('Adding item to cart (no modifiers):', cartItem);
       onAddToCart(cartItem);
     }
-    console.log('=== END PRODUCT CLICK DEBUG ===');
   };
 
   // Handle modifier selection completion - FIXED VERSION
   const handleModifierAddToCart = (productWithModifiers) => {
-    console.log('=== MODIFIER CART ADDITION DEBUG ===');
-    console.log('Raw productWithModifiers received:', productWithModifiers);
-    console.log('Modifiers from modal:', productWithModifiers.modifiers);
-    
     // Create properly structured cart item
     const cartItem = {
       id: productWithModifiers.id,
@@ -135,25 +100,6 @@ const POSProductGrid = ({ products, onAddToCart }) => {
       modifiers: Array.isArray(productWithModifiers.modifiers) ? productWithModifiers.modifiers : []
     };
     
-    console.log('Final cart item being sent:', cartItem);
-    console.log('Cart item modifiers:', cartItem.modifiers);
-    console.log('Modifier count:', cartItem.modifiers.length);
-    
-    // Validate that modifiers have the expected structure
-    if (cartItem.modifiers.length > 0) {
-      cartItem.modifiers.forEach((modifier, index) => {
-        console.log(`Modifier ${index}:`, {
-          id: modifier.id,
-          name: modifier.name,
-          price: modifier.price,
-          group_id: modifier.group_id,
-          group_name: modifier.group_name
-        });
-      });
-    }
-    
-    console.log('=== END MODIFIER CART ADDITION DEBUG ===');
-    
     // Add to cart
     onAddToCart(cartItem);
     
@@ -164,16 +110,9 @@ const POSProductGrid = ({ products, onAddToCart }) => {
 
   // Handle modal close
   const handleModalClose = () => {
-    console.log('Modal close requested');
     setShowModifierModal(false);
     setSelectedProduct(null);
   };
-
-  // Debug modal state changes
-  useEffect(() => {
-    console.log('Modal state changed - showModifierModal:', showModifierModal);
-    console.log('Modal state changed - selectedProduct:', selectedProduct?.name);
-  }, [showModifierModal, selectedProduct]);
 
   // Handle barcode scan from BarcodeScanHandler
   const handleBarcodeScan = (code) => {
@@ -239,10 +178,6 @@ const POSProductGrid = ({ products, onAddToCart }) => {
     const result = product.modifier_group_ids && 
       ((Array.isArray(product.modifier_group_ids) && product.modifier_group_ids.length > 0) ||
        (typeof product.modifier_group_ids === 'object' && product.modifier_group_ids !== null && Object.keys(product.modifier_group_ids).length > 0));
-    
-    if (product.name === 'Apple Pie') {
-      console.log(`hasModifiers check for ${product.name}:`, result);
-    }
     
     return result;
   };
@@ -543,7 +478,9 @@ const POSProductGrid = ({ products, onAddToCart }) => {
           onChange={handleSearchChange}
           onKeyDown={handleKeyDown}
 		  autoComplete="off"
-          autoFocus
+          autoFocus={!disabled}
+          disabled={disabled}
+          tabIndex={disabled ? -1 : 0}
         />
       </div>
 

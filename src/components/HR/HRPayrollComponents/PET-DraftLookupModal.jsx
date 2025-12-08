@@ -51,6 +51,45 @@ const PETDraftLookupModal = ({
   // Use effective business ID
   const businessId = effectiveBusinessId || authBusinessId;
 
+  const timezone = businessData?.timezone || 'America/Toronto';
+
+  const normalizeDateInput = (value) => {
+    if (!value) return null;
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return `${value}T12:00:00`;
+    }
+    return value;
+  };
+
+  const formatDate = (value) => {
+    try {
+      const normalized = normalizeDateInput(value);
+      if (!normalized) return '—';
+      return new Date(normalized).toLocaleDateString('en-CA', { timeZone: timezone });
+    } catch (err) {
+      console.warn('Failed to format date:', value, err);
+      return value || '—';
+    }
+  };
+
+  const formatDateTime = (value) => {
+    try {
+      const normalized = normalizeDateInput(value);
+      if (!normalized) return '—';
+      return new Date(normalized).toLocaleString('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch (err) {
+      console.warn('Failed to format date/time:', value, err);
+      return value || '—';
+    }
+  };
+
   useEffect(() => {
     if (isOpen && businessId) {
       loadDraftPayrollRuns();
@@ -598,11 +637,11 @@ const PETDraftLookupModal = ({
                         <div style={styles.draftItemContent}>
                           <div style={styles.draftItemInfo}>
                             <div style={styles.draftItemTitle}>
-                              Pay Period: {new Date(draft.pay_period_start).toLocaleDateString()} - {new Date(draft.pay_period_end).toLocaleDateString()}
+                            Pay Period: {formatDate(draft.pay_period_start)} - {formatDate(draft.pay_period_end)}
                             </div>
                             <div style={styles.draftItemDetails}>
-                              Pay Date: {new Date(draft.pay_date).toLocaleDateString()} | 
-                              Created: {new Date(draft.created_at).toLocaleDateString()} at {new Date(draft.created_at).toLocaleTimeString()}
+                            Pay Date: {formatDate(draft.pay_date)} | 
+                            Created: {formatDateTime(draft.created_at)}
                             </div>
                           </div>
                           <div style={styles.draftItemActions}>

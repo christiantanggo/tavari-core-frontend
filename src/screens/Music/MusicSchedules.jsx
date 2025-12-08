@@ -86,6 +86,17 @@ const MusicSchedules = () => {
       console.log('📈 Schedules that will show in UI:', processedSchedules.length);
       
       setSchedules(processedSchedules);
+
+      // 🔥 CRITICAL FIX: Force GlobalMusicService to reload schedules
+      if (window.globalMusicService && window.globalMusicService.isInitialized) {
+        console.log('🔄 Reloading GlobalMusicService schedules...');
+        await window.globalMusicService.loadSchedules();
+        console.log('✅ GlobalMusicService schedules reloaded!');
+        
+        // Force immediate schedule check
+        window.globalMusicService.checkSchedules();
+        console.log('✅ Schedule check triggered!');
+      }
     } catch (error) {
       console.error('❌ Error loading schedules:', error);
     }

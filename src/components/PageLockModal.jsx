@@ -1,15 +1,11 @@
-// components/PageLockModal.jsx - Reusable PIN Lock Modal with Keyboard Input
+// components/PageLockModal.jsx - WORKING VERSION - DIRECT DATABASE CHECK
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-
-// Import all required consistency files
+import { supabase } from '../supabaseClient';
+import bcrypt from 'bcryptjs';
+import { TavariStyles } from '../utils/TavariStyles';
 import { SecurityWrapper } from '../Security';
 import { useSecurityContext } from '../Security';
-import { usePOSAuth } from '../hooks/usePOSAuth';
-import { useTaxCalculations } from '../hooks/useTaxCalculations';
-import POSAuthWrapper from '../components/Auth/POSAuthWrapper';
-import TavariCheckbox from '../components/UI/TavariCheckbox';
-import { TavariStyles } from '../utils/TavariStyles';
 
 const PageLockModal = ({
   isOpen,
@@ -27,7 +23,7 @@ const PageLockModal = ({
   const [pinAttempts, setPinAttempts] = useState(0);
   const inputRef = useRef(null);
 
-  // Security context
+  // Security context - optional logging
   const {
     logSecurityEvent
   } = useSecurityContext({
@@ -38,22 +34,9 @@ const PageLockModal = ({
     securityLevel: 'high'
   });
 
-  // Authentication hook
-  const {
-    selectedBusinessId,
-    authUser,
-    userRole,
-    validateManagerPin
-  } = usePOSAuth({
-    requiredRoles: ['owner', 'manager', 'admin'],
-    requireBusiness: true,
-    componentName: 'PageLockModal'
-  });
-
   // Focus input when modal opens and clear PIN for security
   useEffect(() => {
     if (isOpen && inputRef.current) {
-      // Clear PIN input when modal opens for security
       setPinInput('');
       setPinError('');
       inputRef.current.focus();
@@ -85,7 +68,7 @@ const PageLockModal = ({
     }
   };
 
-  // Handle PIN submission
+  // Handle PIN submission - DIRECT DATABASE CHECK
   const handlePinSubmit = async () => {
     if (pinInput.length !== 4) {
       setPinError('PIN must be exactly 4 digits');
@@ -93,32 +76,97 @@ const PageLockModal = ({
     }
 
     try {
-      // Log PIN attempt
-      await logSecurityEvent('page_access_pin_attempt', {
-        page: pageName,
-        user_id: authUser?.id,
-        business_id: selectedBusinessId,
-        role: userRole,
-        attempt_number: pinAttempts + 1
-      }, 'medium');
-
-      // Validate PIN
-      const isValidPin = await validateManagerPin(pinInput);
+      // Get current business ID from localStorage
+      const businessId = localStorage.getItem('currentBusinessId');
       
-      if (isValidPin) {
+      if (!businessId) {
+        setPinError('No business selected. Please refresh the page.');
+        return;
+      }
+
+      // Get all managers/owners/admins for this business from user_roles
+      const { data: userRoles, error: rolesError } = await supabase
+        .from('user_roles')
+        .select('user_id, role')
+        .eq('business_id', businessId)
+        .eq('active', true)
+        .in('role', ['manager', 'owner', 'admin']);
+
+      if (rolesError) {
+        setPinError('Error validating PIN. Please try again.');
+        return;
+      }
+
+      if (!userRoles || userRoles.length === 0) {
+        setPinError('No managers found for this business.');
+        return;
+      }
+
+      const managerUserIds = userRoles.map(ur => ur.user_id);
+
+      // Get PINs for all managers
+      const { data: managers, error: managersError } = await supabase
+        .from('users')
+        .select('id, full_name, email, pin')
+        .in('id', managerUserIds);
+
+      if (managersError) {
+        setPinError('Error validating PIN. Please try again.');
+        return;
+      }
+
+      // Check PIN against all managers
+      let pinMatched = false;
+      let matchedManager = null;
+
+      for (const manager of managers) {
+        if (!manager.pin) {
+          continue;
+        }
+
+        // Check if PIN is hashed (bcrypt) or plain text
+        if (manager.pin.startsWith('$2b$') || manager.pin.startsWith('$2a$')) {
+          // Bcrypt hashed PIN
+          const matches = await bcrypt.compare(pinInput, manager.pin);
+          if (matches) {
+            pinMatched = true;
+            matchedManager = manager;
+            break;
+          }
+        } else {
+          // Plain text PIN
+          const matches = String(manager.pin) === String(pinInput);
+          if (matches) {
+            pinMatched = true;
+            matchedManager = manager;
+            break;
+          }
+        }
+      }
+
+      if (pinMatched && matchedManager) {
+        
+        // Log success
+        try {
+          await logSecurityEvent('page_access_granted', {
+            page: pageName,
+            user_id: matchedManager.id,
+            business_id: businessId,
+            manager_email: matchedManager.email
+          }, 'high');
+        } catch (logError) {
+          console.warn('Failed to log security event:', logError);
+        }
+
         setPinError('');
-        
-        await logSecurityEvent('page_access_granted', {
-          page: pageName,
-          user_id: authUser?.id,
-          business_id: selectedBusinessId,
-          role: userRole
-        }, 'high');
-        
+        setPinAttempts(0);
+        setPinInput('');
         onUnlock();
       } else {
-        setPinAttempts(prev => prev + 1);
-        setPinError('Invalid PIN. Please try again.');
+        console.log('❌ PageLockModal: PIN did not match any manager');
+        
+        const newAttempts = pinAttempts + 1;
+        setPinAttempts(newAttempts);
         setPinInput('');
         
         // Refocus input after error
@@ -129,27 +177,35 @@ const PageLockModal = ({
         }, 100);
         
         // After max attempts, redirect
-        if (pinAttempts >= maxAttempts - 1) {
-          await logSecurityEvent('page_access_denied_max_attempts', {
-            page: pageName,
-            user_id: authUser?.id,
-            business_id: selectedBusinessId,
-            role: userRole,
-            total_attempts: pinAttempts + 1
-          }, 'high');
+        if (newAttempts >= maxAttempts) {
+          console.log('⚠️ PageLockModal: Max attempts reached, redirecting...');
           
-          alert(`Too many failed attempts. Redirecting to dashboard.`);
+          try {
+            await logSecurityEvent('page_access_denied_max_attempts', {
+              page: pageName,
+              business_id: businessId,
+              total_attempts: newAttempts
+            }, 'high');
+          } catch (logError) {
+            console.warn('Failed to log security event:', logError);
+          }
+
+          alert('Too many failed attempts. Redirecting to dashboard.');
           navigate(redirectPath);
           return;
         }
+        
+        setPinError(`Invalid PIN. Attempt ${newAttempts} of ${maxAttempts}.`);
       }
     } catch (error) {
-      console.error('PIN validation error:', error);
+      console.error('❌ PageLockModal: PIN validation exception:', error);
       setPinError('Error validating PIN. Please try again.');
     }
   };
 
   const handleCancel = () => {
+    console.log('PageLockModal: User cancelled');
+    
     // Clear PIN for security
     setPinInput('');
     setPinError('');
@@ -261,7 +317,7 @@ const PageLockModal = ({
         {/* PIN Input Field */}
         <input
           ref={inputRef}
-          type="text"
+          type="password"
           value={pinInput}
           onChange={handlePinChange}
           onKeyPress={handleKeyPress}
@@ -271,7 +327,7 @@ const PageLockModal = ({
             ...styles.pinInput,
             ...(document.activeElement === inputRef.current ? styles.pinInputFocus : {})
           }}
-		  autoComplete="off"
+          autoComplete="off"
           autoFocus
         />
         
@@ -280,7 +336,7 @@ const PageLockModal = ({
           <div style={styles.error}>
             {pinError}
             <br />
-            <small>Attempts: {pinAttempts + 1}/{maxAttempts}</small>
+            <small>Attempts: {pinAttempts}/{maxAttempts}</small>
           </div>
         )}
         
@@ -297,9 +353,9 @@ const PageLockModal = ({
           Unlock (Enter)
         </button>
         
-        {/* Cancel Button */}
+        {/* Cancel Button - ALWAYS WORKS */}
         <button style={styles.cancelButton} onClick={handleCancel}>
-          Cancel
+          Cancel (Go to Dashboard)
         </button>
       </div>
     </div>

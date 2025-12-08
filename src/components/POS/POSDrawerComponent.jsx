@@ -79,9 +79,13 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
         .from('pos_settings')
         .select('drawer_manager_pin_required, drawer_open_reasons, max_drawer_variance, require_manager_pin_for_variance')
         .eq('business_id', businessId)
-        .single();
+        .maybeSingle();
 
-      if (data && !error) {
+      if (error && error.code && error.code !== 'PGRST116') {
+        throw error;
+      }
+
+      if (data) {
         setPosSettings({
           drawer_manager_pin_required: data.drawer_manager_pin_required || false,
           drawer_open_reasons: data.drawer_open_reasons || ['No Sale', 'Change Request', 'Till Check', 'Manager Request', 'Refund', 'Other'],
@@ -125,9 +129,13 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
         .eq('business_id', businessId)
         .eq('terminal_id', terminalId)
         .is('closed_at', null)
-        .single();
+        .maybeSingle();
 
-      if (data && !error) {
+      if (error && error.code && error.code !== 'PGRST116') {
+        throw error;
+      }
+
+      if (data) {
         setCurrentDrawerSession(data);
         setDrawerMode('close');
         await loadExpectedCashForSession(data.id);

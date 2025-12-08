@@ -1,21 +1,32 @@
-// Login.jsx - Updated to remove 3AM logic and add indefinite stay logged in
-import React, { useState, useRef } from 'react';
+// Login.jsx - Enhanced with centralized auth cleanup
+import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { TavariStyles } from '../utils/TavariStyles';
 import TavariCheckbox from '../components/UI/TavariCheckbox';
+import toast from 'react-hot-toast';
+import { Eye, EyeOff } from 'lucide-react';
 import { 
   SecurityWrapper, 
   useSecurityContext, 
   SECURITY_PRESETS,
   validateFormSecurity 
 } from '../Security';
+import { sessionPersistence } from '../services/SessionPersistence';
+import { clearAllAuthData } from '../utils/authCleanup';
 
 const LoginComponent = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
-  const [stayLoggedIn, setStayLoggedIn] = useState(false);
+  const [stayLoggedIn, setStayLoggedIn] = useState(() => {
+    const storedPreference = localStorage.getItem('stayLoggedInPreference');
+    if (storedPreference === null) {
+      // Default to true so sessions persist unless explicitly disabled
+      return true;
+    }
+    return storedPreference === 'true';
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   
@@ -44,6 +55,11 @@ const LoginComponent = () => {
     }
   });
 
+  // 🔧 CRITICAL: Clear all cached data when component mounts
+  useEffect(() => {
+    clearAllAuthData('arrived_at_login_page');
+  }, []);
+
   const handleLogin = async () => {
     // Prevent multiple simultaneous login attempts
     if (isLoading) return;
@@ -53,6 +69,9 @@ const LoginComponent = () => {
     clearValidationErrors();
 
     try {
+      // 🔧 CRITICAL: Clear all auth data BEFORE login attempt
+      clearAllAuthData('new_login_attempt');
+
       // Validate inputs using security context
       const emailValidation = await validateInput(email, 'email', 'email');
       const passwordValidation = await validateInput(password, 'password', 'password');
@@ -95,7 +114,7 @@ const LoginComponent = () => {
       let lockedUserId = null;
       const { data: userLookup } = await supabase
         .from('users')
-        .select('id, failed_login_count, last_failed_login')
+        .select('id')
         .eq('email', sanitizedEmail)
         .maybeSingle();
 
@@ -112,6 +131,7 @@ const LoginComponent = () => {
 
         if (recentFails && recentFails.length >= 3) {
           await logSecurityEvent('account_lockout', {
+            user_id: lockedUserId,
             failed_attempt_count: recentFails.length,
             lockout_reason: 'Too many recent failed attempts',
             threat_type: 'brute_force_attempt',
@@ -144,6 +164,7 @@ const LoginComponent = () => {
           
           if (!knownDevices) {
             await logSecurityEvent('unusual_device_login', {
+              user_id: lockedUserId,
               threat_type: 'device_anomaly',
               threat_details: {
                 new_device: true,
@@ -162,8 +183,6 @@ const LoginComponent = () => {
       });
 
       if (error) {
-        console.warn("⛔ LOGIN ERROR:", error.message);
-        
         // Record failed login attempt
         await recordAction('login', false, sanitizedEmail);
 
@@ -204,7 +223,8 @@ const LoginComponent = () => {
       // Log successful login with enhanced security details
       const user = data?.user;
       if (user?.id) {
-        await logSecurityEvent('login_attempt', {
+        await logSecurityEvent('login_success', {
+          user_id: user.id,
           login_method: 'email_password',
           login_success: true,
           stay_logged_in: stayLoggedIn,
@@ -225,24 +245,42 @@ const LoginComponent = () => {
         });
       }
 
-      // Handle session persistence - UPDATED LOGIC
+      // Handle session persistence - enable 24-hour persistence
       if (stayLoggedIn) {
-        // Set indefinite session flag
-        localStorage.setItem('stayLoggedIn', 'true');
-        localStorage.removeItem('expiresAt'); // Remove any old expiry data
+        const persistenceEnabled = await sessionPersistence.enablePersistence();
         
-        await logSecurityEvent('indefinite_session_created', {
-          data_type: 'session_management',
-          data_action: 'indefinite_session_created',
-          details: {
-            session_type: 'indefinite',
-            inactivity_timeout_enabled: true
+        // Ensure flag is set even if enablePersistence failed silently
+        localStorage.setItem('stayLoggedIn', 'true');
+        
+        // Set session start time for 24-hour tracking
+        localStorage.setItem('sessionStartTime', Date.now().toString());
+        
+        // For Electron desktop app: Save session to file for auto-login on restart
+        if (window.electronAPI && data.session) {
+          try {
+            await window.electronAPI.saveSession({
+              access_token: data.session.access_token,
+              refresh_token: data.session.refresh_token,
+              expires_at: data.session.expires_at,
+              user: data.session.user
+            });
+            console.log('✅ Session saved for desktop app auto-login');
+          } catch (err) {
+            console.warn('⚠️ Failed to save session for desktop app:', err);
           }
+        }
+        
+        await logSecurityEvent('session_persistence_enabled_24h', {
+          user_id: user?.id,
+          data_type: 'session_management',
+          data_action: '24_hour_persistence_enabled',
+          session_duration_hours: 24
         }, 'low');
       } else {
-        // Standard session - will timeout on browser close
+        sessionPersistence.disablePersistence();
         localStorage.removeItem('expiresAt');
         localStorage.removeItem('stayLoggedIn');
+        localStorage.removeItem('sessionStartTime');
       }
 
       // Get user authentication data
@@ -266,21 +304,36 @@ const LoginComponent = () => {
 
       const userId = authData.user.id;
 
-      // Get user roles
+      // Get user roles - with fresh data, no cache
+      // Note: Get all roles across all businesses for user selection
       const { data: roleList, error: roleError } = await supabase
         .from("user_roles")
-        .select("*")
+        .select("id, user_id, business_id, role, active, businesses(id, name)")
         .eq("user_id", userId)
         .eq("active", true);
 
-      if (roleError || !roleList || roleList.length === 0) {
+      if (roleError) {
+        console.error('Error fetching user roles:', roleError);
+        await logSecurityEvent('system_error', {
+          user_id: userId,
+          error_message: roleError.message,
+          data_type: 'role_verification',
+          data_action: 'role_fetch_failed'
+        }, 'high');
+        
+        setErrorMsg('Login succeeded, but unable to load user roles.');
+        setIsLoading(false);
+        return;
+      }
+
+      if (!roleList || roleList.length === 0) {
         await logSecurityEvent('unauthorized_access', {
+          user_id: userId,
           data_type: 'role_verification',
           data_action: 'no_active_roles',
           threat_type: 'unauthorized_access',
           threat_details: {
-            role_error: roleError?.message,
-            roles_found: roleList?.length || 0
+            roles_found: 0
           }
         }, 'high');
         
@@ -289,16 +342,55 @@ const LoginComponent = () => {
         return;
       }
 
-      // Store business data
+      // Store business data - fresh from database
       localStorage.setItem('businessList', JSON.stringify(roleList));
       const currentBusiness = roleList[0];
+      
+      // Set BOTH business IDs to keep them in sync
       localStorage.setItem('currentBusinessId', currentBusiness.business_id);
+      localStorage.setItem('selectedBusinessId', currentBusiness.business_id);
+      localStorage.setItem('lastAuthUserId', userId);
+
+      try {
+        const { data: userProfileData } = await supabase
+          .from('users')
+          .select('full_name, first_name, last_name, email')
+          .eq('id', userId)
+          .maybeSingle();
+
+        const displayName = userProfileData?.full_name
+          || [userProfileData?.first_name, userProfileData?.last_name].filter(Boolean).join(' ')
+          || authData.user.email;
+
+        const initialActivePosUser = {
+          id: userId,
+          role: currentBusiness.role || 'employee',
+          full_name: userProfileData?.full_name || null,
+          first_name: userProfileData?.first_name || null,
+          last_name: userProfileData?.last_name || null,
+          email: userProfileData?.email || authData.user.email,
+          name: displayName,
+          business_id: currentBusiness.business_id,
+          unlocked_at: Date.now(),
+          source: 'login'
+        };
+
+        localStorage.setItem('posActiveUser', JSON.stringify(initialActivePosUser));
+        localStorage.setItem('posLoginUser', JSON.stringify(initialActivePosUser));
+        localStorage.setItem('posLastUnlockedBy', JSON.stringify(initialActivePosUser));
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('pos-active-user-changed'));
+        }
+      } catch (posUserError) {
+        console.warn('Unable to cache initial POS user after login:', posUserError?.message || posUserError);
+      }
 
       // Generate new session ID for authenticated session
       const sessionId = btoa(Date.now() + Math.random() + userId);
       sessionStorage.setItem('sessionId', sessionId);
 
       await logSecurityEvent('session_start', {
+        user_id: userId,
         data_type: 'session_management',
         data_action: 'authenticated_session_created',
         details: {
@@ -308,11 +400,40 @@ const LoginComponent = () => {
         }
       }, 'low');
 
-      // Navigate based on role
+      // Navigate based on role - Employees go directly to POS
       if (['owner', 'admin', 'manager', 'employee'].includes(currentBusiness.role)) {
-        navigate('/dashboard/home');
+        // Route employees directly to POS Register
+        if (currentBusiness.role === 'employee') {
+          await logSecurityEvent('employee_pos_redirect', {
+            user_id: userId,
+            data_type: 'navigation',
+            data_action: 'employee_auto_redirect_to_pos',
+            details: {
+              business_id: currentBusiness.business_id,
+              role: currentBusiness.role
+            }
+          }, 'low');
+          
+          navigate('/dashboard/pos/register');
+          toast.success('Welcome! Redirecting to POS...');
+        } else {
+          // Owners, admins, and managers go to main dashboard
+          await logSecurityEvent('management_dashboard_redirect', {
+            user_id: userId,
+            data_type: 'navigation',
+            data_action: 'management_dashboard_access',
+            details: {
+              business_id: currentBusiness.business_id,
+              role: currentBusiness.role
+            }
+          }, 'low');
+          
+          navigate('/dashboard/home');
+          toast.success(`Welcome back, ${currentBusiness.role}!`);
+        }
       } else {
         await logSecurityEvent('unauthorized_access', {
+          user_id: userId,
           data_type: 'role_verification',
           data_action: 'invalid_role_access_attempt',
           threat_type: 'privilege_escalation',
@@ -325,8 +446,6 @@ const LoginComponent = () => {
       }
 
     } catch (error) {
-      console.error('Login process error:', error);
-      
       await logSecurityEvent('system_error', {
         error_message: error.message,
         error_stack: error.stack,
@@ -340,6 +459,7 @@ const LoginComponent = () => {
       
       await recordAction('login', false, email);
       setErrorMsg('An unexpected error occurred. Please try again.');
+      toast.error('Login failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -387,6 +507,13 @@ const LoginComponent = () => {
       color: TavariStyles.colors.gray800,
       marginBottom: TavariStyles.spacing['2xl'],
       margin: '0 0 32px 0'
+    },
+    
+    dateDisplay: {
+      fontSize: TavariStyles.typography.fontSize.base,
+      color: TavariStyles.colors.gray600,
+      marginBottom: TavariStyles.spacing.xl,
+      fontWeight: TavariStyles.typography.fontWeight.medium
     },
     
     inputGroup: {
@@ -496,6 +623,14 @@ const LoginComponent = () => {
       color: TavariStyles.colors.primaryDark
     },
     
+    deploymentDate: {
+      marginTop: TavariStyles.spacing.lg,
+      fontSize: TavariStyles.typography.fontSize.xs,
+      color: TavariStyles.colors.gray400,
+      textAlign: 'center',
+      fontStyle: 'italic'
+    },
+    
     errorMessage: {
       ...TavariStyles.components.banner.base,
       ...TavariStyles.components.banner.variants.error,
@@ -594,7 +729,7 @@ const LoginComponent = () => {
               tabIndex={-1}
               disabled={isLoading}
             >
-              {showPassword ? '🙈' : '👁️'}
+              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
             </button>
           </div>
           {securityState.validationErrors?.password && (
@@ -613,7 +748,15 @@ const LoginComponent = () => {
         <div style={styles.checkboxContainer}>
           <TavariCheckbox
             checked={stayLoggedIn}
-            onChange={(checked) => setStayLoggedIn(checked)}
+            onChange={(checked) => {
+              setStayLoggedIn(checked);
+              localStorage.setItem('stayLoggedInPreference', checked ? 'true' : 'false');
+              if (checked) {
+                localStorage.setItem('stayLoggedIn', 'true');
+              } else {
+                localStorage.removeItem('stayLoggedIn');
+              }
+            }}
             label="Stay logged in (requires PIN after 5 minutes of inactivity)"
             size="md"
             id="stayLoggedIn"
@@ -652,6 +795,10 @@ const LoginComponent = () => {
             Create Account
           </span>
         </p>
+        
+        <div style={styles.deploymentDate}>
+          November 25 2025 v7
+        </div>
       </div>
       
       {/* Add CSS for spinner animation */}
@@ -681,15 +828,15 @@ const Login = () => {
       sessionTimeout={10 * 60 * 1000} // 10 minutes
       securityLevel="high"
       autoBlock={false}
-      showSecurityStatus={process.env.NODE_ENV === 'development'}
+      showSecurityStatus={false}
       onSecurityThreat={(threat) => {
-        console.warn('🚨 Security threat detected on login page:', threat);
+        // Security threats are logged automatically via security context
       }}
       onSessionTimeout={() => {
-        console.log('🕐 Login page session timed out');
+        // Session timeout handled by component state
       }}
       onRateLimitExceeded={(blockedActions) => {
-        console.warn('🚫 Rate limit exceeded on login page:', blockedActions);
+        // Rate limit events logged automatically
       }}
     >
       <LoginComponent />

@@ -35,96 +35,31 @@ export const useTOSATavariAuth = (options = {}) => {
     try {
       console.log(`${componentName}: Initializing TOSA authentication...`);
       
-      // Check current session
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      console.log(`${componentName}: Session check result:`, { session: !!session, error: sessionError });
-
-      if (sessionError || !session?.user) {
-        console.error(`${componentName}: No valid session, redirecting to employee portal`);
-        navigate('/employeeportal');
-        return;
-      }
-
-      setAuthUser(session.user);
-      console.log(`${componentName}: Authenticated as:`, session.user.email);
-
-      // Verify user is a Tavari employee
-      const { data: employeeData, error: empError } = await supabase
-        .from('tavari_employees')
-        .select(`
-          *,
-          tavari_employee_roles (
-            role_name,
-            permissions
-          )
-        `)
-        .eq('user_id', session.user.id)
-        .eq('is_active', true)
-        .single();
-
-      if (empError || !employeeData) {
-        console.error(`${componentName}: User is not a valid Tavari employee`);
-        setAuthError('Access denied. This area is restricted to Tavari employees only.');
-        
-        // Critical security event - non-employee trying to access TOSA
-        await supabase.from('security_audit_logs').insert({
-          event_type: 'unauthorized_tosa_access',
-          user_id: session.user.id,
-          severity: 'critical',
-          details: {
-            component: componentName,
-            email: session.user.email,
-            timestamp: new Date().toISOString()
-          }
-        });
-
-        // Sign out immediately
-        await supabase.auth.signOut();
-        navigate('/employeeportal');
-        return;
-      }
-
-      setEmployee(employeeData);
+      // TOSA is now open - no authentication required
+      // Set default permissions for open access
+      setAuthUser({ id: 'tosa-open-access', email: 'admin@tavari.com' });
+      setEmployee({ 
+        id: 'tosa-open', 
+        full_name: 'TOSA Admin',
+        email: 'admin@tavari.com'
+      });
       
-      // Extract permissions from role
-      const rolePermissions = employeeData.tavari_employee_roles?.permissions || {};
-      const permissionsList = Object.keys(rolePermissions).filter(key => rolePermissions[key]);
-      setPermissions(permissionsList);
-
-      console.log(`${componentName}: Employee loaded:`, {
-        name: employeeData.full_name,
-        role: employeeData.tavari_employee_roles?.role_name,
-        permissions: permissionsList
-      });
-
-      // Check required permissions
-      if (requiredPermissions && !hasPermissions(permissionsList, requiredPermissions)) {
-        setAuthError(`Insufficient permissions. Required: ${requiredPermissions.join(', ')}`);
-        console.error(`${componentName}: Missing required permissions:`, requiredPermissions);
-        return;
-      }
-
-      // Update last activity
-      await supabase
-        .from('tavari_employees')
-        .update({ 
-          last_activity: new Date().toISOString(),
-          activity_count: (employeeData.activity_count || 0) + 1
-        })
-        .eq('id', employeeData.id);
-
-      // Log successful component access
-      await supabase.from('security_audit_logs').insert({
-        event_type: 'tosa_component_access',
-        user_id: session.user.id,
-        severity: 'low',
-        details: {
-          component: componentName,
-          employee_id: employeeData.id,
-          employee_name: employeeData.full_name,
-          timestamp: new Date().toISOString()
-        }
-      });
+      // Set all permissions to true for open access
+      const allPermissions = [
+        'dashboard_access',
+        'business_management',
+        'security_monitoring',
+        'customer_support',
+        'system_monitoring',
+        'user_management',
+        'module_management',
+        'super_admin'
+      ];
+      setPermissions(allPermissions);
+      
+      // Set authenticated state - TOSA is now open access
+      // Note: isAuthenticated is computed from authUser and employee, not a state variable
+      setAuthLoading(false);
 
     } catch (error) {
       console.error(`${componentName}: Authentication error:`, error);

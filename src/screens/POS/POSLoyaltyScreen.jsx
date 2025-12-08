@@ -1,4 +1,4 @@
-// screens/POS/POSLoyaltyScreen.jsx - Updated with Auto-Apply Settings (Step 121)
+// screens/POS/POSLoyaltyScreen.jsx - Updated with Auto-Apply Settings and Permissions
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
@@ -7,13 +7,17 @@ import { logAction } from '../../helpers/posAudit';
 // Foundation Components
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
+import { SecurityWrapper } from '../../Security';
+import { useSecurityContext } from '../../Security';
 
 const POSLoyaltyScreen = ({ 
-  onCustomerSelected = null, // Callback when customer is selected for cart attachment
-  standalone = true // true when opened as standalone screen, false when used as modal
+  onCustomerSelected = null,
+  standalone = true
 }) => {
   const navigate = useNavigate();
   
@@ -23,6 +27,40 @@ const POSLoyaltyScreen = ({
     requireBusiness: true,
     componentName: 'POSLoyaltyScreen'
   });
+
+  // Security context for loyalty operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSLoyaltyScreen',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'medium'
+  });
+
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks
+  const canViewLoyalty = hasAnyPermission([
+    'pos.loyalty.view',
+    'pos.loyalty.create',
+    'pos.loyalty.edit'
+  ]) || hasElevatedPrivileges();
+
+  const canCreateCustomers = hasPermission('pos.loyalty.create') || hasElevatedPrivileges();
+  const canEditCustomers = hasPermission('pos.loyalty.edit') || hasElevatedPrivileges();
+  const canAdjustBalances = hasPermission('pos.loyalty.adjust_balance') || hasElevatedPrivileges();
+  const canManageSettings = hasPermission('pos.loyalty.settings') || hasElevatedPrivileges();
 
   // Use Tax Calculations hook (for loyalty calculations that might involve tax)
   const taxCalculations = useTaxCalculations(auth.selectedBusinessId);
@@ -34,7 +72,7 @@ const POSLoyaltyScreen = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [showAdjustmentModal, setShowAdjustmentModal] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false); // NEW: Settings modal
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [loyaltySettings, setLoyaltySettings] = useState({});
   
   // New customer form data
@@ -50,42 +88,46 @@ const POSLoyaltyScreen = ({
 
   // Balance adjustment data
   const [adjustment, setAdjustment] = useState({
-    type: 'add', // 'add' or 'subtract'
+    type: 'add',
     amount: '',
     reason: '',
     points: ''
   });
 
   useEffect(() => {
-    if (auth.selectedBusinessId && auth.authUser) {
+    if (auth.selectedBusinessId && auth.authUser && canViewLoyalty) {
       loadLoyaltySettings();
       loadCustomers();
     }
-  }, [auth.selectedBusinessId, auth.authUser]);
+  }, [auth.selectedBusinessId, auth.authUser, canViewLoyalty]);
 
   useEffect(() => {
-    if (auth.selectedBusinessId && auth.authUser) {
+    if (auth.selectedBusinessId && auth.authUser && canViewLoyalty) {
       if (searchTerm) {
         searchCustomers();
       } else {
         loadCustomers();
       }
     }
-  }, [searchTerm, auth.selectedBusinessId, auth.authUser]);
+  }, [searchTerm, auth.selectedBusinessId, auth.authUser, canViewLoyalty]);
 
   const loadLoyaltySettings = async () => {
     if (!auth.selectedBusinessId) return;
 
     try {
+      await logSecurityEvent('loyalty_settings_accessed', {
+        action: 'load_settings',
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       const { data, error } = await supabase
         .from('pos_loyalty_settings')
         .select('*')
         .eq('business_id', auth.selectedBusinessId)
         .single();
 
-      if (error && error.code !== 'PGRST116') throw error; // Ignore "not found" error
+      if (error && error.code !== 'PGRST116') throw error;
       
-      // Set default settings if none exist
       const defaultSettings = {
         is_active: true,
         loyalty_mode: 'points',
@@ -93,7 +135,7 @@ const POSLoyaltyScreen = ({
         redemption_rate: 1000,
         min_redemption: 5000,
         max_redemption_per_day: 25000,
-        auto_apply: 'manual', // Step 121: Default to manual
+        auto_apply: 'manual',
         allow_partial_redemption: true,
         points_expire_days: null,
         welcome_bonus_points: 0
@@ -101,13 +143,26 @@ const POSLoyaltyScreen = ({
       
       setLoyaltySettings(data ? { ...defaultSettings, ...data } : defaultSettings);
     } catch (err) {
-      console.error('Error loading loyalty settings:', err);
+      await logSecurityEvent('loyalty_settings_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
     }
   };
 
-  // NEW: Update loyalty settings function (Step 121)
   const updateLoyaltySettings = async (updatedSettings) => {
     if (!auth.selectedBusinessId) return;
+    if (!canManageSettings) {
+      setError('You do not have permission to manage loyalty settings');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('loyalty_settings_update', 5, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many settings updates. Please wait a moment.');
+      return;
+    }
 
     try {
       setLoading(true);
@@ -119,7 +174,6 @@ const POSLoyaltyScreen = ({
         updated_at: new Date().toISOString()
       };
 
-      // Try to update first
       const { data: existingData } = await supabase
         .from('pos_loyalty_settings')
         .select('id')
@@ -128,7 +182,6 @@ const POSLoyaltyScreen = ({
 
       let result;
       if (existingData) {
-        // Update existing
         result = await supabase
           .from('pos_loyalty_settings')
           .update(settingsData)
@@ -136,7 +189,6 @@ const POSLoyaltyScreen = ({
           .select()
           .single();
       } else {
-        // Insert new
         result = await supabase
           .from('pos_loyalty_settings')
           .insert(settingsData)
@@ -148,6 +200,12 @@ const POSLoyaltyScreen = ({
 
       setLoyaltySettings(result.data);
 
+      await logSecurityEvent('loyalty_settings_updated', {
+        updated_settings: updatedSettings,
+        business_id: auth.selectedBusinessId,
+        updated_by: auth.authUser?.id
+      }, 'low');
+
       await logAction({
         action: 'loyalty_settings_updated',
         context: 'POSLoyaltyScreen',
@@ -157,10 +215,15 @@ const POSLoyaltyScreen = ({
         }
       });
 
+      await recordAction('loyalty_settings_updated', updatedSettings, true);
       alert('Loyalty settings updated successfully!');
 
     } catch (err) {
-      console.error('Error updating loyalty settings:', err);
+      await logSecurityEvent('loyalty_settings_update_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Failed to update settings: ' + err.message);
     } finally {
       setLoading(false);
@@ -172,6 +235,12 @@ const POSLoyaltyScreen = ({
 
     try {
       setLoading(true);
+
+      await logSecurityEvent('loyalty_customers_accessed', {
+        action: 'load_customers',
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       const { data, error } = await supabase
         .from('pos_loyalty_accounts')
         .select('*')
@@ -183,7 +252,11 @@ const POSLoyaltyScreen = ({
       if (error) throw error;
       setCustomers(data || []);
     } catch (err) {
-      console.error('Error loading customers:', err);
+      await logSecurityEvent('loyalty_customers_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Failed to load customers');
     } finally {
       setLoading(false);
@@ -198,6 +271,12 @@ const POSLoyaltyScreen = ({
 
     try {
       setLoading(true);
+
+      await logSecurityEvent('loyalty_customers_searched', {
+        search_term: searchTerm,
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       const { data, error } = await supabase
         .from('pos_loyalty_accounts')
         .select('*')
@@ -209,7 +288,12 @@ const POSLoyaltyScreen = ({
       if (error) throw error;
       setCustomers(data || []);
     } catch (err) {
-      console.error('Error searching customers:', err);
+      await logSecurityEvent('loyalty_search_error', {
+        error: err.message,
+        search_term: searchTerm,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Failed to search customers');
     } finally {
       setLoading(false);
@@ -217,13 +301,27 @@ const POSLoyaltyScreen = ({
   };
 
   const handleCreateCustomer = async () => {
-    if (!newCustomer.customer_name.trim()) {
+    if (!canCreateCustomers) {
+      setError('You do not have permission to create loyalty customers');
+      return;
+    }
+
+    // Validate input
+    const nameValidation = validateInput(newCustomer.customer_name, 'text', 'customer_name');
+    if (!nameValidation.valid || !newCustomer.customer_name.trim()) {
       setError('Customer name is required');
       return;
     }
 
     if (!auth.selectedBusinessId || !auth.authUser) {
       setError('Authentication error');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('loyalty_create_customer', 10, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many customer creation attempts. Please wait a moment.');
       return;
     }
 
@@ -256,7 +354,6 @@ const POSLoyaltyScreen = ({
 
       if (error) throw error;
 
-      // Log initial balance/points if any
       if (customerData.balance > 0 || customerData.points > 0) {
         await supabase
           .from('pos_loyalty_transactions')
@@ -276,6 +373,15 @@ const POSLoyaltyScreen = ({
           });
       }
 
+      await logSecurityEvent('loyalty_customer_created', {
+        customer_id: customer.id,
+        customer_name: customer.customer_name,
+        initial_balance: customerData.balance,
+        initial_points: customerData.points,
+        business_id: auth.selectedBusinessId,
+        created_by: auth.authUser?.id
+      }, 'low');
+
       await logAction({
         action: 'loyalty_customer_created',
         context: 'POSLoyaltyScreen',
@@ -288,6 +394,8 @@ const POSLoyaltyScreen = ({
           sms_notifications: customerData.sms_notifications
         }
       });
+
+      await recordAction('loyalty_customer_created', { customer_name: customer.customer_name }, true);
 
       setNewCustomer({
         customer_name: '',
@@ -304,7 +412,12 @@ const POSLoyaltyScreen = ({
       alert('Customer created successfully!');
 
     } catch (err) {
-      console.error('Error creating customer:', err);
+      await logSecurityEvent('loyalty_customer_create_error', {
+        error: err.message,
+        customer_name: newCustomer.customer_name,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Failed to create customer: ' + err.message);
     } finally {
       setLoading(false);
@@ -312,18 +425,31 @@ const POSLoyaltyScreen = ({
   };
 
   const handleAdjustBalance = async () => {
+    if (!canAdjustBalances) {
+      setError('You do not have permission to adjust customer balances');
+      return;
+    }
+
     if (!selectedCustomer || (!adjustment.amount && !adjustment.points)) {
       setError('Please enter an adjustment amount');
       return;
     }
 
-    if (!adjustment.reason.trim()) {
+    const reasonValidation = validateInput(adjustment.reason, 'text', 'adjustment_reason');
+    if (!reasonValidation.valid || !adjustment.reason.trim()) {
       setError('Please provide a reason for the adjustment');
       return;
     }
 
     if (!auth.selectedBusinessId || !auth.authUser) {
       setError('Authentication error');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('loyalty_adjust_balance', 15, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many balance adjustments. Please wait a moment.');
       return;
     }
 
@@ -349,7 +475,6 @@ const POSLoyaltyScreen = ({
           : Math.max(0, currentPoints - adjustmentPoints);
       }
 
-      // Update customer balance
       const { error: updateError } = await supabase
         .from('pos_loyalty_accounts')
         .update({
@@ -361,7 +486,6 @@ const POSLoyaltyScreen = ({
 
       if (updateError) throw updateError;
 
-      // Log the adjustment transaction
       await supabase
         .from('pos_loyalty_transactions')
         .insert({
@@ -379,6 +503,20 @@ const POSLoyaltyScreen = ({
           processed_at: new Date().toISOString()
         });
 
+      await logSecurityEvent('loyalty_balance_adjusted', {
+        customer_id: selectedCustomer.id,
+        adjustment_type: adjustment.type,
+        amount: adjustmentAmount,
+        points: adjustmentPoints,
+        reason: adjustment.reason,
+        old_balance: currentBalance,
+        new_balance: newBalance,
+        old_points: currentPoints,
+        new_points: newPoints,
+        business_id: auth.selectedBusinessId,
+        adjusted_by: auth.authUser?.id
+      }, 'medium');
+
       await logAction({
         action: 'loyalty_balance_adjusted',
         context: 'POSLoyaltyScreen',
@@ -395,15 +533,26 @@ const POSLoyaltyScreen = ({
         }
       });
 
+      await recordAction('loyalty_balance_adjusted', { 
+        customer_id: selectedCustomer.id, 
+        amount: adjustmentAmount,
+        points: adjustmentPoints
+      }, true);
+
       setAdjustment({ type: 'add', amount: '', reason: '', points: '' });
       setShowAdjustmentModal(false);
       setSelectedCustomer({ ...selectedCustomer, balance: newBalance, points: newPoints });
-      loadCustomers(); // Refresh the list
+      loadCustomers();
 
       alert('Balance adjusted successfully!');
 
     } catch (err) {
-      console.error('Error adjusting balance:', err);
+      await logSecurityEvent('loyalty_balance_adjust_error', {
+        error: err.message,
+        customer_id: selectedCustomer.id,
+        business_id: auth.selectedBusinessId
+      }, 'high');
+      
       setError('Failed to adjust balance: ' + err.message);
     } finally {
       setLoading(false);
@@ -414,7 +563,6 @@ const POSLoyaltyScreen = ({
     setSelectedCustomer(customer);
     
     if (onCustomerSelected && !standalone) {
-      // If this is used as a modal for cart attachment
       onCustomerSelected(customer);
     }
 
@@ -498,12 +646,14 @@ const POSLoyaltyScreen = ({
       <div style={styles.customerDetails}>
         <div style={styles.detailsHeader}>
           <h3>Customer Details</h3>
-          <button
-            style={styles.adjustButton}
-            onClick={() => setShowAdjustmentModal(true)}
-          >
-            Adjust Balance
-          </button>
+          {canAdjustBalances && (
+            <button
+              style={styles.adjustButton}
+              onClick={() => setShowAdjustmentModal(true)}
+            >
+              Adjust Balance
+            </button>
+          )}
         </div>
         
         <div style={styles.detailsGrid}>
@@ -570,7 +720,6 @@ const POSLoyaltyScreen = ({
     );
   };
 
-  // NEW: Loyalty Settings Modal (Step 121)
   const renderLoyaltySettingsModal = () => {
     if (!showSettingsModal) return null;
 
@@ -774,7 +923,6 @@ const POSLoyaltyScreen = ({
   };
 
   if (!standalone) {
-    // Modal version for customer selection
     return (
       <div style={styles.modal}>
         <div style={styles.modalContent}>
@@ -804,16 +952,40 @@ const POSLoyaltyScreen = ({
             {renderCustomerList()}
           </div>
           
-          <div style={styles.modalActions}>
-            <button
-              style={styles.newCustomerButton}
-              onClick={() => setShowNewCustomerForm(true)}
-            >
-              Create New Customer
-            </button>
-          </div>
+          {canCreateCustomers && (
+            <div style={styles.modalActions}>
+              <button
+                style={styles.newCustomerButton}
+                onClick={() => setShowNewCustomerForm(true)}
+              >
+                Create New Customer
+              </button>
+            </div>
+          )}
         </div>
       </div>
+    );
+  }
+
+  // Check overall access permission
+  if (!loading && !permissionsLoading && !canViewLoyalty) {
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['cashier', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="POSLoyaltyScreen"
+        >
+          <div style={styles.container}>
+            <div style={styles.noAccessContainer}>
+              <h3 style={styles.errorBanner}>Access Denied</h3>
+              <p style={styles.noAccessText}>
+                You do not have permission to view loyalty management.
+              </p>
+            </div>
+          </div>
+        </POSAuthWrapper>
+      </SecurityWrapper>
     );
   }
 
@@ -825,7 +997,6 @@ const POSLoyaltyScreen = ({
       </div>
 
       <div style={styles.content}>
-        {/* Search and Actions */}
         <div style={styles.topActions}>
           <div style={styles.searchSection}>
             <input
@@ -837,31 +1008,43 @@ const POSLoyaltyScreen = ({
             />
           </div>
           
-          <button
-            style={styles.settingsButton}
-            onClick={() => setShowSettingsModal(true)}
-          >
-            ⚙️ Settings
-          </button>
+          {canManageSettings && (
+            <PermissionGate
+              permissions={['pos.loyalty.settings']}
+              requireElevated
+            >
+              <button
+                style={styles.settingsButton}
+                onClick={() => setShowSettingsModal(true)}
+              >
+                ⚙️ Settings
+              </button>
+            </PermissionGate>
+          )}
           
-          <button
-            style={styles.newCustomerButton}
-            onClick={() => setShowNewCustomerForm(true)}
-          >
-            + New Customer
-          </button>
+          {canCreateCustomers && (
+            <PermissionGate
+              permissions={['pos.loyalty.create']}
+              requireElevated
+            >
+              <button
+                style={styles.newCustomerButton}
+                onClick={() => setShowNewCustomerForm(true)}
+              >
+                + New Customer
+              </button>
+            </PermissionGate>
+          )}
         </div>
 
         {error && <div style={styles.errorBanner}>{error}</div>}
 
         <div style={styles.mainContent}>
-          {/* Customer List */}
           <div style={styles.leftPanel}>
             <h3>Customers</h3>
             {renderCustomerList()}
           </div>
 
-          {/* Customer Details */}
           <div style={styles.rightPanel}>
             {selectedCustomer ? (
               renderSelectedCustomerDetails()
@@ -875,8 +1058,7 @@ const POSLoyaltyScreen = ({
         </div>
       </div>
 
-      {/* New Customer Modal */}
-      {showNewCustomerForm && (
+      {showNewCustomerForm && canCreateCustomers && (
         <div style={styles.modal}>
           <div style={styles.modalContent}>
             <div style={styles.modalHeader}>
@@ -991,8 +1173,7 @@ const POSLoyaltyScreen = ({
         </div>
       )}
 
-      {/* Balance Adjustment Modal */}
-      {showAdjustmentModal && selectedCustomer && (
+      {showAdjustmentModal && selectedCustomer && canAdjustBalances && (
         <div style={styles.modal}>
           <div style={styles.modalContent}>
             <div style={styles.modalHeader}>
@@ -1086,26 +1267,24 @@ const POSLoyaltyScreen = ({
         </div>
       )}
 
-      {/* NEW: Loyalty Settings Modal (Step 121) */}
       {renderLoyaltySettingsModal()}
     </div>
   );
 
   return (
-    <POSAuthWrapper
-      requiredRoles={['cashier', 'manager', 'owner']}
-      requireBusiness={true}
-      componentName="POSLoyaltyScreen"
-      onAuthReady={(authData) => {
-        console.log('POSLoyaltyScreen: Auth ready with data:', authData);
-      }}
-    >
-      {renderMainContent()}
-    </POSAuthWrapper>
+    <SecurityWrapper>
+      <POSAuthWrapper
+        requiredRoles={['cashier', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="POSLoyaltyScreen"
+      >
+        {renderMainContent()}
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 
-// Updated styles using TavariStyles - Added new settings styles
+// Updated styles using TavariStyles
 const styles = {
   container: {
     ...TavariStyles.layout.container
@@ -1140,7 +1319,6 @@ const styles = {
     fontSize: TavariStyles.typography.fontSize.lg
   },
   
-  // NEW: Settings button (Step 121)
   settingsButton: {
     ...TavariStyles.components.button.base,
     ...TavariStyles.components.button.variants.secondary,
@@ -1355,7 +1533,6 @@ const styles = {
     color: TavariStyles.colors.gray500
   },
   
-  // NEW: Settings modal styles (Step 121)
   modalBody: {
     ...TavariStyles.components.modal.body,
     maxHeight: '70vh',
@@ -1486,6 +1663,17 @@ const styles = {
     maxHeight: '300px',
     overflowY: 'auto',
     marginBottom: TavariStyles.spacing.xl
+  },
+
+  noAccessContainer: {
+    padding: TavariStyles.spacing['3xl'],
+    textAlign: 'center'
+  },
+
+  noAccessText: {
+    fontSize: TavariStyles.typography.fontSize.lg,
+    color: TavariStyles.colors.gray600,
+    margin: 0
   }
 };
 

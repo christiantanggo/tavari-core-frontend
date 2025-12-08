@@ -1,6 +1,10 @@
-// src/screens/HR/MilestoneTracker.jsx
+// src/screens/HR/MilestoneTracker.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
+import { useSecurityContext } from '../../Security';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import toast from 'react-hot-toast';
 
 const MilestoneTracker = ({ employeeId, showCelebrations = true }) => {
   const [progress, setProgress] = useState(null);
@@ -9,23 +13,73 @@ const MilestoneTracker = ({ employeeId, showCelebrations = true }) => {
   const [showCelebrationModal, setShowCelebrationModal] = useState(false);
   const [newAchievement, setNewAchievement] = useState(null);
 
-  const businessId = localStorage.getItem('currentBusinessId');
+  // Security context
+  const {
+    recordAction,
+    logSecurityEvent,
+    checkRateLimit
+  } = useSecurityContext({
+    componentName: 'MilestoneTracker',
+    sensitiveComponent: false,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Authentication
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    authLoading
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin', 'hr_admin'],
+    requireBusiness: true,
+    componentName: 'MilestoneTracker'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewMilestones = hasAnyPermission([
+    'hr.onboarding.view',
+    'hr.milestones.view'
+  ]) || hasElevatedPrivileges();
+
+  const canSendCelebrations = hasPermission('hr.celebrations.send') || hasElevatedPrivileges();
 
   useEffect(() => {
-    if (employeeId && businessId) {
+    if (employeeId && selectedBusinessId && !authLoading && !permissionsLoading && canViewMilestones) {
       loadMilestoneData();
     }
-  }, [employeeId, businessId]);
+  }, [employeeId, selectedBusinessId, authLoading, permissionsLoading, canViewMilestones]);
 
   const loadMilestoneData = async () => {
+    if (!canViewMilestones) {
+      console.log('User does not have permission to view milestones');
+      return;
+    }
+
     try {
       setLoading(true);
       
+      await logSecurityEvent('milestone_tracker_access', {
+        action: 'load_milestone_data',
+        employee_id: employeeId,
+        business_id: selectedBusinessId
+      }, 'low');
+
       // Load progress data
       const { data: progressData, error: progressError } = await supabase
         .rpc('get_onboarding_progress_with_milestones', {
           p_employee_id: employeeId,
-          p_business_id: businessId
+          p_business_id: selectedBusinessId
         });
 
       if (progressError) throw progressError;
@@ -35,18 +89,30 @@ const MilestoneTracker = ({ employeeId, showCelebrations = true }) => {
       const { data: achievementData, error: achievementError } = await supabase
         .rpc('get_employee_milestone_achievements', {
           p_employee_id: employeeId,
-          p_business_id: businessId
+          p_business_id: selectedBusinessId
         });
 
       if (achievementError) throw achievementError;
       setAchievements(achievementData || []);
 
+      recordAction('view_milestone_tracker', {
+        employee_id: employeeId,
+        business_id: selectedBusinessId
+      });
+
       // Check for new achievements to celebrate
-      if (showCelebrations) {
+      if (showCelebrations && canSendCelebrations) {
         checkForNewAchievements(achievementData || []);
       }
     } catch (error) {
       console.error('Error loading milestone data:', error);
+      toast.error('Failed to load milestone data');
+
+      await logSecurityEvent('milestone_tracker_load_failed', {
+        error_message: error.message,
+        employee_id: employeeId,
+        business_id: selectedBusinessId
+      }, 'medium');
     } finally {
       setLoading(false);
     }
@@ -61,15 +127,42 @@ const MilestoneTracker = ({ employeeId, showCelebrations = true }) => {
   };
 
   const sendCelebration = async (milestoneType) => {
+    if (!canSendCelebrations) {
+      toast.error('You do not have permission to send celebrations');
+      return;
+    }
+
+    // Rate limiting check
+    const canProceed = await checkRateLimit('send_celebration', 10, 60);
+    if (!canProceed) {
+      toast.error('Too many celebration requests. Please wait a moment.');
+      return;
+    }
+
     try {
+      await logSecurityEvent('celebration_send', {
+        action: 'send_milestone_celebration',
+        employee_id: employeeId,
+        business_id: selectedBusinessId,
+        milestone_type: milestoneType,
+        sent_by: authUser?.id
+      }, 'low');
+
       const { data, error } = await supabase
         .rpc('send_milestone_celebration', {
           p_employee_id: employeeId,
-          p_business_id: businessId,
+          p_business_id: selectedBusinessId,
           p_milestone_type: milestoneType
         });
 
       if (error) throw error;
+      
+      recordAction('celebration_sent', {
+        employee_id: employeeId,
+        milestone_type: milestoneType
+      });
+
+      toast.success('Celebration sent successfully! 🎉');
       
       // Reload data to reflect celebration sent
       loadMilestoneData();
@@ -77,6 +170,13 @@ const MilestoneTracker = ({ employeeId, showCelebrations = true }) => {
       setNewAchievement(null);
     } catch (error) {
       console.error('Error sending celebration:', error);
+      toast.error('Failed to send celebration');
+
+      await logSecurityEvent('celebration_send_failed', {
+        error_message: error.message,
+        employee_id: employeeId,
+        milestone_type: milestoneType
+      }, 'medium');
     }
   };
 
@@ -100,7 +200,19 @@ const MilestoneTracker = ({ employeeId, showCelebrations = true }) => {
     return '#6B7280'; // Gray
   };
 
-  if (loading) {
+  // Don't render if user doesn't have permission
+  if (!canViewMilestones) {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded-lg p-6">
+        <div className="text-red-800">
+          <h3 className="font-semibold mb-2">Access Denied</h3>
+          <p>You do not have permission to view milestone tracking</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading || authLoading || permissionsLoading) {
     return (
       <div className="flex items-center justify-center h-32">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-600"></div>
@@ -189,7 +301,7 @@ const MilestoneTracker = ({ employeeId, showCelebrations = true }) => {
       )}
 
       {/* Celebration Modal */}
-      {showCelebrationModal && newAchievement && (
+      {showCelebrationModal && newAchievement && canSendCelebrations && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-8 max-w-md w-full mx-4 text-center">
             <div className="text-6xl mb-4">

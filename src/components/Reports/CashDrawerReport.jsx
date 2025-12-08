@@ -575,13 +575,13 @@ This report shows cash drawer reconciliation data for the selected period.
           <div style={styles.summaryLabel}>Actual Cash</div>
         </div>
         <div style={styles.summaryCard}>
-          <div style={styles.summaryValue} style={{ color: getVarianceColor(totalVariance) }}>
+          <div style={{...styles.summaryValue, color: getVarianceColor(totalVariance)}}>
             {formatCurrency(totalVariance)}
           </div>
           <div style={styles.summaryLabel}>Total Variance</div>
         </div>
         <div style={styles.summaryCard}>
-          <div style={styles.summaryValue} style={{ color: varianceCount > 0 ? TavariStyles.colors.warning : TavariStyles.colors.success }}>
+          <div style={{...styles.summaryValue, color: varianceCount > 0 ? TavariStyles.colors.warning : TavariStyles.colors.success}}>
             {varianceCount}
           </div>
           <div style={styles.summaryLabel}>Variances Over ${varianceThreshold.toFixed(2)}</div>

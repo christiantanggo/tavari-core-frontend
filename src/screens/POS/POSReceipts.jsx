@@ -4,12 +4,16 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { TavariStyles } from '../../utils/TavariStyles';
 import TransactionsModal from '../../components/POS/TransactionsModal';
 import { generateReceiptHTML, printReceipt, RECEIPT_TYPES } from '../../helpers/ReceiptBuilder';
 import { logAction } from '../../helpers/posAudit';
 import dayjs from 'dayjs';
+import { SecurityWrapper } from '../../Security';
+import { useSecurityContext } from '../../Security';
 
 const POSReceipts = () => {
   const navigate = useNavigate();
@@ -20,6 +24,39 @@ const POSReceipts = () => {
     requireBusiness: true,
     componentName: 'POSReceipts'
   });
+
+  // Security context for receipt operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSReceipts',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'medium'
+  });
+
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks
+  const canViewReceipts = hasAnyPermission([
+    'pos.receipts.view',
+    'pos.receipts.reprint',
+    'pos.receipts.refund'
+  ]) || hasElevatedPrivileges();
+
+  const canReprintReceipts = hasPermission('pos.receipts.reprint') || hasElevatedPrivileges();
+  const canRefundReceipts = hasPermission('pos.receipts.refund') || hasElevatedPrivileges();
+  const canSearchReceipts = hasPermission('pos.receipts.search') || hasElevatedPrivileges();
 
   // Tax calculations for receipt details
   const taxCalc = useTaxCalculations(auth.selectedBusinessId);
@@ -38,14 +75,19 @@ const POSReceipts = () => {
 
   // Load receipts when authentication is ready
   useEffect(() => {
-    if (auth.selectedBusinessId && auth.authUser) {
+    if (auth.selectedBusinessId && auth.authUser && canViewReceipts) {
       fetchReceipts();
       loadBusinessSettings();
     }
-  }, [auth.selectedBusinessId, auth.authUser, dateFilter]);
+  }, [auth.selectedBusinessId, auth.authUser, dateFilter, canViewReceipts]);
 
   const loadBusinessSettings = async () => {
     try {
+      await logSecurityEvent('business_settings_accessed', {
+        action: 'load_settings',
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       const { data: business, error } = await supabase
         .from('businesses')
         .select('*')
@@ -56,7 +98,11 @@ const POSReceipts = () => {
       
       setBusinessSettings(business);
     } catch (err) {
-      console.error('Error loading business settings:', err);
+      await logSecurityEvent('business_settings_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setBusinessSettings({
         name: 'Business Name',
         business_address: '123 Main St',
@@ -73,7 +119,11 @@ const POSReceipts = () => {
     setLoading(true);
     setError(null);
     try {
-      console.log(`POSReceipts: Loading receipts for business ${auth.selectedBusinessId}`);
+      await logSecurityEvent('receipts_accessed', {
+        action: 'fetch_receipts',
+        business_id: auth.selectedBusinessId,
+        date_filter: dateFilter
+      }, 'low');
 
       // Calculate date range based on filter
       let startDate = null;
@@ -105,8 +155,6 @@ const POSReceipts = () => {
       const { data: salesData, error: salesError } = await query.limit(100);
 
       if (salesError) throw salesError;
-
-      console.log(`POSReceipts: Found ${salesData?.length || 0} sales`);
 
       // Get related data separately
       const processedReceipts = await Promise.all((salesData || []).map(async (sale) => {
@@ -186,19 +234,38 @@ const POSReceipts = () => {
         }
       });
 
+      await recordAction('receipts_loaded', { count: processedReceipts.length }, true);
+
     } catch (err) {
-      console.error('POSReceipts: Error fetching receipts:', err);
+      await logSecurityEvent('receipts_fetch_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId,
+        date_filter: dateFilter
+      }, 'medium');
+      
       setError('Error loading receipts: ' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const viewReceipt = (receipt) => {
+  const viewReceipt = async (receipt) => {
+    if (!canViewReceipts) {
+      setError('You do not have permission to view receipts');
+      return;
+    }
+
     setSelectedReceipt(receipt);
     setShowReceiptModal(true);
 
-    logAction({
+    await logSecurityEvent('receipt_viewed', {
+      receipt_id: receipt.id,
+      receipt_number: receipt.receipt_number,
+      business_id: auth.selectedBusinessId,
+      viewed_by: auth.authUser?.id
+    }, 'low');
+
+    await logAction({
       action: 'receipt_viewed',
       context: 'POSReceipts',
       metadata: {
@@ -208,6 +275,8 @@ const POSReceipts = () => {
         user_role: auth.userRole
       }
     });
+
+    await recordAction('receipt_viewed', { receipt_id: receipt.id }, true);
   };
 
   const closeReceiptModal = () => {
@@ -215,12 +284,18 @@ const POSReceipts = () => {
     setShowReceiptModal(false);
   };
 
-  const handleTransactionFound = (action, transaction) => {
-    console.log(`POSReceipts: Transaction action ${action} for receipt ${transaction.receiptNumber}`);
-    
+  const handleTransactionFound = async (action, transaction) => {
     if (action === 'reprint') {
+      if (!canReprintReceipts) {
+        setError('You do not have permission to reprint receipts');
+        return;
+      }
       handleReprintReceipt(transaction);
     } else if (action === 'refund') {
+      if (!canRefundReceipts) {
+        setError('You do not have permission to process refunds');
+        return;
+      }
       navigate('/dashboard/pos/refunds', {
         state: { transaction }
       });
@@ -228,8 +303,20 @@ const POSReceipts = () => {
   };
 
   const handleReprintReceipt = async (receipt) => {
+    if (!canReprintReceipts) {
+      setError('You do not have permission to reprint receipts');
+      return;
+    }
+
     if (!businessSettings) {
       alert('Business settings not loaded');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('receipt_reprint', 10, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many reprint attempts. Please wait a moment.');
       return;
     }
 
@@ -282,6 +369,13 @@ const POSReceipts = () => {
 
       printReceipt(receiptHTML);
 
+      await logSecurityEvent('receipt_reprinted', {
+        transaction_id: receipt.id,
+        receipt_number: receipt.receipt_number,
+        business_id: auth.selectedBusinessId,
+        reprinted_by: auth.authUser?.id
+      }, 'medium');
+
       await logAction({
         action: 'receipt_reprinted',
         context: 'POSReceipts',
@@ -294,10 +388,17 @@ const POSReceipts = () => {
         }
       });
 
+      await recordAction('receipt_reprinted', { receipt_number: receipt.receipt_number }, true);
+
       alert(`Receipt ${receipt.receipt_number} sent to printer`);
       
     } catch (err) {
-      console.error('POSReceipts: Error reprinting receipt:', err);
+      await logSecurityEvent('receipt_reprint_error', {
+        error: err.message,
+        receipt_id: receipt.id,
+        business_id: auth.selectedBusinessId
+      }, 'high');
+      
       setError('Failed to reprint receipt: ' + err.message);
     }
   };
@@ -335,7 +436,6 @@ const POSReceipts = () => {
     return matchesSearch && matchesType;
   });
 
-  // Styles (keeping existing styles object - truncated for brevity)
   const styles = {
     container: { ...TavariStyles.layout.container },
     header: { ...TavariStyles.layout.flexBetween, marginBottom: TavariStyles.spacing.xl, paddingBottom: TavariStyles.spacing.lg, borderBottom: `2px solid ${TavariStyles.colors.primary}` },
@@ -385,7 +485,9 @@ const POSReceipts = () => {
     summaryRow: { display: 'flex', justifyContent: 'space-between', margin: `${TavariStyles.spacing.xs} 0`, fontSize: TavariStyles.typography.fontSize.base },
     totalRow: { display: 'flex', justifyContent: 'space-between', margin: `${TavariStyles.spacing.md} 0 0 0`, fontSize: TavariStyles.typography.fontSize.lg, fontWeight: TavariStyles.typography.fontWeight.bold, paddingTop: TavariStyles.spacing.md, borderTop: `2px solid ${TavariStyles.colors.gray800}`, color: TavariStyles.colors.gray800 },
     receiptStatus: { fontSize: TavariStyles.typography.fontSize.xs, fontWeight: TavariStyles.typography.fontWeight.bold, padding: '2px 8px', borderRadius: TavariStyles.borderRadius.sm, textTransform: 'uppercase' },
-    statusCompleted: { backgroundColor: TavariStyles.colors.successBg, color: TavariStyles.colors.successText }
+    statusCompleted: { backgroundColor: TavariStyles.colors.successBg, color: TavariStyles.colors.successText },
+    noAccessContainer: { padding: TavariStyles.spacing['3xl'], textAlign: 'center' },
+    noAccessText: { fontSize: TavariStyles.typography.fontSize.lg, color: TavariStyles.colors.gray600, margin: 0 }
   };
 
   const stats = {
@@ -395,7 +497,7 @@ const POSReceipts = () => {
   };
 
   const renderReceiptContent = () => {
-    if (loading) {
+    if (loading || permissionsLoading) {
       return (
         <div style={styles.loading}>
           <div style={TavariStyles.components.loading.spinner}></div>
@@ -472,223 +574,263 @@ const POSReceipts = () => {
     );
   };
 
-  return (
-    <POSAuthWrapper
-      requiredRoles={['cashier', 'manager', 'owner']}
-      requireBusiness={true}
-      componentName="POS Receipts"
-    >
-      <div style={styles.container}>
-        <div style={styles.header}>
-          <div style={styles.headerContent}>
-            <h1 style={styles.title}>POS Receipts</h1>
-            <p style={styles.subtitle}>
-              View and manage transaction receipts - Search, reprint, and process refunds
-            </p>
-          </div>
-          <div style={styles.headerActions}>
-            <button
-              style={styles.searchButton}
-              onClick={() => setShowTransactionsModal(true)}
-            >
-              Quick Search
-            </button>
-            <button
-              style={styles.refreshButton}
-              onClick={fetchReceipts}
-            >
-              Refresh
-            </button>
-          </div>
-        </div>
-
-        {error && <div style={styles.errorBanner}>{error}</div>}
-
-        <div style={styles.controls}>
-          <input
-            type="text"
-            placeholder="Search by receipt #, customer, or cashier..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            style={styles.searchInput}
-          />
-          
-          <select
-            value={filterType}
-            onChange={(e) => setFilterType(e.target.value)}
-            style={styles.filterSelect}
-          >
-            <option value="all">All Receipts</option>
-            <option value="email">Emailed</option>
-            <option value="cash">Cash Payment</option>
-            <option value="card">Card Payment</option>
-          </select>
-
-          <select
-            value={dateFilter}
-            onChange={(e) => setDateFilter(e.target.value)}
-            style={styles.filterSelect}
-          >
-            <option value="today">Today</option>
-            <option value="week">Last 7 Days</option>
-            <option value="month">Last 30 Days</option>
-            <option value="all">All Time</option>
-          </select>
-          
-          <div style={styles.statsCard}>
-            <div style={styles.statsText}>
-              {stats.total} receipts | ${stats.totalValue.toFixed(2)} total
+  // Check overall access permission
+  if (!loading && !permissionsLoading && !canViewReceipts) {
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['cashier', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="POS Receipts"
+        >
+          <div style={styles.container}>
+            <div style={styles.noAccessContainer}>
+              <h3 style={styles.errorBanner}>Access Denied</h3>
+              <p style={styles.noAccessText}>
+                You do not have permission to view receipts.
+              </p>
             </div>
           </div>
-        </div>
+        </POSAuthWrapper>
+      </SecurityWrapper>
+    );
+  }
 
-        {renderReceiptContent()}
-
-        <TransactionsModal
-          isOpen={showTransactionsModal}
-          onClose={() => setShowTransactionsModal(false)}
-          onTransactionFound={handleTransactionFound}
-          title="Search Receipts & Transactions"
-        />
-
-        {selectedReceipt && showReceiptModal && (
-          <div style={styles.modal} onClick={closeReceiptModal}>
-            <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
-              <div style={styles.modalHeader}>
-                <h3 style={styles.modalTitle}>
-                  Receipt {selectedReceipt.receipt_number || selectedReceipt.id.slice(-8)}
-                </h3>
-                <button 
-                  style={styles.closeButton} 
-                  onClick={closeReceiptModal}
+  return (
+    <SecurityWrapper>
+      <POSAuthWrapper
+        requiredRoles={['cashier', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="POS Receipts"
+      >
+        <div style={styles.container}>
+          <div style={styles.header}>
+            <div style={styles.headerContent}>
+              <h1 style={styles.title}>POS Receipts</h1>
+              <p style={styles.subtitle}>
+                View and manage transaction receipts - Search, reprint, and process refunds
+              </p>
+            </div>
+            <div style={styles.headerActions}>
+              {canSearchReceipts && (
+                <PermissionGate
+                  permissions={['pos.receipts.search']}
+                  requireElevated
                 >
-                  ×
-                </button>
-              </div>
-              
-              <div style={styles.modalBody}>
-                <div style={styles.receiptDetails}>
-                  <div style={styles.detailRow}>
-                    <span style={styles.detailLabel}>Receipt Number:</span>
-                    <span style={styles.detailValue}>{selectedReceipt.receipt_number}</span>
-                  </div>
-                  <div style={styles.detailRow}>
-                    <span style={styles.detailLabel}>Date:</span>
-                    <span style={styles.detailValue}>
-                      {dayjs(selectedReceipt.created_at).format('MMMM D, YYYY h:mm A')}
-                    </span>
-                  </div>
-                  <div style={styles.detailRow}>
-                    <span style={styles.detailLabel}>Customer:</span>
-                    <span style={styles.detailValue}>{selectedReceipt.customer_name}</span>
-                  </div>
-                  <div style={styles.detailRow}>
-                    <span style={styles.detailLabel}>Cashier:</span>
-                    <span style={styles.detailValue}>{selectedReceipt.cashier_name}</span>
-                  </div>
-                  <div style={styles.detailRow}>
-                    <span style={styles.detailLabel}>Type:</span>
-                    <span style={styles.detailValue}>{selectedReceipt.receipt_type}</span>
-                  </div>
-                  {selectedReceipt.email_sent_to && (
-                    <div style={styles.detailRow}>
-                      <span style={styles.detailLabel}>Email Sent To:</span>
-                      <span style={styles.detailValue}>{selectedReceipt.email_sent_to}</span>
-                    </div>
-                  )}
-                </div>
+                  <button
+                    style={styles.searchButton}
+                    onClick={() => setShowTransactionsModal(true)}
+                  >
+                    Quick Search
+                  </button>
+                </PermissionGate>
+              )}
+              <button
+                style={styles.refreshButton}
+                onClick={fetchReceipts}
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
 
-                <div style={styles.itemsSection}>
-                  <h4 style={styles.sectionTitle}>Items ({selectedReceipt.items?.length || 0})</h4>
-                  <div style={styles.itemsContainer}>
-                    {selectedReceipt.items && selectedReceipt.items.length > 0 ? (
-                      <table style={styles.itemsTable}>
-                        <thead>
-                          <tr>
-                            <th style={styles.itemTh}>Item</th>
-                            <th style={styles.itemTh}>SKU</th>
-                            <th style={styles.itemTh}>Qty</th>
-                            <th style={styles.itemTh}>Price</th>
-                            <th style={styles.itemTh}>Total</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedReceipt.items.map((item, index) => (
-                            <tr key={index}>
-                              <td style={styles.itemTd}>{item.name}</td>
-                              <td style={styles.itemTd}>{item.sku || 'N/A'}</td>
-                              <td style={styles.itemTd}>{item.quantity}</td>
-                              <td style={styles.itemTd}>${item.price?.toFixed(2)}</td>
-                              <td style={styles.itemTd}>
-                                ${((item.price || 0) * (item.quantity || 1)).toFixed(2)}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    ) : (
-                      <div style={styles.noItems}>No item details available</div>
+          {error && <div style={styles.errorBanner}>{error}</div>}
+
+          <div style={styles.controls}>
+            <input
+              type="text"
+              placeholder="Search by receipt #, customer, or cashier..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              style={styles.searchInput}
+            />
+            
+            <select
+              value={filterType}
+              onChange={(e) => setFilterType(e.target.value)}
+              style={styles.filterSelect}
+            >
+              <option value="all">All Receipts</option>
+              <option value="email">Emailed</option>
+              <option value="cash">Cash Payment</option>
+              <option value="card">Card Payment</option>
+            </select>
+
+            <select
+              value={dateFilter}
+              onChange={(e) => setDateFilter(e.target.value)}
+              style={styles.filterSelect}
+            >
+              <option value="today">Today</option>
+              <option value="week">Last 7 Days</option>
+              <option value="month">Last 30 Days</option>
+              <option value="all">All Time</option>
+            </select>
+            
+            <div style={styles.statsCard}>
+              <div style={styles.statsText}>
+                {stats.total} receipts | ${stats.totalValue.toFixed(2)} total
+              </div>
+            </div>
+          </div>
+
+          {renderReceiptContent()}
+
+          {canSearchReceipts && (
+            <TransactionsModal
+              isOpen={showTransactionsModal}
+              onClose={() => setShowTransactionsModal(false)}
+              onTransactionFound={handleTransactionFound}
+              title="Search Receipts & Transactions"
+            />
+          )}
+
+          {selectedReceipt && showReceiptModal && (
+            <div style={styles.modal} onClick={closeReceiptModal}>
+              <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+                <div style={styles.modalHeader}>
+                  <h3 style={styles.modalTitle}>
+                    Receipt {selectedReceipt.receipt_number || selectedReceipt.id.slice(-8)}
+                  </h3>
+                  <button 
+                    style={styles.closeButton} 
+                    onClick={closeReceiptModal}
+                  >
+                    ×
+                  </button>
+                </div>
+                
+                <div style={styles.modalBody}>
+                  <div style={styles.receiptDetails}>
+                    <div style={styles.detailRow}>
+                      <span style={styles.detailLabel}>Receipt Number:</span>
+                      <span style={styles.detailValue}>{selectedReceipt.receipt_number}</span>
+                    </div>
+                    <div style={styles.detailRow}>
+                      <span style={styles.detailLabel}>Date:</span>
+                      <span style={styles.detailValue}>
+                        {dayjs(selectedReceipt.created_at).format('MMMM D, YYYY h:mm A')}
+                      </span>
+                    </div>
+                    <div style={styles.detailRow}>
+                      <span style={styles.detailLabel}>Customer:</span>
+                      <span style={styles.detailValue}>{selectedReceipt.customer_name}</span>
+                    </div>
+                    <div style={styles.detailRow}>
+                      <span style={styles.detailLabel}>Cashier:</span>
+                      <span style={styles.detailValue}>{selectedReceipt.cashier_name}</span>
+                    </div>
+                    <div style={styles.detailRow}>
+                      <span style={styles.detailLabel}>Type:</span>
+                      <span style={styles.detailValue}>{selectedReceipt.receipt_type}</span>
+                    </div>
+                    {selectedReceipt.email_sent_to && (
+                      <div style={styles.detailRow}>
+                        <span style={styles.detailLabel}>Email Sent To:</span>
+                        <span style={styles.detailValue}>{selectedReceipt.email_sent_to}</span>
+                      </div>
                     )}
                   </div>
-                </div>
 
-                <div style={styles.summarySection}>
-                  <h4 style={styles.sectionTitle}>Payment Summary</h4>
-                  
-                  {selectedReceipt.subtotal && (
-                    <div style={styles.summaryRow}>
-                      <span>Subtotal:</span>
-                      <span>${parseFloat(selectedReceipt.subtotal).toFixed(2)}</span>
+                  <div style={styles.itemsSection}>
+                    <h4 style={styles.sectionTitle}>Items ({selectedReceipt.items?.length || 0})</h4>
+                    <div style={styles.itemsContainer}>
+                      {selectedReceipt.items && selectedReceipt.items.length > 0 ? (
+                        <table style={styles.itemsTable}>
+                          <thead>
+                            <tr>
+                              <th style={styles.itemTh}>Item</th>
+                              <th style={styles.itemTh}>SKU</th>
+                              <th style={styles.itemTh}>Qty</th>
+                              <th style={styles.itemTh}>Price</th>
+                              <th style={styles.itemTh}>Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedReceipt.items.map((item, index) => (
+                              <tr key={index}>
+                                <td style={styles.itemTd}>{item.name}</td>
+                                <td style={styles.itemTd}>{item.sku || 'N/A'}</td>
+                                <td style={styles.itemTd}>{item.quantity}</td>
+                                <td style={styles.itemTd}>${item.price?.toFixed(2)}</td>
+                                <td style={styles.itemTd}>
+                                  ${((item.price || 0) * (item.quantity || 1)).toFixed(2)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div style={styles.noItems}>No item details available</div>
+                      )}
                     </div>
-                  )}
-                  
-                  {selectedReceipt.discount_amount && parseFloat(selectedReceipt.discount_amount) > 0 && (
-                    <div style={styles.summaryRow}>
-                      <span>Discount:</span>
-                      <span>-${parseFloat(selectedReceipt.discount_amount).toFixed(2)}</span>
+                  </div>
+
+                  <div style={styles.summarySection}>
+                    <h4 style={styles.sectionTitle}>Payment Summary</h4>
+                    
+                    {selectedReceipt.subtotal && (
+                      <div style={styles.summaryRow}>
+                        <span>Subtotal:</span>
+                        <span>${parseFloat(selectedReceipt.subtotal).toFixed(2)}</span>
+                      </div>
+                    )}
+                    
+                    {selectedReceipt.discount_amount && parseFloat(selectedReceipt.discount_amount) > 0 && (
+                      <div style={styles.summaryRow}>
+                        <span>Discount:</span>
+                        <span>-${parseFloat(selectedReceipt.discount_amount).toFixed(2)}</span>
+                      </div>
+                    )}
+                    
+                    {selectedReceipt.loyalty_redemption && parseFloat(selectedReceipt.loyalty_redemption) > 0 && (
+                      <div style={styles.summaryRow}>
+                        <span>Loyalty Redemption:</span>
+                        <span>-${parseFloat(selectedReceipt.loyalty_redemption).toFixed(2)}</span>
+                      </div>
+                    )}
+                    
+                    {selectedReceipt.tax_amount && (
+                      <div style={styles.summaryRow}>
+                        <span>Total Tax:</span>
+                        <span>${parseFloat(selectedReceipt.tax_amount).toFixed(2)}</span>
+                      </div>
+                    )}
+                    
+                    <div style={styles.totalRow}>
+                      <span>Total:</span>
+                      <span>${parseFloat(selectedReceipt.total).toFixed(2)}</span>
                     </div>
-                  )}
-                  
-                  {selectedReceipt.loyalty_redemption && parseFloat(selectedReceipt.loyalty_redemption) > 0 && (
-                    <div style={styles.summaryRow}>
-                      <span>Loyalty Redemption:</span>
-                      <span>-${parseFloat(selectedReceipt.loyalty_redemption).toFixed(2)}</span>
-                    </div>
-                  )}
-                  
-                  {selectedReceipt.tax_amount && (
-                    <div style={styles.summaryRow}>
-                      <span>Total Tax:</span>
-                      <span>${parseFloat(selectedReceipt.tax_amount).toFixed(2)}</span>
-                    </div>
-                  )}
-                  
-                  <div style={styles.totalRow}>
-                    <span>Total:</span>
-                    <span>${parseFloat(selectedReceipt.total).toFixed(2)}</span>
                   </div>
                 </div>
-              </div>
-              
-              <div style={styles.modalFooter}>
-                <button 
-                  style={styles.reprintButton} 
-                  onClick={() => handleReprintReceipt(selectedReceipt)}
-                >
-                  Reprint Receipt
-                </button>
-                <button 
-                  style={styles.closeModalButton} 
-                  onClick={closeReceiptModal}
-                >
-                  Close
-                </button>
+                
+                <div style={styles.modalFooter}>
+                  {canReprintReceipts && (
+                    <PermissionGate
+                      permissions={['pos.receipts.reprint']}
+                      requireElevated
+                    >
+                      <button 
+                        style={styles.reprintButton} 
+                        onClick={() => handleReprintReceipt(selectedReceipt)}
+                      >
+                        Reprint Receipt
+                      </button>
+                    </PermissionGate>
+                  )}
+                  <button 
+                    style={styles.closeModalButton} 
+                    onClick={closeReceiptModal}
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-      </div>
-    </POSAuthWrapper>
+          )}
+        </div>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

@@ -191,6 +191,20 @@ export const generateReceiptHTML = (saleData, receiptType = RECEIPT_TYPES.STANDA
       });
     }
 
+    // If this is a table share item, show the original table items indented
+    // Use the same styling as item-details (price details)
+    if (item.isTableShare && item.originalTableItems && Array.isArray(item.originalTableItems)) {
+      item.originalTableItems.forEach(tableItem => {
+        const tableItemTotal = (tableItem.price || 0) * (tableItem.quantity || 1);
+        itemHTML += `
+          <div class="item-details" style="margin-left: 20px; padding-left: 10px;">
+            ${tableItem.quantity || 1}x ${tableItem.name}
+            ${formatCurrency(tableItem.price || 0)} × ${tableItem.quantity || 1} = ${formatCurrency(tableItemTotal)}
+          </div>
+        `;
+      });
+    }
+
     itemHTML += '</div>';
     return itemHTML;
   }).join('');

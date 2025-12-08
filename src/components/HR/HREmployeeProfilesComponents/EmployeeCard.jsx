@@ -1,6 +1,6 @@
 // components/HR/HREmployeeProfilesComponents/EmployeeCard.jsx - Individual Employee Card Component
 import React, { useState } from 'react';
-import { Eye, Edit, Clock, Award, DollarSign, Calendar, X, Trash2, User, Shield, GraduationCap } from 'lucide-react';
+import { Eye, Edit, Clock, Award, DollarSign, Calendar, X, Trash2, User, Shield, GraduationCap, FileText } from 'lucide-react';
 import { TavariStyles } from '../../../utils/TavariStyles';
 
 const EmployeeCard = ({
@@ -19,7 +19,9 @@ const EmployeeCard = ({
   onDeleteEmployee,
   onManageBirthday,
   onManageSIN,
-  onToggleStudentPay
+  onToggleStudentPay,
+  onViewContract,
+  onCreateContract
 }) => {
   
   // Calculate age from birth_date
@@ -88,6 +90,17 @@ const EmployeeCard = ({
       borderRadius: TavariStyles.borderRadius?.sm || '4px',
       fontSize: TavariStyles.typography.fontSize.xs,
       fontWeight: TavariStyles.typography.fontWeight.bold
+    },
+    roleBadge: {
+      padding: '4px 8px',
+      borderRadius: TavariStyles.borderRadius?.sm || '4px',
+      fontSize: TavariStyles.typography.fontSize.xs,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      backgroundColor: TavariStyles.colors.primary + '15',
+      border: `1px solid ${TavariStyles.colors.primary}40`,
+      color: TavariStyles.colors.primary,
+      display: 'inline-block',
+      marginTop: TavariStyles.spacing.xs
     },
     employeeBody: {
       marginBottom: TavariStyles.spacing.lg
@@ -313,6 +326,11 @@ const EmployeeCard = ({
       backgroundColor: TavariStyles.colors.errorBg,
       color: TavariStyles.colors.danger,
       border: `1px solid ${TavariStyles.colors.danger}50`
+    },
+    contractButton: {
+      backgroundColor: TavariStyles.colors.primary + '15',
+      color: TavariStyles.colors.primary,
+      border: `1px solid ${TavariStyles.colors.primary}50`
     }
   };
 
@@ -329,6 +347,11 @@ const EmployeeCard = ({
           <div style={styles.employeeNumber}>
             #{employee.employee_number}
           </div>
+          {employee.role && (
+            <div style={styles.roleBadge}>
+              Role: {String(employee.role).toLowerCase()}
+            </div>
+          )}
         </div>
         <div 
           style={{
@@ -502,7 +525,7 @@ const EmployeeCard = ({
               color: TavariStyles.colors.gray600,
               marginTop: TavariStyles.spacing.xs
             }}>
-              Max Paid: {employee.max_paid_hours_per_period || 'Not set'} hours/period
+              Max Paid: {employee.max_paid_hours_per_period != null ? employee.max_paid_hours_per_period : 'Not set'} hours/period
             </div>
           </div>
         )}
@@ -652,6 +675,28 @@ const EmployeeCard = ({
           >
             <Clock size={16} />
             History
+          </button>
+        )}
+        
+        {onViewContract && (
+          <button
+            onClick={() => onViewContract(employee)}
+            style={{...styles.actionButton, ...styles.contractButton}}
+            title="View Contract"
+          >
+            <FileText size={16} />
+            Contract
+          </button>
+        )}
+        
+        {onCreateContract && canManageEmployees() && (
+          <button
+            onClick={() => onCreateContract(employee)}
+            style={{...styles.actionButton, ...styles.contractButton}}
+            title="Create New Contract"
+          >
+            <FileText size={16} />
+            New Contract
           </button>
         )}
         

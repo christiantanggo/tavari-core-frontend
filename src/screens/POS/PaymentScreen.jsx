@@ -1,4 +1,4 @@
-// screens/POS/PaymentScreen.jsx - Fixed with proper imports and props
+// screens/POS/PaymentScreen.jsx - Updated with Permissions and Clean Logging
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
@@ -9,6 +9,12 @@ import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { TavariStyles } from '../../utils/TavariStyles';
+
+// Permission system integration
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
+import { FiLock } from 'react-icons/fi';
 
 // Payment Screen Components
 import PaymentSummary from '../../components/POS/POSPaymentScreenComponents/PaymentSummary';
@@ -31,6 +37,23 @@ const PaymentScreen = () => {
     componentName: 'PaymentScreen'
   });
   
+  // Permission system integration
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canProcessPayments = hasAnyPermission(['pos.sales.process', 'pos.sales.create', 'pos.register.operate']) || hasElevatedPrivileges();
+  const canApplyDiscounts = hasPermission('pos.discounts.apply') || hasElevatedPrivileges();
+  const canUseLoyalty = hasPermission('pos.loyalty.use') || hasElevatedPrivileges();
+  const canProcessRefunds = hasPermission('pos.refunds.process') || hasElevatedPrivileges();
+  const canOverridePayments = hasPermission('pos.override.manager') || isManager() || isOwner();
+  
   // Tax calculation utility using standardized hook
   const taxCalc = useTaxCalculations(auth.selectedBusinessId);
   
@@ -46,6 +69,7 @@ const PaymentScreen = () => {
   const [managerPin, setManagerPin] = useState('');
   const [overrideReason, setOverrideReason] = useState('');
   const [loading, setLoading] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState(null);
   const [tipAmount, setTipAmount] = useState(0);
   const [overrideError, setOverrideError] = useState('');
@@ -61,6 +85,14 @@ const PaymentScreen = () => {
 
   // Sale processor utilities
   const saleProcessor = useSaleProcessor(auth, taxCalc, businessSettings);
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canProcessPayments) {
+      toast.error('You do not have permission to process payments');
+      navigate(location.state?.from === 'register' ? '/dashboard/pos/register' : '/dashboard/pos/tabs');
+    }
+  }, [permissionsLoading, canProcessPayments, navigate, location.state?.from]);
 
   // Helper function to display balance in correct format
   const getBalanceDisplay = (dollarAmount) => {
@@ -78,8 +110,13 @@ const PaymentScreen = () => {
 
   // Set up sale data when authentication is ready
   useEffect(() => {
-    if (auth.isReady && receivedSaleData) {
-      console.log('PaymentScreen: Setting up sale data:', receivedSaleData);
+    if (auth.isReady && receivedSaleData && !permissionsLoading) {
+      if (!canProcessPayments) {
+        toast.error('You do not have permission to process payments');
+        navigate(location.state?.from === 'register' ? '/dashboard/pos/register' : '/dashboard/pos/tabs');
+        return;
+      }
+
       setSaleData(receivedSaleData);
       
       logAction({
@@ -96,22 +133,20 @@ const PaymentScreen = () => {
     } else if (auth.isReady && !receivedSaleData) {
       setError('No sale data provided - please return to tabs and try again');
     }
-  }, [auth.isReady, receivedSaleData]);
+  }, [auth.isReady, receivedSaleData, permissionsLoading, canProcessPayments]);
 
   // Load settings after authentication
   useEffect(() => {
-    if (auth.isReady) {
+    if (auth.isReady && !permissionsLoading) {
       loadLoyaltySettings();
       loadBusinessSettings();
     }
-  }, [auth.isReady]);
+  }, [auth.isReady, permissionsLoading]);
 
   const loadBusinessSettings = async () => {
     if (!auth.selectedBusinessId) return;
 
     try {
-      console.log('PaymentScreen: Loading business settings for:', auth.selectedBusinessId);
-      
       const { data: businessInfo, error: businessError } = await supabase
         .from('businesses')
         .select('name')
@@ -122,10 +157,14 @@ const PaymentScreen = () => {
         .from('pos_settings')
         .select('*')
         .eq('business_id', auth.selectedBusinessId)
-        .single();
+        .maybeSingle();
 
       if (businessError && businessError.code !== 'PGRST116') {
-        console.error('Error loading business info:', businessError);
+        toast.error('Failed to load business settings');
+      }
+
+      if (posError && posError.code && posError.code !== 'PGRST116') {
+        console.warn('⚠️ Failed to load POS settings:', posError.message);
       }
 
       const combinedSettings = {
@@ -136,10 +175,9 @@ const PaymentScreen = () => {
         ...posSettings
       };
 
-      console.log('PaymentScreen: Business settings loaded:', combinedSettings);
       setBusinessSettings(combinedSettings);
     } catch (err) {
-      console.error('Failed to load business settings:', err);
+      toast.error('Failed to load business settings');
       setBusinessSettings({
         timezone: 'America/Toronto',
         name: 'Business',
@@ -153,36 +191,30 @@ const PaymentScreen = () => {
     if (!auth.selectedBusinessId) return;
 
     try {
-      console.log('PaymentScreen: Loading loyalty settings for:', auth.selectedBusinessId);
-      
       const { data: settings, error } = await supabase
         .from('pos_loyalty_settings')
         .select('*')
         .eq('business_id', auth.selectedBusinessId)
-        .single();
+        .maybeSingle();
 
-      if (error && error.code !== 'PGRST116') {
-        console.error('Error loading loyalty settings:', error);
+      if (error && error.code && error.code !== 'PGRST116') {
+        console.warn('⚠️ Failed to load loyalty settings:', error.message);
         return;
       }
 
       if (settings) {
-        console.log('PaymentScreen: Loyalty settings loaded:', settings);
         setLoyaltySettings(settings);
       } else {
-        console.log('PaymentScreen: No loyalty settings found, loyalty disabled');
         setLoyaltySettings(null);
       }
     } catch (err) {
-      console.error('Failed to load loyalty settings:', err);
       setLoyaltySettings(null);
     }
   };
 
   // MAIN LOYALTY CALCULATION
   const calculateLoyaltyCredits = async () => {
-    if (!saleData?.loyaltyCustomer || !loyaltySettings?.is_active) {
-      console.log('PaymentScreen: Skipping loyalty calculation - no customer or loyalty inactive');
+    if (!saleData?.loyaltyCustomer || !loyaltySettings?.is_active || !canUseLoyalty) {
       setAvailableLoyaltyCredit(0);
       setAutoLoyaltyApplied(0);
       setLoyaltyPointsToEarn(0);
@@ -191,30 +223,26 @@ const PaymentScreen = () => {
     }
 
     try {
-      console.log('🎯 Calculating loyalty for customer:', saleData.loyaltyCustomer);
-      console.log('🎯 Using loyalty settings:', loyaltySettings);
-      
       // Get today's date in business timezone
       const today = saleProcessor.getTodayInBusinessTimezone();
-      console.log('🎯 Today in business timezone:', today);
       
       // Get today's usage for this customer
-      const { data: todayUsage } = await supabase
+      const { data: todayUsage, error: usageError } = await supabase
         .from('pos_loyalty_daily_usage')
         .select('amount_used')
         .eq('loyalty_account_id', saleData.loyaltyCustomer.id)
         .eq('usage_date', today)
-        .single();
+        .maybeSingle();
+
+      if (usageError && usageError.code && usageError.code !== 'PGRST116') {
+        console.warn('⚠️ Failed to load daily loyalty usage:', usageError.message);
+      }
 
       const usedTodayDollars = todayUsage?.amount_used || 0;
-      console.log('🎯 Used today ($):', usedTodayDollars);
       
       // Calculate daily limit in dollars
       const dailyLimitPoints = loyaltySettings.max_redemption_per_day || 5000;
       const dailyLimitDollars = dailyLimitPoints / loyaltySettings.redemption_rate;
-      
-      console.log('🎯 Daily limit (points):', dailyLimitPoints);
-      console.log('🎯 Daily limit ($):', dailyLimitDollars);
       
       const remainingDailyLimitDollars = Math.max(0, dailyLimitDollars - usedTodayDollars);
       setDailyUsageRemaining(remainingDailyLimitDollars);
@@ -222,15 +250,9 @@ const PaymentScreen = () => {
       // Customer balance is in dollars - this is the source of truth
       const customerBalanceDollars = Math.abs(saleData.loyaltyCustomer.balance || 0);
       
-      console.log('🎯 Customer balance ($):', customerBalanceDollars);
-      console.log('🎯 Remaining daily limit ($):', remainingDailyLimitDollars);
-      
       // Available credit is minimum of: customer balance, remaining daily limit, and sale amount
       const saleSubtotal = saleData?.subtotal || 0;
       const maxUsableDollars = Math.min(customerBalanceDollars, remainingDailyLimitDollars, saleSubtotal);
-      
-      console.log('🎯 Sale subtotal:', saleSubtotal);
-      console.log('🎯 Max usable credit ($):', maxUsableDollars);
       
       setAvailableLoyaltyCredit(Math.max(0, maxUsableDollars));
 
@@ -241,9 +263,6 @@ const PaymentScreen = () => {
         const minRedemptionPoints = loyaltySettings.min_redemption || 5000;
         const minRedemptionDollars = minRedemptionPoints / loyaltySettings.redemption_rate;
         
-        console.log('🎯 Min redemption (points):', minRedemptionPoints);
-        console.log('🎯 Min redemption ($):', minRedemptionDollars);
-        
         if (maxUsableDollars >= minRedemptionDollars) {
           if (loyaltySettings.allow_partial_redemption) {
             // Use maximum available up to daily limit and sale amount
@@ -252,13 +271,9 @@ const PaymentScreen = () => {
             // Use minimum redemption amount if customer has enough
             autoApplyAmount = Math.min(minRedemptionDollars, maxUsableDollars, saleSubtotal);
           }
-          console.log('🎯 Will auto-apply ($):', autoApplyAmount);
-        } else {
-          console.log('🎯 Customer balance below minimum redemption, no auto-apply');
         }
       }
       
-      console.log('🎯 Final auto-apply amount ($):', autoApplyAmount);
       setAutoLoyaltyApplied(autoApplyAmount);
 
       // Calculate points to earn on this purchase
@@ -267,16 +282,10 @@ const PaymentScreen = () => {
       const dollarsToEarn = taxableAmountForEarning * earnRatePercent;
       const pointsToEarn = Math.round(dollarsToEarn * loyaltySettings.redemption_rate);
       
-      console.log('🎯 Earn rate %:', loyaltySettings.earn_rate_percentage);
-      console.log('🎯 Taxable amount for earning:', taxableAmountForEarning);
-      console.log('🎯 Dollars to earn:', dollarsToEarn);
-      console.log('🎯 Points to earn:', pointsToEarn);
-      
       setLoyaltyCreditsToEarn(dollarsToEarn);
       setLoyaltyPointsToEarn(pointsToEarn);
 
     } catch (err) {
-      console.error('Error calculating loyalty credits:', err);
       setAvailableLoyaltyCredit(0);
       setAutoLoyaltyApplied(0);
       setLoyaltyPointsToEarn(0);
@@ -286,10 +295,10 @@ const PaymentScreen = () => {
 
   // Calculate loyalty credits after saleData, settings, and business settings are loaded
   useEffect(() => {
-    if (saleData && loyaltySettings && businessSettings && auth.selectedBusinessId) {
+    if (saleData && loyaltySettings && businessSettings && auth.selectedBusinessId && canUseLoyalty) {
       calculateLoyaltyCredits();
     }
-  }, [saleData, loyaltySettings, businessSettings, auth.selectedBusinessId]);
+  }, [saleData, loyaltySettings, businessSettings, auth.selectedBusinessId, canUseLoyalty]);
 
   // ENHANCED TAX CALCULATIONS using the standardized utility
   const saleSubtotal = saleData?.subtotal || 0;
@@ -336,10 +345,41 @@ const PaymentScreen = () => {
   const remainingBalance = displayTotal - totalPaid;
   const changeOwed = Math.max(0, totalPaid - displayTotal);
 
+  // Update payment status on customer display
+  const updatePaymentStatus = (status, additionalData = {}) => {
+    const currentPaymentData = localStorage.getItem('tavari_customer_display_payment');
+    if (currentPaymentData) {
+      try {
+        const paymentData = JSON.parse(currentPaymentData);
+        const updatedPaymentData = {
+          ...paymentData,
+          status,
+          ...additionalData,
+          timestamp: Date.now()
+        };
+        localStorage.setItem('tavari_customer_display_payment', JSON.stringify(updatedPaymentData));
+        console.log('💳 PaymentScreen: Payment status updated:', status, updatedPaymentData);
+      } catch (error) {
+        console.error('❌ PaymentScreen: Error updating payment status:', error);
+      }
+    }
+  };
+
   // Payment handling functions
   const handleAddPayment = async (amount, method, customName) => {
+    // Permission check
+    if (!canProcessPayments) {
+      toast.error('You do not have permission to process payments');
+      return;
+    }
+
     // Special handling for loyalty credit payments
     if (method === 'loyalty_credit') {
+      if (!canUseLoyalty) {
+        toast.error('You do not have permission to use loyalty credits');
+        return;
+      }
+
       if (amount > availableLoyaltyCredit) {
         setError(`Maximum loyalty credit available: ${availableLoyaltyCredit.toFixed(2)}`);
         return;
@@ -356,6 +396,10 @@ const PaymentScreen = () => {
 
     if (amount > remainingBalance && method !== 'cash') {
       if (!showManagerOverride) {
+        if (!canOverridePayments) {
+          setError('Manager approval required for overpayment, but you do not have permission');
+          return;
+        }
         setShowManagerOverride(true);
         setOverrideReason('Overpayment detected - Manager approval required for non-cash overpayment');
         return;
@@ -368,6 +412,11 @@ const PaymentScreen = () => {
     }
 
     if (showManagerOverride) {
+      if (!canOverridePayments) {
+        setOverrideError('You do not have permission to override payments');
+        return;
+      }
+
       const isValidPin = await auth.validateManagerPin(managerPin);
       if (!isValidPin) {
         setOverrideError('Invalid manager PIN. Please try again.');
@@ -397,6 +446,19 @@ const PaymentScreen = () => {
 
     setPayments([...payments, newPayment]);
     
+    // Send payment info to customer display
+    const paymentData = {
+      method: method,
+      amount: amount,
+      change: method === 'cash' ? Math.max(0, amount - remainingBalance) : 0,
+      status: 'processing',
+      timestamp: Date.now(),
+      customMethodName: method === 'custom' ? customName : null
+    };
+    
+    localStorage.setItem('tavari_customer_display_payment', JSON.stringify(paymentData));
+    console.log('💳 PaymentScreen: Payment data sent to customer display:', paymentData);
+    
     const newRemainingBalance = remainingBalance - amount;
     setCurrentPayment({ 
       method: 'cash', 
@@ -409,15 +471,58 @@ const PaymentScreen = () => {
     setOverrideReason('');
     setOverrideError('');
     setError(null);
+
+    // Update payment status based on method
+    if (method === 'cash') {
+      // Cash payments are immediate
+      updatePaymentStatus('success');
+    } else if (method === 'card') {
+      // Card payments need terminal processing
+      updatePaymentStatus('processing');
+    } else if (method === 'helcim') {
+      // Helcim QR payments need processing
+      updatePaymentStatus('processing');
+    } else {
+      // Other methods (gift card, loyalty, custom) are immediate
+      updatePaymentStatus('success');
+    }
+  };
+
+  // Handle card payment success/error
+  const handleCardPaymentResult = (success, errorMessage = null) => {
+    if (success) {
+      updatePaymentStatus('success');
+    } else {
+      updatePaymentStatus('error', { errorMessage });
+    }
+  };
+
+  // Clear payment display when sale is finalized
+  const clearPaymentDisplay = () => {
+    localStorage.removeItem('tavari_customer_display_payment');
+    console.log('💳 PaymentScreen: Payment display cleared');
   };
 
   // Complete sale finalization with enhanced loyalty processing
   const finalizeSale = async () => {
+    // Permission check
+    if (!canProcessPayments) {
+      toast.error('You do not have permission to process payments');
+      return;
+    }
+
+    // CRITICAL: Prevent double-clicks and multiple submissions
+    if (isProcessing) {
+      return;
+    }
+
     if (remainingBalance > 0.01) {
       setError('Payment incomplete. Please add more payments to cover the total.');
       return;
     }
 
+    // Set processing flag IMMEDIATELY to prevent any race conditions
+    setIsProcessing(true);
     setLoading(true);
     setError(null);
 
@@ -426,13 +531,9 @@ const PaymentScreen = () => {
         throw new Error('User not authenticated');
       }
 
-      console.log('🎯 Starting sale finalization with loyalty...');
-
-      // Generate receipt number and QR code
+      // Generate receipt number and QR code with built-in retry logic
       const receiptNumber = await saleProcessor.generateReceiptNumber();
       const qrCode = saleProcessor.generateQRCode(receiptNumber);
-      
-      console.log('Generated receipt number:', receiptNumber);
 
       // Calculate total loyalty redeemed from all loyalty payment methods
       const totalLoyaltyRedeemed = payments
@@ -462,8 +563,6 @@ const PaymentScreen = () => {
         created_at: new Date().toISOString()
       };
 
-      console.log('🎯 Creating sale record:', saleRecord);
-
       const { data: sale, error: saleError } = await supabase
         .from('pos_sales')
         .insert(saleRecord)
@@ -471,11 +570,13 @@ const PaymentScreen = () => {
         .single();
 
       if (saleError) {
-        console.error('Sale creation error:', saleError);
+        // Check if it's a duplicate key error
+        if (saleError.code === '23505' && saleError.message.includes('idx_pos_sales_business_sale_number')) {
+          throw new Error('Duplicate sale detected. This may be a double-click issue. Please refresh and try again.');
+        }
+        
         throw saleError;
       }
-
-      console.log('🎯 Sale created successfully:', sale);
 
       // Create receipt record
       const receipt = await saleProcessor.createReceiptRecord(
@@ -503,7 +604,7 @@ const PaymentScreen = () => {
           .insert(saleItems);
 
         if (itemsError) {
-          console.error('Error saving sale items:', itemsError);
+          toast.error('Failed to save sale items');
         }
       }
 
@@ -524,19 +625,185 @@ const PaymentScreen = () => {
           .insert(paymentRecords);
 
         if (paymentsError) {
-          console.error('Error saving payments:', paymentsError);
+          toast.error('Failed to save payment records');
+        }
+      }
+
+      // DINING MODE: Mark tab items as paid
+      if (saleData.dining_mode && saleData.activeTab && saleData.items) {
+        try {
+          // Calculate payment amount per item (proportional to item price)
+          const totalItemValue = saleData.items.reduce((sum, item) => {
+            return sum + ((item.price || 0) * (item.quantity || 1));
+          }, 0);
+          
+          const totalPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+          
+          // Collect all updates first, then apply them
+          const itemUpdates = [];
+          
+          // Prepare all item updates
+          for (const item of saleData.items) {
+            if (item.tab_item_id) {
+              // Direct seat item - mark as fully paid
+              const itemValue = (item.price || 0) * (item.quantity || 1);
+              const paidAmount = totalItemValue > 0 ? (itemValue / totalItemValue) * totalPaid : itemValue;
+              
+              // Get current paid_amount and add to it (for partial payments)
+              const { data: existingItem, error: fetchError } = await supabase
+                .from('pos_tab_items')
+                .select('paid_amount')
+                .eq('id', item.tab_item_id)
+                .single();
+              
+              if (fetchError) {
+                console.error('Error fetching existing tab item:', fetchError);
+                continue;
+              }
+              
+              const currentPaid = parseFloat(existingItem?.paid_amount || 0);
+              const newPaidAmount = currentPaid + paidAmount;
+              
+              itemUpdates.push({
+                id: item.tab_item_id,
+                paidAmount: newPaidAmount
+              });
+            } else if (item.isTableShare && item.originalTableItems) {
+              // Table share item - mark original table items as partially paid
+              const tableShareValue = item.price || 0;
+              const shareOfTotal = totalItemValue > 0 ? tableShareValue / totalItemValue : 0;
+              const paidForTableShare = totalPaid * shareOfTotal;
+              
+              // Split payment proportionally among original table items
+              const totalOriginalValue = item.originalTableItems.reduce((sum, tItem) => {
+                return sum + ((tItem.price || 0) * (tItem.quantity || 1));
+              }, 0);
+              
+              for (const tableItem of item.originalTableItems) {
+                if (tableItem.tab_item_id) {
+                  const tableItemValue = (tableItem.price || 0) * (tableItem.quantity || 1);
+                  const tableItemPaidAmount = totalOriginalValue > 0 
+                    ? (tableItemValue / totalOriginalValue) * paidForTableShare 
+                    : 0;
+                  
+                  // Get current paid_amount
+                  const { data: existingItem, error: fetchError } = await supabase
+                    .from('pos_tab_items')
+                    .select('paid_amount')
+                    .eq('id', tableItem.tab_item_id)
+                    .single();
+                  
+                  if (fetchError) {
+                    console.error('Error fetching existing table item:', fetchError);
+                    continue;
+                  }
+                  
+                  const currentPaid = parseFloat(existingItem?.paid_amount || 0);
+                  const newPaidAmount = currentPaid + tableItemPaidAmount;
+                  
+                  itemUpdates.push({
+                    id: tableItem.tab_item_id,
+                    paidAmount: newPaidAmount
+                  });
+                }
+              }
+            }
+          }
+          
+          // Apply all item updates in parallel (triggers will fire but may fail - we'll fix status after)
+          await Promise.all(itemUpdates.map(async (update) => {
+            const { error: updateError } = await supabase
+              .from('pos_tab_items')
+              .update({
+                paid_amount: update.paidAmount.toFixed(2),
+                paid_by: auth.authUser.id
+              })
+              .eq('id', update.id);
+            
+            if (updateError) {
+              console.error('Error updating tab item paid_amount:', updateError);
+            }
+          }));
+          
+          // CRITICAL: After ALL items are updated, manually fix the tab status
+          // This overrides any invalid status set by the trigger
+          if (saleData.activeTab?.id) {
+            // Wait a moment for triggers to complete
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            // Calculate total paid from all tab items
+            const { data: allTabItems, error: itemsError } = await supabase
+              .from('pos_tab_items')
+              .select('paid_amount')
+              .eq('tab_id', saleData.activeTab.id);
+            
+            if (!itemsError && allTabItems) {
+              const totalPaidFromItems = allTabItems.reduce((sum, item) => {
+                return sum + parseFloat(item.paid_amount || 0);
+              }, 0);
+              
+              // Get current tab data to calculate status
+              const { data: currentTab, error: tabError } = await supabase
+                .from('pos_tabs')
+                .select('subtotal, tax_amount, total_amount')
+                .eq('id', saleData.activeTab.id)
+                .single();
+              
+              if (!tabError && currentTab) {
+                const balanceRemaining = parseFloat(currentTab.total_amount || 0) - totalPaidFromItems;
+                let newStatus = 'open';
+                if (balanceRemaining <= 0.01) {
+                  newStatus = 'closed';
+                } else if (totalPaidFromItems > 0) {
+                  newStatus = 'partial';
+                }
+                
+                // Update tab with correct amount_paid and status (this will override trigger's status)
+                const { error: tabUpdateError } = await supabase
+                  .from('pos_tabs')
+                  .update({
+                    amount_paid: totalPaidFromItems.toFixed(2),
+                    balance_remaining: balanceRemaining.toFixed(2),
+                    status: newStatus
+                  })
+                  .eq('id', saleData.activeTab.id);
+                
+                if (tabUpdateError) {
+                  console.error('Error updating tab totals:', tabUpdateError);
+                }
+              }
+            }
+            
+            // Also create a tab payment record (if RLS allows)
+            const totalPaidAmount = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+            const { error: paymentError } = await supabase
+              .from('pos_tab_payments')
+              .insert({
+                tab_id: saleData.activeTab.id,
+                payment_method: payments[0]?.method || 'cash',
+                amount: totalPaidAmount.toFixed(2),
+                processed_by: auth.authUser.id,
+                processed_at: new Date().toISOString(),
+                notes: `Payment for seats: ${saleData.selected_seats?.join(', ') || 'N/A'}`
+              });
+            
+            if (paymentError) {
+              console.warn('Could not create tab payment record (RLS may be blocking):', paymentError);
+            }
+          }
+        } catch (diningError) {
+          console.error('Error updating dining tab items:', diningError);
+          // Don't fail the sale if this errors, but log it
         }
       }
 
       // ENHANCED LOYALTY PROCESSING
-      if (saleData.loyaltyCustomer && loyaltySettings?.is_active) {
+      if (saleData.loyaltyCustomer && loyaltySettings?.is_active && canUseLoyalty) {
         const today = saleProcessor.getTodayInBusinessTimezone();
         const customerBalanceBefore = Math.abs(saleData.loyaltyCustomer.balance || 0);
         
         // Process loyalty redemption if any
         if (totalLoyaltyRedeemed > 0) {
-          console.log('🎯 Processing loyalty redemption:', totalLoyaltyRedeemed);
-          
           // Record redemption transaction
           await supabase
             .from('pos_loyalty_transactions')
@@ -574,8 +841,6 @@ const PaymentScreen = () => {
 
         // Award new loyalty points
         if (loyaltyPointsToEarn > 0) {
-          console.log('🎯 Awarding loyalty points:', loyaltyPointsToEarn);
-          
           const tomorrow = new Date();
           tomorrow.setDate(tomorrow.getDate() + 1);
           
@@ -613,14 +878,12 @@ const PaymentScreen = () => {
             .from('pos_loyalty_accounts')
             .update({ 
               balance: newBalance,
-              points: newPoints, // Now calculated from balance to stay in sync
+              points: newPoints,
               total_earned: (saleData.loyaltyCustomer.total_earned || 0) + loyaltyCreditsToEarn,
               total_spent: (saleData.loyaltyCustomer.total_spent || 0) + totalLoyaltyRedeemed,
               last_activity: new Date().toISOString()
             })
             .eq('id', saleData.loyaltyCustomer.id);
-
-          console.log('🎯 Updated customer balance:', newBalance, 'points:', newPoints);
         }
       }
 
@@ -647,7 +910,7 @@ const PaymentScreen = () => {
       
       sessionStorage.setItem('lastSaleData', JSON.stringify(enhancedSaleData));
 
-      console.log('🎯 Sale and receipt finalized successfully. Receipt number:', receiptNumber);
+      toast.success('Sale completed successfully');
 
       // Log successful completion
       await logAction({
@@ -667,17 +930,52 @@ const PaymentScreen = () => {
         }
       });
 
-      // Navigate to receipt screen
-      navigate('/dashboard/pos/receipt', {
-        state: {
-          saleData: enhancedSaleData,
-          from: location.state?.from || 'payment'
-        }
-      });
+      // Clear payment display and cart data
+      clearPaymentDisplay();
+      
+      // Clear cart data from localStorage to reset customer display
+      localStorage.removeItem('tavari_customer_display_cart');
+      console.log('🧹 PaymentScreen: Cart data cleared from localStorage');
+      
+      // Send sale completion signal to customer display
+      const saleCompletionData = {
+        completed: true,
+        saleId: sale.id,
+        receiptNumber: receiptNumber,
+        timestamp: Date.now()
+      };
+      localStorage.setItem('tavari_customer_display_sale_complete', JSON.stringify(saleCompletionData));
+      console.log('✅ PaymentScreen: Sale completion signal sent to customer display:', saleCompletionData);
+      
+      // For dining mode, navigate back to dining order screen after showing receipt
+      if (saleData.dining_mode && saleData.activeTab) {
+        // Store receipt data for viewing, but navigate back to dining order
+        sessionStorage.setItem('lastSaleData', JSON.stringify(enhancedSaleData));
+        
+        // Navigate back to dining order screen with the same tab
+        navigate('/dashboard/dining/table-order', {
+          state: {
+            activeTab: saleData.activeTab,
+            tableId: saleData.table_info?.tableId,
+            tableName: saleData.table_info?.tableName,
+            guestCount: saleData.guest_count,
+            showReceipt: true,
+            receiptData: enhancedSaleData
+          }
+        });
+      } else {
+        // Regular register - go to receipt screen
+        navigate('/dashboard/pos/receipt', {
+          state: {
+            saleData: enhancedSaleData,
+            from: location.state?.from || 'payment'
+          }
+        });
+      }
 
     } catch (err) {
-      console.error('Sale finalization error:', err);
       setError(`Failed to complete sale: ${err.message}`);
+      toast.error(`Failed to complete sale: ${err.message}`);
       
       await logAction({
         action: 'sale_completion_error',
@@ -685,19 +983,72 @@ const PaymentScreen = () => {
         metadata: {
           business_id: auth.selectedBusinessId,
           error: err.message,
+          error_code: err.code,
           user_role: auth.userRole
         }
       });
     } finally {
+      // Always reset flags in finally block
       setLoading(false);
+      setIsProcessing(false);
     }
   };
+
+  // Show loading while permissions are being checked
+  if (permissionsLoading) {
+    return (
+      <POSAuthWrapper
+        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        componentName="PaymentScreen"
+      >
+        <div style={styles.container}>
+          <div style={styles.loading}>
+            <div style={TavariStyles.components.loading.spinner}></div>
+            <div>Loading permissions...</div>
+            <style>{TavariStyles.keyframes.spin}</style>
+          </div>
+        </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canProcessPayments) {
+    return (
+      <POSAuthWrapper
+        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        componentName="PaymentScreen"
+      >
+        <div style={TavariStyles.utils.merge(styles.container, TavariStyles.layout.flexCenter)}>
+          <div style={styles.errorCard}>
+            <FiLock size={64} style={{ color: TavariStyles.colors.danger, marginBottom: TavariStyles.spacing.lg }} />
+            <h3 style={styles.errorTitle}>Access Denied</h3>
+            <p style={styles.errorMessage}>
+              You do not have permission to process payments.
+            </p>
+            <p style={styles.errorMessage}>
+              Contact your administrator to request access.
+            </p>
+            <button 
+              style={TavariStyles.utils.merge(
+                TavariStyles.components.button.base,
+                TavariStyles.components.button.variants.primary
+              )}
+              onClick={() => navigate('/dashboard/pos/tabs')}
+            >
+              Back to Tabs
+            </button>
+          </div>
+        </div>
+      </POSAuthWrapper>
+    );
+  }
 
   // Error handling for missing sale data
   if (!receivedSaleData) {
     return (
       <POSAuthWrapper
-        requiredRoles={['employee', 'manager', 'owner']}
+        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
         componentName="PaymentScreen"
       >
         <div style={TavariStyles.utils.merge(styles.container, TavariStyles.layout.flexCenter)}>
@@ -723,7 +1074,7 @@ const PaymentScreen = () => {
   if (!saleData || !businessSettings) {
     return (
       <POSAuthWrapper
-        requiredRoles={['employee', 'manager', 'owner']}
+        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
         componentName="PaymentScreen"
       >
         <div style={styles.container}>
@@ -747,7 +1098,7 @@ const PaymentScreen = () => {
 
   return (
     <POSAuthWrapper
-      requiredRoles={['employee', 'manager', 'owner']}
+      requiredRoles={['employee', 'cashier', 'manager', 'owner']}
       componentName="PaymentScreen"
     >
       <div style={styles.container}>
@@ -863,30 +1214,32 @@ const PaymentScreen = () => {
               TavariStyles.components.button.base,
               TavariStyles.components.button.variants.secondary,
               TavariStyles.components.button.sizes.lg,
-              loading ? TavariStyles.utils.disabled({}, {}) : {}
+              loading || isProcessing ? TavariStyles.utils.disabled({}, {}) : {}
             )}
-            onClick={() => navigate('/dashboard/pos/tabs')}
-            disabled={loading}
+            onClick={() => navigate(location.state?.from === 'register' ? '/dashboard/pos/register' : '/dashboard/pos/tabs')}
+            disabled={loading || isProcessing}
           >
-            Back to Tabs
+            {location.state?.from === 'register' ? 'Back to Register' : 'Back to Tabs'}
           </button>
           
           <button
             style={TavariStyles.utils.merge(
               TavariStyles.components.button.base,
-              remainingBalance > 0.01 || loading ? 
+              remainingBalance > 0.01 || loading || isProcessing ? 
                 TavariStyles.components.button.variants.secondary : 
                 TavariStyles.components.button.variants.success,
               TavariStyles.components.button.sizes.lg,
               { flex: 2 },
-              remainingBalance > 0.01 || loading ? TavariStyles.utils.disabled({}, {}) : {}
+              remainingBalance > 0.01 || loading || isProcessing ? 
+                TavariStyles.utils.disabled({}, {}) : {}
             )}
             onClick={finalizeSale}
-            disabled={remainingBalance > 0.01 || loading}
+            disabled={remainingBalance > 0.01 || loading || isProcessing}
           >
-            {loading ? 'Processing Sale...' : 
-             remainingBalance > 0.01 ? `${remainingBalance.toFixed(2)} Remaining` : 
-             'Complete Sale'}
+            {isProcessing ? '⏳ Processing Sale...' : 
+             loading ? '💾 Saving...' : 
+             remainingBalance > 0.01 ? `$${remainingBalance.toFixed(2)} Remaining` : 
+             '✅ Complete Sale'}
           </button>
         </div>
       </div>

@@ -1,4 +1,4 @@
-// components/HR/HRPayrollComponents/PayStatementsTab.jsx - FIXED IMPORTS
+// components/HR/HRPayrollComponents/PayStatementsTab.jsx - COMPLETE FIX
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../../supabaseClient';
 import { SecurityWrapper } from '../../../Security';
@@ -9,9 +9,10 @@ import { useYTDCalculations } from '../../../hooks/useYTDCalculations';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../../utils/TavariStyles';
-
-// FIXED: Import YTD Components from the correct index file
 import { YTDSummaryCard, YTDDetailModal } from '../YTDComponents';
+import PayStatementEmailModal from './PayStatementEmailModal';
+import toast from 'react-hot-toast';
+import html2pdf from 'html2pdf.js';
 
 const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
   const [payrollRuns, setPayrollRuns] = useState([]);
@@ -21,13 +22,12 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
   const [generating, setGenerating] = useState(false);
   const [bulkDownloading, setBulkDownloading] = useState(false);
   const [selectedEmployees, setSelectedEmployees] = useState(new Set());
-  const [validationErrors, setValidationErrors] = useState({});
-
-  // YTD Modal state
   const [showYTDModal, setShowYTDModal] = useState(false);
   const [selectedYTDEmployee, setSelectedYTDEmployee] = useState(null);
+  const [showEmailModal, setShowEmailModal] = useState(false);
+  const [emailConfig, setEmailConfig] = useState(null);
+  const [sendingEmail, setSendingEmail] = useState(false);
 
-  // Security context for sensitive payroll data
   const {
     validateInput,
     checkRateLimit,
@@ -41,7 +41,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     securityLevel: 'critical'
   });
 
-  // Authentication context
   const {
     selectedBusinessId: authBusinessId,
     authUser,
@@ -53,13 +52,9 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     componentName: 'PayStatementsTab'
   });
 
-  // Tax calculations for formatting
   const { formatTaxAmount } = useTaxCalculations(selectedBusinessId || authBusinessId);
-
-  // YTD calculations hook for fast lookups
   const ytd = useYTDCalculations(selectedBusinessId || authBusinessId);
 
-  // Use the authenticated business ID if not provided as prop
   const effectiveBusinessId = selectedBusinessId || authBusinessId;
   const effectiveBusinessData = businessData || authBusinessData;
 
@@ -118,7 +113,7 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
         .from('hrpayroll_entries')
         .select(`
           *,
-          users (
+          users!hrpayroll_entries_user_id_fkey (
             first_name,
             last_name,
             email,
@@ -129,6 +124,7 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
         .eq('payroll_run_id', runId);
 
       if (error) throw error;
+
 
       setPayrollEntries(data || []);
       setSelectedEmployees(new Set());
@@ -142,12 +138,10 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     }
   };
 
-  // FAST YTD calculation using stored YTD data instead of querying all historical entries
   const calculateYTDTotals = async (userId, payDate) => {
     try {
       console.log(`🚀 Using FAST YTD calculation for employee ${userId} up to ${payDate}`);
       
-      // Use the fast YTD calculation instead of querying all historical data
       const ytdData = await ytd.calculateEmployeeYTD(userId, payDate);
       
       if (!ytdData) {
@@ -157,7 +151,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
 
       console.log(`✅ Fast YTD calculation successful for employee ${userId}`);
       
-      // Convert YTD data structure to match existing pay statement format
       return {
         regular_hours: ytdData.regular_hours || 0,
         overtime_hours: ytdData.overtime_hours || 0,
@@ -179,8 +172,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
         cpp_deduction: ytdData.cpp_deduction || 0,
         additional_tax: ytdData.additional_tax || 0,
         net_pay: ytdData.net_pay || 0,
-        
-        // Add metadata for debugging/verification
         _ytd_source: 'fast_ytd_lookup',
         _ytd_last_updated: ytdData.last_updated,
         _ytd_calculation_date: ytdData.calculation_date,
@@ -190,7 +181,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     } catch (error) {
       console.error('❌ Error in fast YTD calculation:', error);
       
-      // Fallback to empty totals if YTD calculation fails
       await logSecurityEvent('ytd_calculation_fallback', {
         business_id: effectiveBusinessId,
         user_id: userId,
@@ -202,7 +192,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     }
   };
 
-  // Helper function to return empty YTD totals structure
   const getEmptyYTDTotals = () => ({
     regular_hours: 0, overtime_hours: 0, lieu_hours: 0, stat_hours: 0, holiday_hours: 0,
     regular_earnings: 0, overtime_earnings: 0, lieu_earnings: 0, stat_earnings: 0,
@@ -212,38 +201,440 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     _ytd_source: 'empty_fallback'
   });
 
-  // Handler for viewing YTD details
   const handleViewYTDDetails = (employee, ytdData) => {
     setSelectedYTDEmployee({ employee, ytdData });
     setShowYTDModal(true);
   };
 
-  // Render YTD summary component for employee (optional enhancement)
-  const renderYTDSummary = (entry) => {
-    const employee = { 
-      id: entry.user_id, 
-      first_name: entry.users.first_name, 
-      last_name: entry.users.last_name 
-    };
-    
-    const ytdData = ytd.ytdData[entry.user_id];
-    
-    if (!ytdData) {
-      return null; // Don't show YTD summary if no data available
+  // SHARED: Generate pay statement HTML - used by both PDF and email
+  // This ensures EXACT same format for both
+  const generatePayStatementHTMLContent = (entry, ytdTotals, ytdCalculationTime) => {
+    // Parse premiums and wage breakdown
+    let premiums = {};
+    let currentPremiumPay = 0;
+    try {
+      premiums = typeof entry.premiums === 'string' ? 
+        JSON.parse(entry.premiums) : (entry.premiums || {});
+      
+      Object.values(premiums).forEach(premium => {
+        if (premium.total_pay) {
+          currentPremiumPay += parseFloat(premium.total_pay);
+        }
+      });
+    } catch (e) {
+      console.warn('Error parsing premiums:', e);
+      premiums = {};
     }
+
+    // Parse wage breakdown if exists
+    let wageBreakdown = [];
+    let hasWageChange = false;
+    try {
+      if (entry.wage_breakdown) {
+        wageBreakdown = typeof entry.wage_breakdown === 'string' ? 
+          JSON.parse(entry.wage_breakdown) : entry.wage_breakdown;
+        hasWageChange = Array.isArray(wageBreakdown) && wageBreakdown.length > 1;
+      }
+    } catch (e) {
+      console.warn('Error parsing wage breakdown:', e);
+    }
+
+    // Calculate current period earnings
+    const currentGrossPay = parseFloat(entry.gross_pay || 0);
+    const currentVacationPay = parseFloat(entry.vacation_pay || 0);
+    const totalGrossWithVacation = currentGrossPay + currentVacationPay;
     
-    return (
-      <YTDSummaryCard
-        employee={employee}
-        ytdData={ytdData}
-        showDetailed={false}
-        onViewDetails={handleViewYTDDetails}
-        formatAmount={formatTaxAmount}
-      />
-    );
+    const ytdGrossPay = ytdTotals.gross_pay + ytdTotals.vacation_pay;
+
+    // Calculate actual current period deductions
+    const currentFederalTax = parseFloat(entry.federal_tax || 0);
+    const currentProvincialTax = parseFloat(entry.provincial_tax || 0);
+    const currentOntarioHealthPremium = parseFloat(entry.ontario_health_premium || 0);
+    const currentEIDeduction = parseFloat(entry.ei_deduction || 0);
+    const currentCPPDeduction = parseFloat(entry.cpp_deduction || 0);
+    const currentAdditionalTax = parseFloat(entry.additional_tax || 0);
+    
+    const totalCurrentDeductions = currentFederalTax + currentProvincialTax + currentOntarioHealthPremium + 
+                                   currentEIDeduction + currentCPPDeduction + currentAdditionalTax;
+
+    const totalYTDDeductions = 
+      ytdTotals.federal_tax +
+      ytdTotals.provincial_tax +
+      ytdTotals.ei_deduction +
+      ytdTotals.cpp_deduction +
+      ytdTotals.additional_tax;
+
+    const regularHours = parseFloat(entry.regular_hours || 0);
+    const overtimeHours = parseFloat(entry.overtime_hours || 0);
+    const lieuHours = parseFloat(entry.lieu_hours || 0);
+    const statHolidayHours = parseFloat(entry.stat_holiday_hours || 0);
+    const totalCurrentHours = regularHours + overtimeHours + lieuHours + statHolidayHours;
+
+    // Calculate wage-based earnings
+    const baseWage = parseFloat(entry.users.wage || 0);
+    
+    let regularEarnings = 0;
+    let overtimeEarnings = 0;
+    let lieuEarnings = 0;
+    
+    if (hasWageChange && wageBreakdown.length > 0) {
+      wageBreakdown.forEach(period => {
+        if (!period.is_lieu_payment) {
+          regularEarnings += parseFloat(period.regular_pay || 0);
+          overtimeEarnings += parseFloat(period.overtime_pay || 0);
+        } else {
+          lieuEarnings += parseFloat(period.lieu_pay || 0);
+        }
+      });
+    } else {
+      regularEarnings = regularHours * baseWage;
+      overtimeEarnings = overtimeHours * baseWage * 1.5;
+      lieuEarnings = lieuHours * baseWage;
+    }
+
+    const statEarnings = statHolidayHours * baseWage;
+    const holidayEarnings = parseFloat(entry.holiday_pay || 0);
+
+    // Calculate total YTD hours worked
+    const ytdTotalHours = (parseFloat(ytdTotals.regular_hours || 0) || 0) + 
+                          (parseFloat(ytdTotals.overtime_hours || 0) || 0) + 
+                          (parseFloat(ytdTotals.lieu_hours || 0) || 0) + 
+                          (parseFloat(ytdTotals.stat_hours || 0) || 0) + 
+                          (parseFloat(ytdTotals.holiday_hours || 0) || 0) +
+                          totalCurrentHours; // Add current period hours
+
+    // Get formatted date for title
+    const businessTimezoneForTitle = effectiveBusinessData?.timezone || 'America/Toronto';
+    const payPeriodEndDateForTitle = new Date(selectedRun.pay_period_end + 'T12:00:00');
+    const formattedDateForTitle = payPeriodEndDateForTitle.toLocaleDateString('en-CA', {
+      timeZone: businessTimezoneForTitle
+    });
+    
+    // Return the EXACT HTML template - this is the working one from generatePayStatementPDF
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Pay Statement - ${entry.users.first_name} ${entry.users.last_name} - ${formattedDateForTitle}</title>
+        <meta charset="UTF-8">
+        <style>
+          @page { 
+            size: letter; 
+            margin: 0.2in;
+            @top-center { content: "Pay Statement"; }
+          }
+          body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 4px;
+            line-height: 1.2;
+            color: #333;
+            background-color: #fff;
+            font-size: 12px;
+          }
+          .header {
+            text-align: center;
+            border-bottom: 1px solid ${TavariStyles.colors.primary};
+            padding-bottom: 3px;
+            margin-bottom: 6px;
+          }
+          .company-name {
+            font-size: 16px;
+            font-weight: bold;
+            color: ${TavariStyles.colors.primary};
+            margin-bottom: 2px;
+          }
+          .statement-title {
+            font-size: 12px;
+            margin: 3px 0;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .employee-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: 6px 0;
+            background: linear-gradient(135deg, ${TavariStyles.colors.gray50} 0%, ${TavariStyles.colors.gray100} 100%);
+            padding: 6px;
+            border-radius: 3px;
+            border: 1px solid ${TavariStyles.colors.gray200};
+            font-size: 11px;
+          }
+          .employee-info div {
+            line-height: 1.3;
+          }
+          .employee-info strong {
+            color: ${TavariStyles.colors.gray700};
+            font-weight: 600;
+          }
+          .pay-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 4px 0;
+            font-size: 11px;
+          }
+          .pay-table th, .pay-table td {
+            padding: 4px 6px;
+            border: 1px solid #ddd;
+            text-align: left;
+          }
+          .pay-table th {
+            background-color: #f5f5f5;
+            font-weight: 600;
+            color: #333;
+            text-transform: uppercase;
+            font-size: 10px;
+            letter-spacing: 0.3px;
+          }
+          .pay-table td.number {
+            text-align: right;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+          }
+          .pay-table .total-row {
+            background-color: #f8f9fa;
+            font-weight: bold;
+            border-top: 1px solid #333;
+          }
+          .pay-table .net-pay-row {
+            background-color: ${TavariStyles.colors.primary}20;
+            font-weight: bold;
+            font-size: 12px;
+            border-top: 2px solid ${TavariStyles.colors.primary};
+          }
+          .premium-highlight {
+            background-color: ${TavariStyles.colors.success}15;
+          }
+          .wage-change-notice {
+            background-color: #fffbeb;
+            border: 1px solid #f59e0b;
+            border-radius: 3px;
+            padding: 4px;
+            margin: 4px 0;
+            font-size: 10px;
+            color: #92400e;
+          }
+          .footer {
+            margin-top: 6px;
+            font-size: 9px;
+            color: ${TavariStyles.colors.gray600};
+            text-align: center;
+            border-top: 1px solid ${TavariStyles.colors.gray300};
+            padding-top: 4px;
+          }
+          .page-break-avoid {
+            page-break-inside: avoid;
+          }
+          .compact-section {
+            margin: 2px 0;
+          }
+          @media print {
+            body { 
+              margin: 0; 
+              padding: 0; 
+              font-size: 12px; 
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+              background: white !important;
+            }
+            .page-break-avoid {
+              page-break-inside: avoid;
+            }
+            .header {
+              page-break-after: avoid;
+            }
+            .employee-info {
+              page-break-after: avoid;
+            }
+            .pay-table {
+              page-break-inside: avoid;
+            }
+            * {
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="employee-info compact-section">
+          <div>
+            <strong>Employee:</strong> ${entry.users.first_name} ${entry.users.last_name}<br>
+            <strong>Employee ID:</strong> ${entry.user_id.slice(-8).toUpperCase()}<br>
+            <strong>Email:</strong> ${entry.users.email || 'N/A'}<br>
+            ${entry.users.hire_date ? `<strong>Hire Date:</strong> ${new Date(entry.users.hire_date + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}<br>` : ''}
+            <strong>Total YTD Hours:</strong> ${ytdTotalHours.toFixed(2)} hours<br>
+          </div>
+          <div>
+            <strong>Pay Period:</strong> ${new Date(selectedRun.pay_period_start + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })} to ${new Date(selectedRun.pay_period_end + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}<br>
+            <strong>Pay Date:</strong> ${new Date(selectedRun.pay_date + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}<br>
+            <strong>Base Rate:</strong> $${formatTaxAmount(baseWage)}/hr<br>
+            <strong>Lieu Time Balance:</strong> ${parseFloat(entry.lieu_balance_after || 0).toFixed(2)} hours<br>
+            <strong>Business Timezone:</strong> ${effectiveBusinessData?.timezone || 'America/Toronto'}<br>
+            ${Object.keys(premiums).length > 0 ? `<strong>Active Premiums:</strong> ${Object.keys(premiums).length}<br>` : ''}
+          </div>
+        </div>
+
+        ${hasWageChange ? `
+        <div class="wage-change-notice">
+          <strong>⚠️ Wage Rate Change:</strong> Multiple rates used for accuracy.
+        </div>
+        ` : ''}
+
+        <table class="pay-table compact-section page-break-avoid">
+          <thead>
+            <tr>
+              <th>EARNINGS</th>
+              <th>RATE</th>
+              <th>HOURS</th>
+              <th>THIS PERIOD</th>
+              <th>YTD</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${hasWageChange && wageBreakdown.length > 0 ? `
+              ${wageBreakdown.filter(p => !p.is_lieu_payment).map((period, idx) => `
+                <tr>
+                  <td>Regular Wage (${period.period})</td>
+                  <td class="number">$${formatTaxAmount(period.wage)}</td>
+                  <td class="number">${period.regular_hours.toFixed(2)}</td>
+                  <td class="number">$${formatTaxAmount(period.regular_pay)}</td>
+                  <td class="number">${idx === 0 ? '$' + formatTaxAmount(ytdTotals.regular_earnings) : ''}</td>
+                </tr>
+              `).join('')}
+            ` : `
+              <tr>
+                <td>Regular Wage</td>
+                <td class="number">$${formatTaxAmount(baseWage)}</td>
+                <td class="number">${regularHours.toFixed(2)}</td>
+                <td class="number">$${formatTaxAmount(regularEarnings)}</td>
+                <td class="number">$${formatTaxAmount(ytdTotals.regular_earnings)}</td>
+              </tr>
+            `}
+            ${Object.keys(premiums).length > 0 ? Object.entries(premiums).map(([name, details]) => `
+              <tr class="premium-highlight">
+                <td>${name}</td>
+                <td class="number">$${formatTaxAmount(details.rate || 0)}</td>
+                <td class="number">${parseFloat(details.hours || 0).toFixed(2)}</td>
+                <td class="number">$${formatTaxAmount(details.total_pay || 0)}</td>
+                <td class="number">$${formatTaxAmount(ytdTotals.shift_premiums)}</td>
+              </tr>
+            `).join('') : ''}
+            ${overtimeHours > 0 ? `
+            <tr>
+              <td>Overtime</td>
+              <td class="number">$${formatTaxAmount(baseWage * 1.5)}</td>
+              <td class="number">${overtimeHours.toFixed(2)}</td>
+              <td class="number">$${formatTaxAmount(overtimeEarnings)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.overtime_earnings)}</td>
+            </tr>
+            ` : ''}
+            ${lieuHours > 0 ? `
+            <tr>
+              <td>Lieu Hours</td>
+              <td class="number">${hasWageChange ? 'Varied' : '$' + formatTaxAmount(baseWage)}</td>
+              <td class="number">${lieuHours.toFixed(2)}</td>
+              <td class="number">$${formatTaxAmount(lieuEarnings)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.lieu_earnings)}</td>
+            </tr>
+            ` : ''}
+            ${statHolidayHours > 0 ? `
+            <tr>
+              <td>Stat Worked</td>
+              <td class="number">$${formatTaxAmount(baseWage)}</td>
+              <td class="number">${statHolidayHours.toFixed(2)}</td>
+              <td class="number">$${formatTaxAmount(statEarnings)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.stat_earnings)}</td>
+            </tr>
+            ` : ''}
+            ${holidayEarnings > 0 ? `
+            <tr>
+              <td>Holiday Pay</td>
+              <td class="number">$${formatTaxAmount(baseWage)}</td>
+              <td class="number">0.00</td>
+              <td class="number">$${formatTaxAmount(holidayEarnings)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.holiday_earnings)}</td>
+            </tr>
+            ` : ''}
+            <tr>
+              <td>Vacation</td>
+              <td class="number">-</td>
+              <td class="number">-</td>
+              <td class="number">$${formatTaxAmount(currentVacationPay)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.vacation_pay)}</td>
+            </tr>
+            <tr class="total-row">
+              <td><strong>Gross Pay</strong></td>
+              <td class="number">-</td>
+              <td class="number"><strong>${totalCurrentHours.toFixed(2)}</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(totalGrossWithVacation)}</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(ytdGrossPay)}</strong></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <table class="pay-table compact-section page-break-avoid">
+          <thead>
+            <tr>
+              <th>DEDUCTIONS</th>
+              <th>THIS PERIOD</th>
+              <th>YTD</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Federal Tax</td>
+              <td class="number">$${formatTaxAmount(parseFloat(entry.federal_tax || 0))}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.federal_tax)}</td>
+            </tr>
+            <tr>
+              <td>Provincial Tax</td>
+              <td class="number">$${formatTaxAmount(parseFloat(entry.provincial_tax || 0))}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.provincial_tax)}</td>
+            </tr>
+            <tr>
+              <td>CPP</td>
+              <td class="number">$${formatTaxAmount(parseFloat(entry.cpp_deduction || 0))}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.cpp_deduction)}</td>
+            </tr>
+            <tr>
+              <td>EI</td>
+              <td class="number">$${formatTaxAmount(parseFloat(entry.ei_deduction || 0))}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.ei_deduction)}</td>
+            </tr>
+            ${currentAdditionalTax > 0 ? `
+            <tr>
+              <td>Additional Tax</td>
+              <td class="number">$${formatTaxAmount(currentAdditionalTax)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.additional_tax)}</td>
+            </tr>
+            ` : ''}
+            <tr class="total-row">
+              <td><strong>Total Deductions</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(totalCurrentDeductions)}</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(totalYTDDeductions)}</strong></td>
+            </tr>
+            <tr class="net-pay-row">
+              <td><strong>NET PAY</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(parseFloat(entry.net_pay || 0))}</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(ytdTotals.net_pay)}</strong></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="footer">
+          <p><strong>This pay statement was generated electronically by Tavari HR Payroll System.</strong></p>
+          <p>Generated by: ${authUser?.email || 'System'} | Business: ${effectiveBusinessData?.name || 'N/A'} | ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
+          <p>YTD Calculation: Fast lookup (${ytdCalculationTime}ms) | Source: ${ytdTotals._ytd_source || 'standard'}</p>
+        </div>
+      </body>
+      </html>
+    `;
   };
 
-  // EXACT WORKING PDF GENERATION METHOD - Enhanced with YTD performance logging
+  // FIXED: Generate pay statement with proper wage breakdown
   const generatePayStatementPDF = async (entry, isBulkGeneration = false) => {
     if (!entry || !selectedRun) return;
 
@@ -265,21 +656,27 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
         ytd_system_enabled: true
       }, 'medium');
 
-      // Performance timing for YTD calculation
       const ytdStartTime = Date.now();
       const ytdTotals = await calculateYTDTotals(entry.user_id, selectedRun.pay_date);
       const ytdCalculationTime = Date.now() - ytdStartTime;
       
       console.log(`⚡ YTD calculation completed in ${ytdCalculationTime}ms for ${entry.users.first_name} ${entry.users.last_name}`);
+	  console.log('=== DEDUCTION DEBUG ===');
+	  console.log('entry.federal_tax:', entry.federal_tax, 'Type:', typeof entry.federal_tax);
+	  console.log('entry.provincial_tax:', entry.provincial_tax, 'Type:', typeof entry.provincial_tax);
+	  console.log('entry.ontario_health_premium:', entry.ontario_health_premium, 'Type:', typeof entry.ontario_health_premium);
+	  console.log('entry.cpp_deduction:', entry.cpp_deduction, 'Type:', typeof entry.cpp_deduction);
+	  console.log('entry.ei_deduction:', entry.ei_deduction, 'Type:', typeof entry.ei_deduction);
+	  console.log('entry.additional_tax:', entry.additional_tax, 'Type:', typeof entry.additional_tax);
+	  console.log('=== END DEDUCTION DEBUG ===');
 
-      // Parse premiums from JSONB - CRITICAL FIX
+      // Parse premiums and wage breakdown
       let premiums = {};
       let currentPremiumPay = 0;
       try {
         premiums = typeof entry.premiums === 'string' ? 
           JSON.parse(entry.premiums) : (entry.premiums || {});
         
-        // Calculate total premium pay for this period
         Object.values(premiums).forEach(premium => {
           if (premium.total_pay) {
             currentPremiumPay += parseFloat(premium.total_pay);
@@ -290,29 +687,36 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
         premiums = {};
       }
 
-      // Calculate current period totals INCLUDING PREMIUMS
-      const wage = parseFloat(entry.users.wage || 0);
-      const regularEarnings = parseFloat(entry.regular_hours || 0) * wage;
-      const overtimeEarnings = parseFloat(entry.overtime_hours || 0) * wage * 1.5;
-      const lieuEarnings = parseFloat(entry.lieu_hours || 0) * wage;
-      
-      // For now, these are $0 until we add database columns
-      const statEarnings = 0;
-      const holidayEarnings = 0;
-      const bonus = 0;
+      // Parse wage breakdown if exists
+      let wageBreakdown = [];
+      let hasWageChange = false;
+      try {
+        if (entry.wage_breakdown) {
+          wageBreakdown = typeof entry.wage_breakdown === 'string' ? 
+            JSON.parse(entry.wage_breakdown) : entry.wage_breakdown;
+          hasWageChange = Array.isArray(wageBreakdown) && wageBreakdown.length > 1;
+        }
+      } catch (e) {
+        console.warn('Error parsing wage breakdown:', e);
+      }
 
-      const totalCurrentHours = parseFloat(entry.regular_hours || 0) + parseFloat(entry.overtime_hours || 0) + parseFloat(entry.lieu_hours || 0);
-      const totalYTDHours = ytdTotals.regular_hours + ytdTotals.overtime_hours + ytdTotals.lieu_hours;
+      // Calculate current period earnings
+      const currentGrossPay = parseFloat(entry.gross_pay || 0);
+      const currentVacationPay = parseFloat(entry.vacation_pay || 0);
+      const totalGrossWithVacation = currentGrossPay + currentVacationPay;
       
-      const currentGrossPay = parseFloat(entry.gross_pay || 0) + parseFloat(entry.vacation_pay || 0);
       const ytdGrossPay = ytdTotals.gross_pay + ytdTotals.vacation_pay;
 
-      const totalCurrentDeductions = 
-        parseFloat(entry.federal_tax || 0) +
-        parseFloat(entry.provincial_tax || 0) +
-        parseFloat(entry.ei_deduction || 0) +
-        parseFloat(entry.cpp_deduction || 0) +
-        parseFloat(entry.additional_tax || 0);
+      // FIXED: Calculate actual current period deductions
+      const currentFederalTax = parseFloat(entry.federal_tax || 0);
+      const currentProvincialTax = parseFloat(entry.provincial_tax || 0);
+      const currentOntarioHealthPremium = parseFloat(entry.ontario_health_premium || 0);
+      const currentEIDeduction = parseFloat(entry.ei_deduction || 0);
+      const currentCPPDeduction = parseFloat(entry.cpp_deduction || 0);
+      const currentAdditionalTax = parseFloat(entry.additional_tax || 0);
+      
+      const totalCurrentDeductions = currentFederalTax + currentProvincialTax + currentOntarioHealthPremium + 
+                                     currentEIDeduction + currentCPPDeduction + currentAdditionalTax;
 
       const totalYTDDeductions = 
         ytdTotals.federal_tax +
@@ -321,359 +725,105 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
         ytdTotals.cpp_deduction +
         ytdTotals.additional_tax;
 
-      // Create professional pay statement HTML with PREMIUM DETAILS and YTD performance info
-      const payStatementHTML = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>Pay Statement - ${entry.users.first_name} ${entry.users.last_name}</title>
-          <meta charset="UTF-8">
-          <style>
-            body {
-              font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-              margin: 12px;
-              line-height: 1.2;
-              color: #333;
-              background-color: #fff;
-              font-size: 10px;
-            }
-            .header {
-              text-align: center;
-              border-bottom: 2px solid ${TavariStyles.colors.primary};
-              padding-bottom: 8px;
-              margin-bottom: 12px;
-            }
-            .company-name {
-              font-size: 16px;
-              font-weight: bold;
-              color: ${TavariStyles.colors.primary};
-              margin-bottom: 4px;
-            }
-            .statement-title {
-              font-size: 12px;
-              margin: 6px 0;
-              font-weight: bold;
-              text-transform: uppercase;
-              letter-spacing: 0.5px;
-            }
-            .employee-info {
-              display: grid;
-              grid-template-columns: 1fr 1fr;
-              gap: 12px;
-              margin: 12px 0;
-              background: linear-gradient(135deg, ${TavariStyles.colors.gray50} 0%, ${TavariStyles.colors.gray100} 100%);
-              padding: 10px;
-              border-radius: 4px;
-              border: 1px solid ${TavariStyles.colors.gray200};
-              font-size: 9px;
-            }
-            .employee-info div {
-              line-height: 1.3;
-            }
-            .employee-info strong {
-              color: ${TavariStyles.colors.gray700};
-              font-weight: 600;
-            }
-            .pay-table {
-              width: 100%;
-              border-collapse: collapse;
-              margin: 8px 0;
-              font-size: 9px;
-            }
-            .pay-table th, .pay-table td {
-              padding: 4px 6px;
-              border: 1px solid #ddd;
-              text-align: left;
-            }
-            .pay-table th {
-              background-color: #f5f5f5;
-              font-weight: 600;
-              color: #333;
-              text-transform: uppercase;
-              font-size: 8px;
-              letter-spacing: 0.3px;
-            }
-            .pay-table td.number {
-              text-align: right;
-              font-family: 'Courier New', monospace;
-              font-size: 9px;
-            }
-            .pay-table .category-header {
-              background-color: #e9ecef;
-              font-weight: bold;
-              font-size: 9px;
-              text-transform: uppercase;
-            }
-            .pay-table .total-row {
-              background-color: #f8f9fa;
-              font-weight: bold;
-              border-top: 2px solid #333;
-            }
-            .pay-table .net-pay-row {
-              background-color: ${TavariStyles.colors.primary}20;
-              font-weight: bold;
-              font-size: 10px;
-              border-top: 2px solid ${TavariStyles.colors.primary};
-            }
-            .premium-highlight {
-              background-color: ${TavariStyles.colors.success}15;
-              color: ${TavariStyles.colors.success};
-            }
-            .ytd-performance {
-              background-color: ${TavariStyles.colors.info}10;
-              border: 1px solid ${TavariStyles.colors.info}30;
-              border-radius: 4px;
-              padding: 6px;
-              margin: 8px 0;
-              font-size: 7px;
-              color: ${TavariStyles.colors.info};
-            }
-            .footer {
-              margin-top: 15px;
-              font-size: 7px;
-              color: ${TavariStyles.colors.gray600};
-              text-align: center;
-              border-top: 1px solid ${TavariStyles.colors.gray300};
-              padding-top: 8px;
-            }
-            @media print {
-              body { margin: 0; font-size: 9px; }
-              .ytd-performance { display: none; }
-            }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <div class="company-name">${effectiveBusinessData?.name || 'Company Name'}</div>
-            <div class="statement-title">Employee Pay Statement</div>
-          </div>
+      const regularHours = parseFloat(entry.regular_hours || 0);
+      const overtimeHours = parseFloat(entry.overtime_hours || 0);
+      const lieuHours = parseFloat(entry.lieu_hours || 0);
+      const statHolidayHours = parseFloat(entry.stat_holiday_hours || 0);
+      // FIXED: Include lieu time hours in total hours worked
+      const totalCurrentHours = regularHours + overtimeHours + lieuHours + statHolidayHours;
 
-          <div class="employee-info">
-            <div>
-              <strong>Employee:</strong> ${entry.users.first_name} ${entry.users.last_name}<br>
-              <strong>Employee ID:</strong> ${entry.user_id.slice(-8).toUpperCase()}<br>
-              <strong>Email:</strong> ${entry.users.email || 'N/A'}<br>
-              ${entry.users.hire_date ? `<strong>Hire Date:</strong> ${new Date(entry.users.hire_date).toLocaleDateString()}<br>` : ''}
-            </div>
-            <div>
-              <strong>Pay Period:</strong> ${new Date(selectedRun.pay_period_start).toLocaleDateString()} to ${new Date(selectedRun.pay_period_end).toLocaleDateString()}<br>
-              <strong>Pay Date:</strong> ${new Date(selectedRun.pay_date).toLocaleDateString()}<br>
-              <strong>Base Rate:</strong> $${formatTaxAmount(wage)}/hr<br>
-              <strong>Lieu Time Balance:</strong> ${parseFloat(entry.lieu_balance_after || 0).toFixed(2)} hours<br>
-              ${Object.keys(premiums).length > 0 ? `<strong>Active Premiums:</strong> ${Object.keys(premiums).length}<br>` : ''}
-            </div>
-          </div>
-
-          ${ytdTotals._ytd_source ? `
-          <div class="ytd-performance">
-            <strong>YTD Data Source:</strong> ${ytdTotals._ytd_source} | 
-            <strong>Calculation Time:</strong> ${ytdCalculationTime}ms |
-            ${ytdTotals._ytd_last_updated ? `<strong>YTD Last Updated:</strong> ${new Date(ytdTotals._ytd_last_updated).toLocaleDateString()}` : ''}
-            ${ytdTotals._ytd_entries_included !== undefined ? ` | <strong>Recent Entries:</strong> ${ytdTotals._ytd_entries_included}` : ''}
-          </div>
-          ` : ''}
-
-          <table class="pay-table">
-            <thead>
-              <tr>
-                <th>Earnings</th>
-                <th>Rate</th>
-                <th>Hours</th>
-                <th>This Period</th>
-                <th>YTD</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Regular Wage</td>
-                <td class="number">$${formatTaxAmount(wage)}</td>
-                <td class="number">${parseFloat(entry.regular_hours || 0).toFixed(2)}</td>
-                <td class="number">$${formatTaxAmount(regularEarnings)}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.regular_earnings)}</td>
-              </tr>
-              <tr>
-                <td>Stat Worked</td>
-                <td class="number">$${formatTaxAmount(wage * 1.5)}</td>
-                <td class="number">0.00</td>
-                <td class="number">$${formatTaxAmount(statEarnings)}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.stat_earnings)}</td>
-              </tr>
-              <tr>
-                <td>Holiday Pay</td>
-                <td class="number">$${formatTaxAmount(wage)}</td>
-                <td class="number">0.00</td>
-                <td class="number">$${formatTaxAmount(holidayEarnings)}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.holiday_earnings)}</td>
-              </tr>
-              <tr class="${currentPremiumPay > 0 ? 'premium-highlight' : ''}">
-                <td>Shift Premiums</td>
-                <td class="number">-</td>
-                <td class="number">${totalCurrentHours > 0 ? totalCurrentHours.toFixed(2) : '0.00'}</td>
-                <td class="number">$${formatTaxAmount(currentPremiumPay)}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.shift_premiums)}</td>
-              </tr>
-              ${parseFloat(entry.overtime_hours || 0) > 0 ? `
-              <tr>
-                <td>Overtime (1.5x)</td>
-                <td class="number">$${formatTaxAmount(wage * 1.5)}</td>
-                <td class="number">${parseFloat(entry.overtime_hours || 0).toFixed(2)}</td>
-                <td class="number">$${formatTaxAmount(overtimeEarnings)}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.overtime_earnings)}</td>
-              </tr>
-              ` : ''}
-              ${parseFloat(entry.lieu_hours || 0) > 0 ? `
-              <tr>
-                <td>Lieu Hours</td>
-                <td class="number">$${formatTaxAmount(wage)}</td>
-                <td class="number">${parseFloat(entry.lieu_hours || 0).toFixed(2)}</td>
-                <td class="number">$${formatTaxAmount(lieuEarnings)}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.lieu_earnings)}</td>
-              </tr>
-              ` : ''}
-              <tr>
-                <td>Vacation</td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number">$${formatTaxAmount(parseFloat(entry.vacation_pay || 0))}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.vacation_pay)}</td>
-              </tr>
-              <tr>
-                <td>Bonus</td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number">$${formatTaxAmount(bonus)}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.bonus)}</td>
-              </tr>
-              <tr class="total-row">
-                <td><strong>Gross Pay</strong></td>
-                <td class="number">-</td>
-                <td class="number"><strong>${totalCurrentHours.toFixed(2)}</strong></td>
-                <td class="number"><strong>$${formatTaxAmount(currentGrossPay)}</strong></td>
-                <td class="number"><strong>$${formatTaxAmount(ytdGrossPay)}</strong></td>
-              </tr>
-            </tbody>
-          </table>
-
-          ${Object.keys(premiums).length > 0 ? `
-          <table class="pay-table">
-            <thead>
-              <tr>
-                <th colspan="5">Premium Details for This Period</th>
-              </tr>
-              <tr>
-                <th>Premium Name</th>
-                <th>Rate</th>
-                <th>Hours Applied</th>
-                <th>Amount</th>
-                <th>Type</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${Object.entries(premiums).map(([name, details]) => `
-                <tr class="premium-highlight">
-                  <td>${name}</td>
-                  <td class="number">$${formatTaxAmount(details.rate || 0)}</td>
-                  <td class="number">${details.applies_to_all_hours ? totalCurrentHours.toFixed(2) : parseFloat(entry.regular_hours || 0).toFixed(2)}</td>
-                  <td class="number">$${formatTaxAmount(details.total_pay || 0)}</td>
-                  <td>${details.applies_to_all_hours ? 'All Hours' : 'Regular Only'}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-          ` : ''}
-
-          <table class="pay-table">
-            <thead>
-              <tr>
-                <th>Deductions</th>
-                <th></th>
-                <th></th>
-                <th>This Period</th>
-                <th>YTD</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Federal Tax</td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number">$${formatTaxAmount(parseFloat(entry.federal_tax || 0))}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.federal_tax)}</td>
-              </tr>
-              <tr>
-                <td>Provincial Tax</td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number">$${formatTaxAmount(parseFloat(entry.provincial_tax || 0))}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.provincial_tax)}</td>
-              </tr>
-              <tr>
-                <td>CPP</td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number">$${formatTaxAmount(parseFloat(entry.cpp_deduction || 0))}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.cpp_deduction)}</td>
-              </tr>
-              <tr>
-                <td>EI</td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number">$${formatTaxAmount(parseFloat(entry.ei_deduction || 0))}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.ei_deduction)}</td>
-              </tr>
-              ${parseFloat(entry.additional_tax || 0) > 0 ? `
-              <tr>
-                <td>Additional Federal Tax</td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number">$${formatTaxAmount(parseFloat(entry.additional_tax || 0))}</td>
-                <td class="number">$${formatTaxAmount(ytdTotals.additional_tax)}</td>
-              </tr>
-              ` : ''}
-              <tr class="total-row">
-                <td><strong>Total Deductions</strong></td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number"><strong>$${formatTaxAmount(totalCurrentDeductions)}</strong></td>
-                <td class="number"><strong>$${formatTaxAmount(totalYTDDeductions)}</strong></td>
-              </tr>
-              <tr class="net-pay-row">
-                <td><strong>NET PAY</strong></td>
-                <td class="number">-</td>
-                <td class="number">-</td>
-                <td class="number"><strong>$${formatTaxAmount(parseFloat(entry.net_pay || 0))}</strong></td>
-                <td class="number"><strong>$${formatTaxAmount(ytdTotals.net_pay)}</strong></td>
-              </tr>
-            </tbody>
-          </table>
-
-          <div class="footer">
-            <p><strong>This pay statement was generated electronically by Tavari HR Payroll System.</strong></p>
-            <p>Generated by: ${authUser?.email || 'System'} | Business: ${effectiveBusinessData?.name || 'N/A'} | ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
-            <p>YTD Calculation: Fast lookup (${ytdCalculationTime}ms) | Source: ${ytdTotals._ytd_source || 'standard'}</p>
-          </div>
-        </body>
-        </html>
-      `;
-
-      // EXACT WORKING METHOD: Create and print PDF using window.open()
-      const printWindow = window.open('', '_blank');
-      if (!printWindow) {
-        throw new Error('Pop-up blocked. Please allow pop-ups for this site.');
-      }
+      // Calculate wage-based earnings
+      const baseWage = parseFloat(entry.users.wage || 0);
       
+      // FIXED: Use wage breakdown if available
+      let regularEarnings = 0;
+      let overtimeEarnings = 0;
+      let lieuEarnings = 0;
+      
+      if (hasWageChange && wageBreakdown.length > 0) {
+        // Calculate using wage breakdown
+        wageBreakdown.forEach(period => {
+          if (!period.is_lieu_payment) {
+            regularEarnings += parseFloat(period.regular_pay || 0);
+            overtimeEarnings += parseFloat(period.overtime_pay || 0);
+          } else {
+            lieuEarnings += parseFloat(period.lieu_pay || 0);
+          }
+        });
+      } else {
+        // Calculate using single wage
+        regularEarnings = regularHours * baseWage;
+        overtimeEarnings = overtimeHours * baseWage * 1.5;
+        lieuEarnings = lieuHours * baseWage;
+      }
+
+      const statEarnings = statHolidayHours * baseWage;
+      const holidayEarnings = parseFloat(entry.holiday_pay || 0);
+
+      // Use SHARED HTML generation function - ensures EXACT same format
+      const payStatementHTML = generatePayStatementHTMLContent(entry, ytdTotals, ytdCalculationTime);
+
+      // Generate filename with end date using business timezone
+      const firstName = entry.users?.first_name || 'Unknown';
+      const lastName = entry.users?.last_name || 'User';
+      const businessTimezone = effectiveBusinessData?.timezone || 'America/Toronto';
+      
+      // Debug timezone information
+      console.log('=== TIMEZONE DEBUG ===');
+      console.log('effectiveBusinessData:', effectiveBusinessData);
+      console.log('businessTimezone:', businessTimezone);
+      console.log('selectedRun.pay_period_end:', selectedRun.pay_period_end);
+      
+      // Fix timezone issue by treating the date as a local date in the business timezone
+      const payPeriodEndDate = new Date(selectedRun.pay_period_end + 'T12:00:00'); // Add noon to avoid timezone shift issues
+      const formattedDate = payPeriodEndDate.toLocaleDateString('en-CA', {
+        timeZone: businessTimezone
+      });
+      
+      console.log('formattedDate:', formattedDate);
+      console.log('=== END TIMEZONE DEBUG ===');
+      
+      // Filename includes pay period end date
+      const filename = `Pay Statement - ${firstName} ${lastName} - ${formattedDate}`;
+
+      // Create PDF using browser's print functionality with optimized settings
+      const printWindow = window.open('', '_blank', 'width=800,height=600');
+      
+      // Write the HTML content
       printWindow.document.write(payStatementHTML);
       printWindow.document.close();
-      printWindow.focus();
 
-      setTimeout(() => {
-        printWindow.print();
+      let hasTriggeredPrint = false;
+
+      const safelyTriggerPrint = () => {
+        if (hasTriggeredPrint || printWindow.closed) {
+          return;
+        }
+
+        hasTriggeredPrint = true;
+
+        try {
+          printWindow.focus();
+          printWindow.print();
+        } catch (printError) {
+          console.error('Error triggering print dialog:', printError);
+        }
+
         setTimeout(() => {
-          printWindow.close();
-        }, 1000);
-      }, 500);
+          if (!printWindow.closed) {
+            printWindow.close();
+          }
+        }, 2000);
+      };
+      
+      // Wait for content to load, then trigger print dialog
+      printWindow.onload = () => {
+        setTimeout(safelyTriggerPrint, 1000);
+      };
+      
+      // Fallback: if onload doesn't fire, try after a delay
+      setTimeout(safelyTriggerPrint, 3000);
 
-      // Log performance metrics
       await logSecurityEvent('pay_statement_ytd_performance', {
         business_id: effectiveBusinessId,
         employee_id: entry.user_id,
@@ -699,7 +849,753 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     }
   };
 
-  // BULK DOWNLOAD: Just calls the working method multiple times
+  // Email functionality
+  const handleEmailConfigSave = (config) => {
+    setEmailConfig(config);
+    setShowEmailModal(false);
+  };
+
+  const openEmailModal = () => {
+    if (!emailConfig) {
+      // Set default email config
+      const businessName = effectiveBusinessData?.business_name || effectiveBusinessData?.name || 'Company';
+      const defaultSubject = 'Your Pay Statement - {{PayPeriodEnd}}';
+      const defaultBody = `Dear {{FirstName}} {{LastName}},
+
+Your pay statement for the period ending {{PayPeriodEnd}} is attached to this email.
+
+If you have any questions about your pay statement, please contact your payroll department.
+
+Thank you,
+${businessName} - Payroll`;
+      const defaultFromName = `${businessName} - Payroll`;
+      
+      setEmailConfig({
+        subject: defaultSubject,
+        body: defaultBody,
+        fromName: defaultFromName
+      });
+    }
+    setShowEmailModal(true);
+  };
+
+
+  const sendPayStatementEmail = async (entry) => {
+    if (!emailConfig) {
+      toast.error('Please configure email settings first');
+      openEmailModal();
+      return;
+    }
+
+    if (!entry.users?.email) {
+      toast.error(`No email address found for ${entry.users.first_name} ${entry.users.last_name}`);
+      return;
+    }
+
+    setSendingEmail(true);
+    try {
+      await recordAction('send_pay_statement_email', entry.user_id, true);
+      await logSecurityEvent('pay_statement_email_sent', {
+        business_id: effectiveBusinessId,
+        employee_id: entry.user_id,
+        payroll_run_id: selectedRun.id,
+        employee_email: entry.users.email
+      }, 'medium');
+
+      // Generate PDF from pay statement HTML
+      toast.loading('Generating PDF...', { id: 'pdf-generation' });
+      
+      // Generate YTD totals - EXACT SAME as generatePayStatementPDF
+      const ytdStartTime = Date.now();
+      const ytdTotals = await calculateYTDTotals(entry.user_id, selectedRun.pay_date);
+      const ytdCalculationTime = Date.now() - ytdStartTime;
+      
+      // Use SHARED HTML generation function - EXACT SAME as generatePayStatementPDF
+      // This ensures email PDFs match the working PDF format exactly
+      const payStatementHTML = generatePayStatementHTMLContent(entry, ytdTotals, ytdCalculationTime);
+      
+      const businessTimezone = effectiveBusinessData?.timezone || 'America/Toronto';
+      const payPeriodEndDate = new Date(selectedRun.pay_period_end + 'T12:00:00');
+      const formattedDate = payPeriodEndDate.toLocaleDateString('en-CA', {
+        timeZone: businessTimezone
+      });
+      
+      // Generate PDF using html2pdf - EXACT SAME as SendContractModal
+      // The key is that SendContractModal sets innerHTML directly, so we'll do the same
+      toast.loading('Generating PDF...', { id: 'pdf-generation' });
+      
+      // Debug: Log the HTML to verify it's correct
+      console.log('[Email PDF] Generated HTML length:', payStatementHTML.length);
+      console.log('[Email PDF] HTML starts with:', payStatementHTML.substring(0, 200));
+      console.log('[Email PDF] HTML contains body:', payStatementHTML.includes('<body>'));
+      console.log('[Email PDF] HTML contains tables:', payStatementHTML.includes('<table'));
+      
+      // Create temporary element for PDF generation - EXACT from Monday's working version
+      const tempDiv = document.createElement('div');
+      tempDiv.innerHTML = payStatementHTML;
+      tempDiv.style.cssText = `
+        position: absolute;
+        top: 0px;
+        left: 0px;
+        width: 8.5in;
+        min-height: 11in;
+        background-color: white;
+        visibility: visible;
+        z-index: -1000;
+        font-family: Arial, sans-serif;
+      `;
+      
+      document.body.appendChild(tempDiv);
+      console.log('[PDF-EMAIL] Temp element added to DOM');
+      
+      // Force layout calculation and wait for DOM to settle - EXACT from Monday
+      tempDiv.offsetHeight;
+      tempDiv.scrollHeight;
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      console.log('[PDF-EMAIL] Starting PDF conversion...');
+      
+      let pdfBlob;
+      try {
+        // Use the body element or tempDiv itself
+        // EXACT html2pdf config from Monday's working version
+        const opt = {
+          margin: [0.5, 0.5, 0.5, 0.5],
+          filename: `Pay Statement - ${entry.users.first_name} ${entry.users.last_name} - ${formattedDate}.pdf`,
+          image: { 
+            type: 'jpeg', 
+            quality: 0.98 
+          },
+          html2canvas: {
+            scale: 1.5, // Monday used 1.5, not 2
+            useCORS: true,
+            logging: false,
+            letterRendering: true,
+            allowTaint: true,
+            backgroundColor: '#ffffff',
+            width: 816, // 8.5 inches * 96 DPI - EXACT from Monday
+            height: 1056 // 11 inches * 96 DPI - EXACT from Monday
+          },
+          jsPDF: { 
+            unit: 'in', 
+            format: 'letter', 
+            orientation: 'portrait',
+            compress: true
+          }
+        };
+        
+        pdfBlob = await html2pdf().set(opt).from(tempDiv).outputPdf('blob');
+        
+        // Clean up
+        if (document.body.contains(tempDiv)) {
+          document.body.removeChild(tempDiv);
+        }
+        
+        console.log('[PDF-EMAIL] PDF blob created:', {
+          size: pdfBlob.size,
+          type: pdfBlob.type,
+          isValid: pdfBlob instanceof Blob
+        });
+        
+        // Validate PDF blob
+        if (!pdfBlob || pdfBlob.size === 0) {
+          throw new Error('PDF blob is empty or invalid');
+        }
+        
+        if (pdfBlob.size < 1000) {
+          throw new Error('PDF appears to be corrupted (file too small)');
+        }
+        
+        toast.dismiss('pdf-generation');
+      } catch (pdfError) {
+        // Clean up temporary element if it still exists
+        if (document.body.contains(tempDiv)) {
+          document.body.removeChild(tempDiv);
+        }
+        console.error('[PDF-EMAIL] Error generating PDF:', pdfError);
+        toast.error('Failed to generate PDF. Please try again.', { id: 'pdf-generation' });
+        throw pdfError;
+      }
+      
+      // Convert PDF to base64
+      const pdfBase64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64String = reader.result.split(',')[1];
+          resolve(base64String);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(pdfBlob);
+      });
+
+      // Replace template variables in email
+      const replaceTemplate = (text) => {
+        return text
+          .replace(/\{\{FirstName\}\}/g, entry.users.first_name || '')
+          .replace(/\{\{LastName\}\}/g, entry.users.last_name || '')
+          .replace(/\{\{FullName\}\}/g, `${entry.users.first_name || ''} ${entry.users.last_name || ''}`.trim())
+          .replace(/\{\{Email\}\}/g, entry.users.email || '')
+          .replace(/\{\{PayPeriodStart\}\}/g, new Date(selectedRun.pay_period_start + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: businessTimezone }))
+          .replace(/\{\{PayPeriodEnd\}\}/g, formattedDate)
+          .replace(/\{\{PayDate\}\}/g, new Date(selectedRun.pay_date + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: businessTimezone }))
+          .replace(/\{\{NetPay\}\}/g, `$${formatTaxAmount(parseFloat(entry.net_pay || 0))}`)
+          .replace(/\{\{GrossPay\}\}/g, `$${formatTaxAmount(parseFloat(entry.gross_pay || 0))}`)
+          .replace(/\{\{BusinessName\}\}/g, effectiveBusinessData?.business_name || effectiveBusinessData?.name || 'Company')
+          .replace(/\{\{StatementLink\}\}/g, ''); // Not needed for attached PDFs
+      };
+
+      const emailSubject = replaceTemplate(emailConfig.subject);
+      const emailBody = replaceTemplate(emailConfig.body);
+      
+      // Create email HTML
+      const emailHTML = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              line-height: 1.6;
+              color: #333;
+              max-width: 800px;
+              margin: 0 auto;
+              padding: 20px;
+            }
+            .email-message {
+              white-space: pre-wrap;
+              margin-bottom: 20px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="email-message">${emailBody.replace(/\n/g, '<br>')}</div>
+        </body>
+        </html>
+      `;
+
+      // Send email via mail-send edge function
+      const senderEmail = 'noreply@tavarios.ca';
+      const emailPayload = {
+        businessId: effectiveBusinessId,
+        campaignId: `pay-statement-${entry.user_id}-${Date.now()}`,
+        contactId: `pay-statement-${entry.users.email}`,
+        to: entry.users.email,
+        fromEmail: senderEmail,
+        fromName: emailConfig.fromName,
+        subject: emailSubject,
+        html: emailHTML,
+        text: emailBody,
+        attachments: [{
+          filename: `Pay Statement - ${entry.users.first_name} ${entry.users.last_name} - ${formattedDate}.pdf`,
+          content: pdfBase64,
+          contentType: 'application/pdf'
+        }]
+      };
+
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mail-send`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify(emailPayload)
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(errorBody || 'Failed to send email');
+      }
+
+      const data = await response.json();
+      if (!data?.ok) {
+        throw new Error(data?.error || 'Failed to send email');
+      }
+
+      toast.success(`Pay statement emailed to ${entry.users.email}`);
+      
+    } catch (error) {
+      console.error('Error sending pay statement email:', error);
+      toast.error('Failed to send email: ' + (error.message || 'Unknown error'));
+      await logSecurityEvent('pay_statement_email_error', {
+        business_id: effectiveBusinessId,
+        employee_id: entry.user_id,
+        error: error.message
+      }, 'high');
+    } finally {
+      setSendingEmail(false);
+    }
+  };
+
+  const bulkSendPayStatementEmails = async () => {
+    if (selectedEmployees.size === 0) {
+      toast.error('Please select employees to email statements to');
+      return;
+    }
+
+    if (!emailConfig) {
+      toast.error('Please configure email settings first');
+      openEmailModal();
+      return;
+    }
+
+    const selectedEntries = payrollEntries.filter(entry => 
+      selectedEmployees.has(entry.id) && entry.users?.email
+    );
+
+    if (selectedEntries.length === 0) {
+      toast.error('No employees with email addresses selected');
+      return;
+    }
+
+    setSendingEmail(true);
+    try {
+      for (let i = 0; i < selectedEntries.length; i++) {
+        const entry = selectedEntries[i];
+        toast.loading(`Sending email ${i + 1}/${selectedEntries.length} to ${entry.users.email}...`, { id: 'bulk-email' });
+        await sendPayStatementEmail(entry);
+        if (i < selectedEntries.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Rate limiting
+        }
+      }
+      toast.dismiss('bulk-email');
+      toast.success(`Sent ${selectedEntries.length} pay statement emails!`);
+    } catch (error) {
+      console.error('Bulk email error:', error);
+      toast.error('Error sending emails: ' + error.message);
+    } finally {
+      setSendingEmail(false);
+    }
+  };
+
+  // REMOVED: generatePayStatementHTMLForEmail - now generating HTML inline in sendPayStatementEmail
+  // This function is no longer used - HTML is generated directly in sendPayStatementEmail
+  // Keeping this comment for reference
+  const _unused_generatePayStatementHTMLForEmail = async (entry, ytdTotals, ytdCalculationTime = 0) => {
+    // EXACT SAME CALCULATION LOGIC as generatePayStatementPDF
+    // Parse premiums and wage breakdown
+    let premiums = {};
+    let currentPremiumPay = 0;
+    try {
+      premiums = typeof entry.premiums === 'string' ? 
+        JSON.parse(entry.premiums) : (entry.premiums || {});
+      
+      Object.values(premiums).forEach(premium => {
+        if (premium.total_pay) {
+          currentPremiumPay += parseFloat(premium.total_pay);
+        }
+      });
+    } catch (e) {
+      console.warn('Error parsing premiums:', e);
+      premiums = {};
+    }
+
+    // Parse wage breakdown if exists
+    let wageBreakdown = [];
+    let hasWageChange = false;
+    try {
+      if (entry.wage_breakdown) {
+        wageBreakdown = typeof entry.wage_breakdown === 'string' ? 
+          JSON.parse(entry.wage_breakdown) : entry.wage_breakdown;
+        hasWageChange = Array.isArray(wageBreakdown) && wageBreakdown.length > 1;
+      }
+    } catch (e) {
+      console.warn('Error parsing wage breakdown:', e);
+    }
+
+    // Calculate current period earnings
+    const currentGrossPay = parseFloat(entry.gross_pay || 0);
+    const currentVacationPay = parseFloat(entry.vacation_pay || 0);
+    const totalGrossWithVacation = currentGrossPay + currentVacationPay;
+    
+    const ytdGrossPay = ytdTotals.gross_pay + ytdTotals.vacation_pay;
+
+    // Calculate actual current period deductions
+    const currentFederalTax = parseFloat(entry.federal_tax || 0);
+    const currentProvincialTax = parseFloat(entry.provincial_tax || 0);
+    const currentOntarioHealthPremium = parseFloat(entry.ontario_health_premium || 0);
+    const currentEIDeduction = parseFloat(entry.ei_deduction || 0);
+    const currentCPPDeduction = parseFloat(entry.cpp_deduction || 0);
+    const currentAdditionalTax = parseFloat(entry.additional_tax || 0);
+    
+    const totalCurrentDeductions = currentFederalTax + currentProvincialTax + currentOntarioHealthPremium + 
+                                   currentEIDeduction + currentCPPDeduction + currentAdditionalTax;
+
+    const totalYTDDeductions = 
+      ytdTotals.federal_tax +
+      ytdTotals.provincial_tax +
+      ytdTotals.ei_deduction +
+      ytdTotals.cpp_deduction +
+      ytdTotals.additional_tax;
+
+    const regularHours = parseFloat(entry.regular_hours || 0);
+    const overtimeHours = parseFloat(entry.overtime_hours || 0);
+    const lieuHours = parseFloat(entry.lieu_hours || 0);
+    const statHolidayHours = parseFloat(entry.stat_holiday_hours || 0);
+    const totalCurrentHours = regularHours + overtimeHours + lieuHours + statHolidayHours;
+
+    // Calculate wage-based earnings
+    const baseWage = parseFloat(entry.users.wage || 0);
+    
+    // Use wage breakdown if available
+    let regularEarnings = 0;
+    let overtimeEarnings = 0;
+    let lieuEarnings = 0;
+    
+    if (hasWageChange && wageBreakdown.length > 0) {
+      // Calculate using wage breakdown
+      wageBreakdown.forEach(period => {
+        if (!period.is_lieu_payment) {
+          regularEarnings += parseFloat(period.regular_pay || 0);
+          overtimeEarnings += parseFloat(period.overtime_pay || 0);
+        } else {
+          lieuEarnings += parseFloat(period.lieu_pay || 0);
+        }
+      });
+    } else {
+      // Calculate using single wage
+      regularEarnings = regularHours * baseWage;
+      overtimeEarnings = overtimeHours * baseWage * 1.5;
+      lieuEarnings = lieuHours * baseWage;
+    }
+
+    const statEarnings = statHolidayHours * baseWage;
+    const holidayEarnings = parseFloat(entry.holiday_pay || 0);
+
+    // Create professional pay statement HTML - EXACT SAME AS generatePayStatementPDF
+    const businessTimezoneForTitle = effectiveBusinessData?.timezone || 'America/Toronto';
+    const payPeriodEndDateForTitle = new Date(selectedRun.pay_period_end + 'T12:00:00');
+    const formattedDateForTitle = payPeriodEndDateForTitle.toLocaleDateString('en-CA', {
+      timeZone: businessTimezoneForTitle
+    });
+    
+    // EXACT SAME HTML as generatePayStatementPDF (just without the PDF instructions div)
+    const payStatementHTML = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Pay Statement - ${entry.users.first_name} ${entry.users.last_name} - ${formattedDateForTitle}</title>
+        <meta charset="UTF-8">
+        <style>
+          @page { 
+            size: letter; 
+            margin: 0.2in;
+            @top-center { content: "Pay Statement"; }
+          }
+          body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 4px;
+            line-height: 1.2;
+            color: #333;
+            background-color: #fff;
+            font-size: 12px;
+          }
+          .header {
+            text-align: center;
+            border-bottom: 1px solid ${TavariStyles.colors.primary};
+            padding-bottom: 3px;
+            margin-bottom: 6px;
+          }
+          .company-name {
+            font-size: 16px;
+            font-weight: bold;
+            color: ${TavariStyles.colors.primary};
+            margin-bottom: 2px;
+          }
+          .statement-title {
+            font-size: 12px;
+            margin: 3px 0;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .employee-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: 6px 0;
+            background: linear-gradient(135deg, ${TavariStyles.colors.gray50} 0%, ${TavariStyles.colors.gray100} 100%);
+            padding: 6px;
+            border-radius: 3px;
+            border: 1px solid ${TavariStyles.colors.gray200};
+            font-size: 11px;
+          }
+          .employee-info div {
+            line-height: 1.3;
+          }
+          .employee-info strong {
+            color: ${TavariStyles.colors.gray700};
+            font-weight: 600;
+          }
+          .pay-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 4px 0;
+            font-size: 11px;
+          }
+          .pay-table th, .pay-table td {
+            padding: 4px 6px;
+            border: 1px solid #ddd;
+            text-align: left;
+          }
+          .pay-table th {
+            background-color: #f5f5f5;
+            font-weight: 600;
+            color: #333;
+            text-transform: uppercase;
+            font-size: 10px;
+            letter-spacing: 0.3px;
+          }
+          .pay-table td.number {
+            text-align: right;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+          }
+          .pay-table .total-row {
+            background-color: #f8f9fa;
+            font-weight: bold;
+            border-top: 1px solid #333;
+          }
+          .pay-table .net-pay-row {
+            background-color: ${TavariStyles.colors.primary}20;
+            font-weight: bold;
+            font-size: 12px;
+            border-top: 2px solid ${TavariStyles.colors.primary};
+          }
+          .premium-highlight {
+            background-color: ${TavariStyles.colors.success}15;
+          }
+          .wage-change-notice {
+            background-color: #fffbeb;
+            border: 1px solid #f59e0b;
+            border-radius: 3px;
+            padding: 4px;
+            margin: 4px 0;
+            font-size: 10px;
+            color: #92400e;
+          }
+          .footer {
+            margin-top: 6px;
+            font-size: 9px;
+            color: ${TavariStyles.colors.gray600};
+            text-align: center;
+            border-top: 1px solid ${TavariStyles.colors.gray300};
+            padding-top: 4px;
+          }
+          .page-break-avoid {
+            page-break-inside: avoid;
+          }
+          .compact-section {
+            margin: 2px 0;
+          }
+          @media print {
+            body { 
+              margin: 0; 
+              padding: 0; 
+              font-size: 12px; 
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+              background: white !important;
+            }
+            .page-break-avoid {
+              page-break-inside: avoid;
+            }
+            .header {
+              page-break-after: avoid;
+            }
+            .employee-info {
+              page-break-after: avoid;
+            }
+            .pay-table {
+              page-break-inside: avoid;
+            }
+            * {
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="employee-info compact-section">
+          <div>
+            <strong>Employee:</strong> ${entry.users.first_name} ${entry.users.last_name}<br>
+            <strong>Employee ID:</strong> ${entry.user_id.slice(-8).toUpperCase()}<br>
+            <strong>Email:</strong> ${entry.users.email || 'N/A'}<br>
+            ${entry.users.hire_date ? `<strong>Hire Date:</strong> ${new Date(entry.users.hire_date + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}<br>` : ''}
+            <strong>Total YTD Hours:</strong> ${ytdTotalHours.toFixed(2)} hours<br>
+          </div>
+          <div>
+            <strong>Pay Period:</strong> ${new Date(selectedRun.pay_period_start + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })} to ${new Date(selectedRun.pay_period_end + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}<br>
+            <strong>Pay Date:</strong> ${new Date(selectedRun.pay_date + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}<br>
+            <strong>Base Rate:</strong> $${formatTaxAmount(baseWage)}/hr<br>
+            <strong>Lieu Time Balance:</strong> ${parseFloat(entry.lieu_balance_after || 0).toFixed(2)} hours<br>
+            <strong>Business Timezone:</strong> ${effectiveBusinessData?.timezone || 'America/Toronto'}<br>
+            ${Object.keys(premiums).length > 0 ? `<strong>Active Premiums:</strong> ${Object.keys(premiums).length}<br>` : ''}
+          </div>
+        </div>
+
+        ${hasWageChange ? `
+        <div class="wage-change-notice">
+          <strong>⚠️ Wage Rate Change:</strong> Multiple rates used for accuracy.
+        </div>
+        ` : ''}
+
+        <table class="pay-table compact-section page-break-avoid">
+          <thead>
+            <tr>
+              <th>EARNINGS</th>
+              <th>RATE</th>
+              <th>HOURS</th>
+              <th>THIS PERIOD</th>
+              <th>YTD</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${hasWageChange && wageBreakdown.length > 0 ? `
+              ${wageBreakdown.filter(p => !p.is_lieu_payment).map((period, idx) => `
+                <tr>
+                  <td>Regular Wage (${period.period})</td>
+                  <td class="number">$${formatTaxAmount(period.wage)}</td>
+                  <td class="number">${period.regular_hours.toFixed(2)}</td>
+                  <td class="number">$${formatTaxAmount(period.regular_pay)}</td>
+                  <td class="number">${idx === 0 ? '$' + formatTaxAmount(ytdTotals.regular_earnings) : ''}</td>
+                </tr>
+              `).join('')}
+            ` : `
+              <tr>
+                <td>Regular Wage</td>
+                <td class="number">$${formatTaxAmount(baseWage)}</td>
+                <td class="number">${regularHours.toFixed(2)}</td>
+                <td class="number">$${formatTaxAmount(regularEarnings)}</td>
+                <td class="number">$${formatTaxAmount(ytdTotals.regular_earnings)}</td>
+              </tr>
+            `}
+            ${Object.keys(premiums).length > 0 ? Object.entries(premiums).map(([name, details]) => `
+              <tr class="premium-highlight">
+                <td>${name}</td>
+                <td class="number">$${formatTaxAmount(details.rate || 0)}</td>
+                <td class="number">${parseFloat(details.hours || 0).toFixed(2)}</td>
+                <td class="number">$${formatTaxAmount(details.total_pay || 0)}</td>
+                <td class="number">$${formatTaxAmount(ytdTotals.shift_premiums)}</td>
+              </tr>
+            `).join('') : ''}
+            ${overtimeHours > 0 ? `
+            <tr>
+              <td>Overtime</td>
+              <td class="number">$${formatTaxAmount(baseWage * 1.5)}</td>
+              <td class="number">${overtimeHours.toFixed(2)}</td>
+              <td class="number">$${formatTaxAmount(overtimeEarnings)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.overtime_earnings)}</td>
+            </tr>
+            ` : ''}
+            ${lieuHours > 0 ? `
+            <tr>
+              <td>Lieu Hours</td>
+              <td class="number">${hasWageChange ? 'Varied' : '$' + formatTaxAmount(baseWage)}</td>
+              <td class="number">${lieuHours.toFixed(2)}</td>
+              <td class="number">$${formatTaxAmount(lieuEarnings)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.lieu_earnings)}</td>
+            </tr>
+            ` : ''}
+            ${statHolidayHours > 0 ? `
+            <tr>
+              <td>Stat Worked</td>
+              <td class="number">$${formatTaxAmount(baseWage)}</td>
+              <td class="number">${statHolidayHours.toFixed(2)}</td>
+              <td class="number">$${formatTaxAmount(statEarnings)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.stat_earnings)}</td>
+            </tr>
+            ` : ''}
+            ${holidayEarnings > 0 ? `
+            <tr>
+              <td>Holiday Pay</td>
+              <td class="number">$${formatTaxAmount(baseWage)}</td>
+              <td class="number">0.00</td>
+              <td class="number">$${formatTaxAmount(holidayEarnings)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.holiday_earnings)}</td>
+            </tr>
+            ` : ''}
+            <tr>
+              <td>Vacation</td>
+              <td class="number">-</td>
+              <td class="number">-</td>
+              <td class="number">$${formatTaxAmount(currentVacationPay)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.vacation_pay)}</td>
+            </tr>
+            <tr class="total-row">
+              <td><strong>Gross Pay</strong></td>
+              <td class="number">-</td>
+              <td class="number"><strong>${totalCurrentHours.toFixed(2)}</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(totalGrossWithVacation)}</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(ytdGrossPay)}</strong></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <table class="pay-table compact-section page-break-avoid">
+          <thead>
+            <tr>
+              <th>DEDUCTIONS</th>
+              <th>THIS PERIOD</th>
+              <th>YTD</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Federal Tax</td>
+              <td class="number">$${formatTaxAmount(parseFloat(entry.federal_tax || 0))}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.federal_tax)}</td>
+            </tr>
+            <tr>
+              <td>Provincial Tax</td>
+              <td class="number">$${formatTaxAmount(parseFloat(entry.provincial_tax || 0))}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.provincial_tax)}</td>
+            </tr>
+            <tr>
+              <td>CPP</td>
+              <td class="number">$${formatTaxAmount(parseFloat(entry.cpp_deduction || 0))}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.cpp_deduction)}</td>
+            </tr>
+            <tr>
+              <td>EI</td>
+              <td class="number">$${formatTaxAmount(parseFloat(entry.ei_deduction || 0))}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.ei_deduction)}</td>
+            </tr>
+            ${currentAdditionalTax > 0 ? `
+            <tr>
+              <td>Additional Tax</td>
+              <td class="number">$${formatTaxAmount(currentAdditionalTax)}</td>
+              <td class="number">$${formatTaxAmount(ytdTotals.additional_tax)}</td>
+            </tr>
+            ` : ''}
+            <tr class="total-row">
+              <td><strong>Total Deductions</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(totalCurrentDeductions)}</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(totalYTDDeductions)}</strong></td>
+            </tr>
+            <tr class="net-pay-row">
+              <td><strong>NET PAY</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(parseFloat(entry.net_pay || 0))}</strong></td>
+              <td class="number"><strong>$${formatTaxAmount(ytdTotals.net_pay)}</strong></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="footer">
+          <p><strong>This pay statement was generated electronically by Tavari HR Payroll System.</strong></p>
+          <p>Generated by: ${authUser?.email || 'System'} | Business: ${effectiveBusinessData?.name || 'N/A'} | ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}</p>
+          <p>YTD Calculation: Fast lookup (${ytdCalculationTime}ms) | Source: ${ytdTotals._ytd_source || 'standard'}</p>
+        </div>
+      </body>
+      </html>
+    `;
+    
+    return payStatementHTML;
+  };
+
   const bulkDownloadStatements = async () => {
     if (selectedEmployees.size === 0) {
       alert('Please select employees to download statements for');
@@ -715,16 +1611,13 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     try {
       console.log(`🚀 Starting bulk download for ${selectedEntries.length} employees with YTD integration`);
       
-      // Call the EXACT SAME working individual method for each employee
       for (let i = 0; i < selectedEntries.length; i++) {
         const entry = selectedEntries[i];
         
         console.log(`📄 Generating statement ${i + 1}/${selectedEntries.length} for ${entry.users.first_name} ${entry.users.last_name}`);
         
-        // Just call your original working method - NO CHANGES
         await generatePayStatementPDF(entry, false);
         
-        // Wait between downloads
         if (i < selectedEntries.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
@@ -737,6 +1630,193 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
       alert('Error generating statements: ' + error.message);
     } finally {
       setBulkDownloading(false);
+    }
+  };
+
+  const downloadCheckAmounts = async () => {
+    if (selectedEmployees.size === 0) {
+      alert('Please select employees to generate check amounts for');
+      return;
+    }
+
+    try {
+      const selectedEntries = payrollEntries.filter(entry => 
+        selectedEmployees.has(entry.id)
+      );
+      
+      console.log(`🚀 Generating check amounts report for ${selectedEntries.length} employees`);
+
+      // Generate check amounts report HTML
+      const checkAmountsHTML = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Check Amounts Report - ${effectiveBusinessData?.name || 'Company'}</title>
+          <meta charset="UTF-8">
+          <style>
+            @page { size: letter; margin: 0.5in; }
+            body {
+              font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+              margin: 0;
+              padding: 20px;
+              line-height: 1.4;
+              color: #333;
+              background-color: #fff;
+              font-size: 12px;
+            }
+            .header {
+              text-align: center;
+              border-bottom: 2px solid ${TavariStyles.colors.primary};
+              padding-bottom: 15px;
+              margin-bottom: 20px;
+            }
+            .company-name {
+              font-size: 20px;
+              font-weight: bold;
+              color: ${TavariStyles.colors.primary};
+              margin-bottom: 5px;
+            }
+            .report-title {
+              font-size: 16px;
+              margin: 8px 0;
+              font-weight: bold;
+              text-transform: uppercase;
+              letter-spacing: 0.8px;
+            }
+            .report-info {
+              background: #f8f9fa;
+              padding: 15px;
+              border-radius: 8px;
+              border: 1px solid #e9ecef;
+              margin-bottom: 20px;
+              font-size: 11px;
+            }
+            .check-table {
+              width: 100%;
+              border-collapse: collapse;
+              margin: 20px 0;
+              font-size: 11px;
+            }
+            .check-table th, .check-table td {
+              padding: 12px 8px;
+              border: 1px solid #ddd;
+              text-align: left;
+            }
+            .check-table th {
+              background-color: ${TavariStyles.colors.primary};
+              color: white;
+              font-weight: bold;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+            }
+            .check-table .amount {
+              text-align: right;
+              font-family: monospace;
+              font-weight: bold;
+            }
+            .check-table .employee-name {
+              font-weight: 600;
+            }
+            .total-row {
+              background-color: #f8f9fa;
+              font-weight: bold;
+              border-top: 2px solid ${TavariStyles.colors.primary};
+            }
+            .total-row .amount {
+              font-size: 14px;
+              color: ${TavariStyles.colors.primary};
+            }
+            .footer {
+              margin-top: 30px;
+              padding-top: 15px;
+              border-top: 1px solid #ddd;
+              font-size: 10px;
+              color: #666;
+              text-align: center;
+            }
+            @media print {
+              body { margin: 0; padding: 0; }
+              @page { size: letter; margin: 0.5in; }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div class="company-name">${effectiveBusinessData?.name || 'Company Name'}</div>
+            <div class="report-title">Check Amounts Report</div>
+          </div>
+
+          <div class="report-info">
+            <strong>Pay Period:</strong> ${new Date(selectedRun.pay_period_start + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })} to ${new Date(selectedRun.pay_period_end + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}<br>
+            <strong>Pay Date:</strong> ${new Date(selectedRun.pay_date + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}<br>
+            <strong>Total Employees:</strong> ${selectedEntries.length}<br>
+            <strong>Generated:</strong> ${new Date().toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })} at ${new Date().toLocaleTimeString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}
+          </div>
+
+          <table class="check-table">
+            <thead>
+              <tr>
+                <th style="width: 60%;">Employee Name</th>
+                <th style="width: 40%;">Net Pay Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${selectedEntries.map(entry => `
+                <tr>
+                  <td class="employee-name">${entry.users.first_name} ${entry.users.last_name}</td>
+                  <td class="amount">$${formatTaxAmount(parseFloat(entry.net_pay || 0))}</td>
+                </tr>
+              `).join('')}
+              <tr class="total-row">
+                <td><strong>TOTAL PAYROLL AMOUNT</strong></td>
+                <td class="amount">$${formatTaxAmount(selectedEntries.reduce((sum, entry) => sum + parseFloat(entry.net_pay || 0), 0))}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="footer">
+            <p><strong>This check amounts report was generated electronically by Tavari HR Payroll System.</strong></p>
+            <p>Generated by: ${authUser?.email || 'System'} | Business: ${effectiveBusinessData?.name || 'N/A'} | ${new Date().toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })} ${new Date().toLocaleTimeString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}</p>
+          </div>
+        </body>
+        </html>
+      `;
+
+      // Generate filename with end date
+      const payPeriodEnd = new Date(selectedRun.pay_period_end + 'T12:00:00');
+      const formattedDate = payPeriodEnd.toLocaleDateString('en-CA', {
+        timeZone: effectiveBusinessData?.timezone || 'America/Toronto'
+      });
+      const filename = `Check Amounts Report - ${formattedDate}`;
+
+      // Create downloadable HTML file
+      const blob = new Blob([checkAmountsHTML], { 
+        type: 'text/html;charset=utf-8' 
+      });
+      
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename + '.html';
+      link.style.display = 'none';
+      
+      document.body.appendChild(link);
+      link.click();
+      
+      // Cleanup
+      setTimeout(() => {
+        if (document.body.contains(link)) {
+          document.body.removeChild(link);
+        }
+        URL.revokeObjectURL(url);
+      }, 1000);
+
+      console.log(`✅ Check amounts report generated for ${selectedEntries.length} employees`);
+      alert(`Successfully generated check amounts report for ${selectedEntries.length} employees!`);
+
+    } catch (error) {
+      console.error('Check amounts report error:', error);
+      alert('Error generating check amounts report: ' + error.message);
     }
   };
 
@@ -801,7 +1881,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     }
   };
 
-  // Calculate total premium pay for display in table
   const calculateEntryPremiumPay = (entry) => {
     try {
       const premiums = typeof entry.premiums === 'string' ? 
@@ -819,7 +1898,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     }
   };
 
-  // Tavari Styles
   const styles = {
     container: {
       padding: TavariStyles.spacing.lg,
@@ -959,7 +2037,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
     selectedRow: {
       backgroundColor: TavariStyles.colors.primary + '08'
     },
-    // YTD status indicator
     ytdStatus: {
       display: 'flex',
       alignItems: 'center',
@@ -1007,7 +2084,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
           <div style={styles.section}>
             <h3 style={styles.sectionTitle}>Select Payroll Run</h3>
             
-            {/* YTD System Status */}
             <div style={styles.ytdStatus}>
               {ytd.loading ? (
                 <>⏳ YTD system initializing...</>
@@ -1030,7 +2106,7 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
                   <option value="">Select a payroll run...</option>
                   {payrollRuns.map(run => (
                     <option key={run.id} value={run.id}>
-                      {new Date(run.pay_period_start).toLocaleDateString()} to {new Date(run.pay_period_end).toLocaleDateString()} (Pay Date: {new Date(run.pay_date).toLocaleDateString()})
+                      {new Date(run.pay_period_start + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })} to {new Date(run.pay_period_end + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })} (Pay Date: {new Date(run.pay_date + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })})
                     </option>
                   ))}
                 </select>
@@ -1067,6 +2143,37 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
                     >
                       {bulkDownloading ? 'Bulk Download...' : `Fast Bulk Download (${selectedEmployees.size})`}
                     </button>
+                    <button
+                      style={{
+                        ...styles.button,
+                        ...(bulkDownloading || selectedEmployees.size === 0 ? styles.disabledButton : {})
+                      }}
+                      onClick={downloadCheckAmounts}
+                      disabled={bulkDownloading || selectedEmployees.size === 0}
+                    >
+                      Download Check Amounts
+                    </button>
+                    <button
+                      style={{
+                        ...styles.secondaryButton,
+                        ...(sendingEmail || selectedEmployees.size === 0 ? styles.disabledButton : {})
+                      }}
+                      onClick={openEmailModal}
+                      disabled={sendingEmail || selectedEmployees.size === 0}
+                      title="Configure email settings"
+                    >
+                      📧 Configure Email
+                    </button>
+                    <button
+                      style={{
+                        ...styles.button,
+                        ...(sendingEmail || selectedEmployees.size === 0 || !emailConfig ? styles.disabledButton : {})
+                      }}
+                      onClick={bulkSendPayStatementEmails}
+                      disabled={sendingEmail || selectedEmployees.size === 0 || !emailConfig}
+                    >
+                      {sendingEmail ? 'Sending Emails...' : `📧 Email Selected (${selectedEmployees.size})`}
+                    </button>
                     <span style={{ fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray600 }}>
                       {selectedEmployees.size} of {payrollEntries.length} selected
                     </span>
@@ -1084,7 +2191,7 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
           {selectedRun && payrollEntries.length > 0 && (
             <div style={styles.section}>
               <h3 style={styles.sectionTitle}>
-                Pay Statements for {new Date(selectedRun.pay_period_start).toLocaleDateString()} to {new Date(selectedRun.pay_period_end).toLocaleDateString()}
+                Pay Statements for {new Date(selectedRun.pay_period_start + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })} to {new Date(selectedRun.pay_period_end + 'T12:00:00').toLocaleDateString('en-CA', { timeZone: effectiveBusinessData?.timezone || 'America/Toronto' })}
                 <span style={{ fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.success, marginLeft: TavariStyles.spacing.md }}>
                   ⚡ Fast YTD Mode
                 </span>
@@ -1111,74 +2218,95 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
                     </tr>
                   </thead>
                   <tbody>
-                    {payrollEntries.map(entry => {
-                      const totalDeductions =
-                        parseFloat(entry.federal_tax || 0) +
-                        parseFloat(entry.provincial_tax || 0) +
-                        parseFloat(entry.ei_deduction || 0) +
-                        parseFloat(entry.cpp_deduction || 0) +
-                        parseFloat(entry.additional_tax || 0);
+                    {payrollEntries
+                      .filter(entry => entry.users !== null && entry.users !== undefined)
+                      .map(entry => {
+                        const totalDeductions =
+                          parseFloat(entry.federal_tax || 0) +
+                          parseFloat(entry.provincial_tax || 0) +
+                          parseFloat(entry.ei_deduction || 0) +
+                          parseFloat(entry.cpp_deduction || 0) +
+                          parseFloat(entry.additional_tax || 0);
 
-                      const premiumPay = calculateEntryPremiumPay(entry);
-                      const isSelected = selectedEmployees.has(entry.id);
+                        const premiumPay = calculateEntryPremiumPay(entry);
+                        const isSelected = selectedEmployees.has(entry.id);
 
-                      return (
-                        <tr 
-                          key={entry.id}
-                          style={isSelected ? styles.selectedRow : {}}
-                        >
-                          <td style={styles.td}>
-                            <TavariCheckbox
-                              checked={isSelected}
-                              onChange={() => toggleEmployeeSelection(entry.id)}
-                              label=""
-                            />
-                          </td>
-                          <td style={styles.td}>
-                            <div style={styles.employeeName}>
-                              {entry.users.first_name} {entry.users.last_name}
-                            </div>
-                            <div style={styles.employeeDetails}>
-                              {entry.users.email}
-                            </div>
-                          </td>
-                          <td style={{...styles.td, ...styles.amountCell}}>
-                            {parseFloat(entry.regular_hours || 0).toFixed(2)}
-                          </td>
-                          <td style={{...styles.td, ...styles.amountCell}}>
-                            {parseFloat(entry.overtime_hours || 0).toFixed(2)}
-                          </td>
-                          <td style={{...styles.td, ...styles.premiumCell}}>
-                            {premiumPay > 0 ? `$${formatTaxAmount(premiumPay)}` : '-'}
-                          </td>
-                          <td style={{...styles.td, ...styles.amountCell}}>
-                            ${formatTaxAmount(parseFloat(entry.gross_pay || 0) + parseFloat(entry.vacation_pay || 0))}
-                          </td>
-                          <td style={{...styles.td, ...styles.amountCell}}>
-                            ${formatTaxAmount(totalDeductions)}
-                          </td>
-                          <td style={{...styles.td, ...styles.amountCell}}>
-                            <strong>${formatTaxAmount(parseFloat(entry.net_pay || 0))}</strong>
-                          </td>
-                          <td style={styles.td}>
-                            <button
-                              style={{
-                                ...styles.button,
-                                ...(generating || bulkDownloading ? styles.disabledButton : {}),
-                                margin: 0,
-                                fontSize: TavariStyles.typography.fontSize.xs,
-                                padding: '8px 12px'
-                              }}
-                              onClick={() => generatePayStatementPDF(entry)}
-                              disabled={generating || bulkDownloading}
-                              title="Generate with fast YTD calculations"
-                            >
-                              ⚡ Fast PDF
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
+                        return (
+                          <tr 
+                            key={entry.id}
+                            style={isSelected ? styles.selectedRow : {}}
+                          >
+                            <td style={styles.td}>
+                              <TavariCheckbox
+                                checked={isSelected}
+                                onChange={() => toggleEmployeeSelection(entry.id)}
+                                label=""
+                              />
+                            </td>
+                            <td style={styles.td}>
+                              <div style={styles.employeeName}>
+                                {entry.users.first_name} {entry.users.last_name}
+                              </div>
+                              <div style={styles.employeeDetails}>
+                                {entry.users.email}
+                              </div>
+                            </td>
+                            <td style={{...styles.td, ...styles.amountCell}}>
+                              {parseFloat(entry.regular_hours || 0).toFixed(2)}
+                            </td>
+                            <td style={{...styles.td, ...styles.amountCell}}>
+                              {parseFloat(entry.overtime_hours || 0).toFixed(2)}
+                            </td>
+                            <td style={{...styles.td, ...styles.premiumCell}}>
+                              {premiumPay > 0 ? `$${formatTaxAmount(premiumPay)}` : '-'}
+                            </td>
+                            <td style={{...styles.td, ...styles.amountCell}}>
+                              ${formatTaxAmount(parseFloat(entry.gross_pay || 0) + parseFloat(entry.vacation_pay || 0))}
+                            </td>
+                            <td style={{...styles.td, ...styles.amountCell}}>
+                              ${formatTaxAmount(totalDeductions)}
+                            </td>
+                            <td style={{...styles.td, ...styles.amountCell}}>
+                              <strong>${formatTaxAmount(parseFloat(entry.net_pay || 0))}</strong>
+                            </td>
+                            <td style={styles.td}>
+                              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                <button
+                                  style={{
+                                    ...styles.button,
+                                    ...(generating || bulkDownloading ? styles.disabledButton : {}),
+                                    margin: 0,
+                                    fontSize: TavariStyles.typography.fontSize.xs,
+                                    padding: '8px 12px'
+                                  }}
+                                  onClick={() => generatePayStatementPDF(entry)}
+                                  disabled={generating || bulkDownloading}
+                                  title="Generate with fast YTD calculations"
+                                >
+                                  ⚡ Fast PDF
+                                </button>
+                                {entry.users?.email && (
+                                  <button
+                                    style={{
+                                      ...styles.secondaryButton,
+                                      ...(sendingEmail || !emailConfig ? styles.disabledButton : {}),
+                                      margin: 0,
+                                      fontSize: TavariStyles.typography.fontSize.xs,
+                                      padding: '8px 12px'
+                                    }}
+                                    onClick={() => sendPayStatementEmail(entry)}
+                                    disabled={sendingEmail || !emailConfig}
+                                    title={!emailConfig ? 'Configure email settings first' : `Email to ${entry.users.email}`}
+                                  >
+                                    📧 Email
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    }
                   </tbody>
                 </table>
               </div>
@@ -1193,7 +2321,6 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
             </div>
           )}
 
-          {/* YTD Detail Modal */}
           <YTDDetailModal
             isOpen={showYTDModal}
             onClose={() => setShowYTDModal(false)}
@@ -1201,6 +2328,15 @@ const PayStatementsTab = ({ selectedBusinessId, businessData }) => {
             ytdData={selectedYTDEmployee?.ytdData}
             formatAmount={formatTaxAmount}
             allowEdit={false}
+          />
+
+          <PayStatementEmailModal
+            isOpen={showEmailModal}
+            onClose={() => setShowEmailModal(false)}
+            onSave={handleEmailConfigSave}
+            defaultSubject={emailConfig?.subject}
+            defaultBody={emailConfig?.body}
+            defaultFromName={emailConfig?.fromName}
           />
         </div>
       </SecurityWrapper>

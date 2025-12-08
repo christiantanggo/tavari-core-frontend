@@ -1,38 +1,229 @@
-// hooks/usePayrollCalculations.js - FIXED: Resolved console errors and async issues
+// hooks/usePayrollCalculations.js - MAIN EXPORT FILE
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../supabaseClient';
 import { useSecurityContext } from '../Security';
 import { usePOSAuth } from './usePOSAuth';
 import { useCanadianTaxCalculations } from './useCanadianTaxCalculations';
 
-/**
- * Comprehensive payroll calculations hook for Tavari HR system
- * FIXED: Removed problematic imports and simplified security context
- * Now integrates with CRA T4127 compliant Canadian tax calculations
- * 
- * @param {string} businessId - Business ID to load payroll data for
- * @returns {Object} Payroll calculation functions and data with CRA compliance
- */
+// ============================================================
+// WAGEHISTORY CLASS - EMBEDDED
+// ============================================================
+class WageHistory {
+  constructor(businessId) {
+    this.businessId = businessId;
+  }
+
+  async getWagePeriodsInRange(employeeId, startDate, endDate) {
+    if (!employeeId || !startDate || !endDate) {
+      console.warn('Missing required parameters for getWagePeriodsInRange');
+      return [];
+    }
+
+    try {
+      const { data: employee, error: employeeError } = await supabase
+        .from('users')
+        .select('wage')
+        .eq('id', employeeId)
+        .single();
+
+      if (employeeError) throw employeeError;
+
+      const currentWage = parseFloat(employee?.wage || 0);
+
+      const { data: wageChanges, error: wageError } = await supabase
+        .from('hrpayroll_wage_history')
+        .select('*')
+        .eq('business_id', this.businessId)
+        .eq('user_id', employeeId)
+        .lte('effective_date', endDate)
+        .order('effective_date', { ascending: true });
+
+      if (wageError) {
+        console.error('Error fetching wage changes:', wageError);
+        return [{
+          wage: currentWage,
+          startDate: startDate,
+          endDate: endDate,
+          daysInPeriod: this.calculateDaysBetween(startDate, endDate)
+        }];
+      }
+
+      if (!wageChanges || wageChanges.length === 0) {
+        return [{
+          wage: currentWage,
+          startDate: startDate,
+          endDate: endDate,
+          daysInPeriod: this.calculateDaysBetween(startDate, endDate)
+        }];
+      }
+
+      const periods = [];
+      let periodStart = startDate;
+
+      const sortedChanges = wageChanges
+        .filter(change => change.effective_date >= startDate && change.effective_date <= endDate)
+        .map(change => ({
+          effectiveDate: change.effective_date,
+          previousWage: parseFloat(change.previous_wage || 0),
+          newWage: parseFloat(change.new_wage || 0)
+        }))
+        .sort((a, b) => new Date(a.effectiveDate) - new Date(b.effectiveDate));
+
+      if (sortedChanges.length === 0) {
+        const previousWage = wageChanges[wageChanges.length - 1];
+        return [{
+          wage: parseFloat(previousWage.new_wage),
+          startDate: startDate,
+          endDate: endDate,
+          daysInPeriod: this.calculateDaysBetween(startDate, endDate)
+        }];
+      }
+
+      const firstChange = sortedChanges[0];
+      if (firstChange.effectiveDate > startDate) {
+        const wageBeforeFirst = wageChanges.find(c => c.effective_date < startDate);
+        const startingWage = wageBeforeFirst ? parseFloat(wageBeforeFirst.new_wage) : firstChange.previousWage;
+        
+        periods.push({
+          wage: startingWage,
+          startDate: startDate,
+          endDate: this.subtractDays(firstChange.effectiveDate, 1),
+          daysInPeriod: this.calculateDaysBetween(startDate, this.subtractDays(firstChange.effectiveDate, 1))
+        });
+      }
+
+      for (let i = 0; i < sortedChanges.length; i++) {
+        const change = sortedChanges[i];
+        const nextChange = sortedChanges[i + 1];
+        
+        const periodEndDate = nextChange 
+          ? this.subtractDays(nextChange.effectiveDate, 1)
+          : endDate;
+
+        periods.push({
+          wage: change.newWage,
+          startDate: change.effectiveDate,
+          endDate: periodEndDate,
+          daysInPeriod: this.calculateDaysBetween(change.effectiveDate, periodEndDate)
+        });
+      }
+
+      return periods;
+
+    } catch (error) {
+      console.error('Error in getWagePeriodsInRange:', error);
+      const { data: employee } = await supabase
+        .from('users')
+        .select('wage')
+        .eq('id', employeeId)
+        .single();
+
+      return [{
+        wage: parseFloat(employee?.wage || 0),
+        startDate: startDate,
+        endDate: endDate,
+        daysInPeriod: this.calculateDaysBetween(startDate, endDate)
+      }];
+    }
+  }
+
+  splitHoursAcrossPeriods(totalHours, wagePeriods) {
+    if (!wagePeriods || wagePeriods.length === 0) return [];
+
+    if (wagePeriods.length === 1) {
+      return [{
+        hours: totalHours,
+        wage: wagePeriods[0].wage,
+        pay: totalHours * wagePeriods[0].wage,
+        startDate: wagePeriods[0].startDate,
+        endDate: wagePeriods[0].endDate,
+        daysInPeriod: wagePeriods[0].daysInPeriod
+      }];
+    }
+
+    const totalDays = wagePeriods.reduce((sum, period) => sum + period.daysInPeriod, 0);
+
+    const splits = wagePeriods.map(period => {
+      const proportion = period.daysInPeriod / totalDays;
+      const hours = totalHours * proportion;
+      const pay = hours * period.wage;
+
+      return {
+        hours: Math.round(hours * 100) / 100,
+        wage: period.wage,
+        pay: Math.round(pay * 100) / 100,
+        startDate: period.startDate,
+        endDate: period.endDate,
+        daysInPeriod: period.daysInPeriod
+      };
+    });
+
+    return splits;
+  }
+
+  calculateDaysBetween(startDate, endDate) {
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const diffTime = Math.abs(end - start);
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    return diffDays + 1;
+  }
+
+  subtractDays(dateString, days) {
+    const date = new Date(dateString);
+    date.setDate(date.getDate() - days);
+    return date.toISOString().split('T')[0];
+  }
+
+  addDays(dateString, days) {
+    const date = new Date(dateString);
+    date.setDate(date.getDate() + days);
+    return date.toISOString().split('T')[0];
+  }
+
+  async getWageChangeHistory(employeeId) {
+    try {
+      const { data: wageChanges, error } = await supabase
+        .from('hrpayroll_wage_history')
+        .select(`
+          *,
+          created_by_user:users!created_by(first_name, last_name, full_name, email)
+        `)
+        .eq('business_id', this.businessId)
+        .eq('user_id', employeeId)
+        .order('effective_date', { ascending: false });
+
+      if (error) throw error;
+      return wageChanges || [];
+    } catch (error) {
+      console.error('Error fetching wage change history:', error);
+      return [];
+    }
+  }
+}
+
+// ============================================================
+// MAIN HOOK
+// ============================================================
 export const usePayrollCalculations = (businessId) => {
   const [settings, setSettings] = useState(null);
   const [employees, setEmployees] = useState([]);
   const [payrollRuns, setPayrollRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [wageHistory, setWageHistory] = useState(null);
 
-  // FIXED: Simplified security context to prevent console errors
   const {
     validateInput,
     recordAction
   } = useSecurityContext({
     componentName: 'usePayrollCalculations',
-    sensitiveComponent: false, // REDUCED to prevent issues
-    enableRateLimiting: false, // DISABLED - was causing console errors
-    enableAuditLogging: false, // DISABLED - was causing console spam
-    securityLevel: 'low' // REDUCED from high
+    sensitiveComponent: false,
+    enableRateLimiting: false,
+    enableAuditLogging: false,
+    securityLevel: 'low'
   });
 
-  // Authentication context
   const {
     selectedBusinessId,
     authUser,
@@ -44,12 +235,15 @@ export const usePayrollCalculations = (businessId) => {
     componentName: 'usePayrollCalculations'
   });
 
-  // Canadian tax calculations hook for CRA T4127 compliance
   const canadianTax = useCanadianTaxCalculations(businessId);
 
-  /**
-   * FIXED: Load all payroll data with comprehensive error handling
-   */
+  useEffect(() => {
+    if (businessId) {
+      const wageHistoryInstance = new WageHistory(businessId);
+      setWageHistory(wageHistoryInstance);
+    }
+  }, [businessId]);
+
   const loadData = useCallback(async () => {
     if (!businessId) {
       setLoading(false);
@@ -60,10 +254,6 @@ export const usePayrollCalculations = (businessId) => {
     setError(null);
 
     try {
-      // FIXED: Removed rate limiting that was causing errors
-      console.log('Loading payroll data for business:', businessId);
-
-      // Load payroll settings for the business
       const { data: settingsData, error: settingsError } = await supabase
         .from('hrpayroll_settings')
         .select('*')
@@ -71,90 +261,64 @@ export const usePayrollCalculations = (businessId) => {
         .single();
 
       if (settingsError && settingsError.code !== 'PGRST116') {
-        console.warn('Payroll settings not found, will use defaults:', settingsError);
+        throw settingsError;
       }
 
-      // Load recent payroll runs for context
       const { data: runsData, error: runsError } = await supabase
         .from('hrpayroll_runs')
         .select('*')
         .eq('business_id', businessId)
-        .order('created_at', { ascending: false })
-        .limit(10);
+        .order('created_at', { ascending: false });
 
       if (runsError) {
         console.warn('Error loading payroll runs:', runsError);
       }
 
-      // Get user IDs for this business from user_roles table
-      const { data: userRoles, error: userRolesError } = await supabase
-        .from('user_roles')
+      const { data: businessUsers, error: businessUsersError } = await supabase
+        .from('business_users')
         .select('user_id')
+        .eq('business_id', businessId);
+
+      if (businessUsersError) throw businessUsersError;
+
+      const userIds = businessUsers.map(bu => bu.user_id);
+
+      let employeeData = [];
+      if (userIds.length > 0) {
+        const { data: usersData, error: usersError } = await supabase
+          .from('users')
+          .select(`
+            *,
+            hrpayroll_employee_premiums!hrpayroll_employee_premiums_user_id_fkey(*)
+          `)
+          .in('id', userIds)
+          .neq('employment_status', 'terminated');
+
+        if (usersError) throw usersError;
+        employeeData = usersData || [];
+      }
+
+      const { data: premiumData, error: premiumError } = await supabase
+        .from('hrpayroll_employee_premiums')
+        .select('*')
         .eq('business_id', businessId)
-        .eq('active', true);
+        .eq('is_active', true)
+        .in('user_id', userIds);
 
-      if (userRolesError) {
-        console.error('Error loading user roles:', userRolesError);
-        throw userRolesError;
+      if (premiumError) {
+        console.warn('Error loading premiums:', premiumError);
       }
 
-      const userIds = userRoles?.map(ur => ur.user_id) || [];
-
-      if (userIds.length === 0) {
-        console.log('No employees found for business');
-        setSettings(settingsData);
-        setEmployees([]);
-        setPayrollRuns(runsData || []);
-        setLoading(false);
-        return;
+      if (employeeData && premiumData) {
+        employeeData.forEach(emp => {
+          emp.hrpayroll_employee_premiums = premiumData.filter(p => p.user_id === emp.id);
+        });
       }
-
-      // FIXED: Load employees with better error handling
-      const { data: employeeData, error: employeeError } = await supabase
-        .from('users')
-        .select(`
-          id,
-          first_name,
-          last_name,
-          email,
-          wage,
-          salary_flag,
-          vacation_percent,
-          hire_date,
-          last_raise_date,
-          next_raise_date,
-          lieu_time_enabled,
-          max_paid_hours_per_period,
-          lieu_time_balance,
-          claim_code,
-          hrpayroll_employee_premiums (
-            id,
-            premium_name,
-            premium_rate,
-            applies_to_all_hours,
-            is_active,
-            created_at,
-            updated_at
-          )
-        `)
-        .in('id', userIds);
-
-      if (employeeError) {
-        console.error('Error loading employee data:', employeeError);
-        throw employeeError;
-      }
-
-      console.log('Successfully loaded payroll data:', {
-        settings: !!settingsData,
-        employees: employeeData?.length || 0,
-        payrollRuns: runsData?.length || 0
-      });
 
       setSettings(settingsData);
       setEmployees(employeeData || []);
       setPayrollRuns(runsData || []);
 
-      // FIXED: Safe action recording
       try {
         if (recordAction && typeof recordAction === 'function') {
           await recordAction('load_payroll_data', true);
@@ -179,15 +343,16 @@ export const usePayrollCalculations = (businessId) => {
     }
   }, [businessId, recordAction]);
 
-  /**
-   * FIXED: Calculate employee pay with comprehensive error handling
-   * @param {Object} employee - Employee object with wage and premium data
-   * @param {Object} hours - Hours object with regular_hours, overtime_hours, lieu_hours, premiums
-   * @param {Object} yearToDate - Year-to-date totals for accurate tax calculations
-   * @param {number} additionalFedTaxAmount - Additional federal tax amount per period
-   * @returns {Object} Calculated pay breakdown with CRA compliant taxes
-   */
-  const calculateEmployeePay = useCallback(async (employee, hours, yearToDate = {}, additionalFedTaxAmount = 0) => {
+  // ============================================================
+  // CALCULATE EMPLOYEE PAY - WITH LIEU TIME FIX
+  // ============================================================
+  const calculateEmployeePay = useCallback(async (
+    employee, 
+    hours, 
+    yearToDate = {}, 
+    additionalFedTaxAmount = 0,
+    payPeriod = null
+  ) => {
     const defaultResult = {
       employee_id: employee?.id || null,
       regular_hours: 0,
@@ -209,6 +374,13 @@ export const usePayrollCalculations = (businessId) => {
       ei_premium: 0,
       total_deductions: 0,
       net_pay: 0,
+      regular_hours_worked: 0,
+      regular_hours_paid: 0,
+      lieu_earned: 0,
+      lieu_used: 0,
+      lieu_balance_before: 0,
+      lieu_balance_after: 0,
+      stat_holiday_hours: 0,
       year_to_date: {
         gross: 0,
         cpp: 0,
@@ -216,29 +388,24 @@ export const usePayrollCalculations = (businessId) => {
         federal_tax: 0,
         provincial_tax: 0
       },
-      calculation_details: {
-        calculation_method: 'error_fallback',
-        is_cra_compliant: false
-      }
+      wage_breakdown: [],
+      lieu_calculation: null,
+      has_wage_changes: false,
+      calculation_method: 'error_fallback'
     };
 
     if (!employee || !hours || !settings) {
-      console.warn('Missing required data for payroll calculation:', {
-        hasEmployee: !!employee,
-        hasHours: !!hours,
-        hasSettings: !!settings
-      });
       return defaultResult;
     }
 
     try {
-      // FIXED: Removed rate limiting that was causing errors
-      
       const {
+        total_hours = 0,
         regular_hours = 0,
         overtime_hours = 0,
-        lieu_hours = 0,
-        premiums = {}
+        stat_worked_hours = 0,
+        premiums = {},
+        wage_period_hours = []
       } = hours;
 
       const {
@@ -249,29 +416,212 @@ export const usePayrollCalculations = (businessId) => {
         yearToDateProvincialTax = 0
       } = yearToDate;
 
-      // FIXED: Safe property access with fallbacks
       const baseWage = parseFloat(employee.wage || 0);
       const vacationPercent = parseFloat(employee.vacation_percent || settings.default_vacation_percent || 0.04);
-      const overtimeThreshold = parseFloat(settings.overtime_threshold || 40);
       const overtimeMultiplier = parseFloat(settings.overtime_multiplier || 1.5);
       const claimCode = parseInt(employee.claim_code || settings.default_claim_code || 1);
       const additionalFedTax = parseFloat(additionalFedTaxAmount || 0);
+      const jurisdiction = settings.tax_jurisdiction || 'ON';
 
-      // FIXED: Simple input validation without async security context
       if (baseWage <= 0) {
-        throw new Error('Employee wage must be greater than 0');
+        return defaultResult;
       }
 
-      if (regular_hours < 0 || overtime_hours < 0 || lieu_hours < 0) {
-        throw new Error('Hours cannot be negative');
+      // Calculate total hours
+      let actualTotalHours = total_hours;
+      let actualOvertimeHours = overtime_hours;
+      let actualRegularHours = regular_hours;
+
+      if (wage_period_hours && Array.isArray(wage_period_hours) && wage_period_hours.length > 0) {
+        actualRegularHours = wage_period_hours.reduce((sum, period) => 
+          sum + (parseFloat(period.regular_hours) || 0), 0
+        );
+        actualOvertimeHours = wage_period_hours.reduce((sum, period) => 
+          sum + (parseFloat(period.overtime_hours) || 0), 0
+        );
+        actualTotalHours = actualRegularHours + actualOvertimeHours;
+      } else if (total_hours > 0) {
+        actualRegularHours = total_hours - overtime_hours;
+        actualOvertimeHours = overtime_hours;
       }
 
-      // Calculate gross pay components
-      const regularPay = regular_hours * baseWage;
-      const overtimePay = overtime_hours * baseWage * overtimeMultiplier;
-      const lieuPay = lieu_hours * baseWage;
+      // âœ… LIEU TIME CALCULATION (INDEPENDENT OF WAGE) - WITH AUTO-FILL + HOLIDAY PAY
+      let lieuEarned = 0;
+      let lieuUsed = 0;
+      let regularHoursPaid = actualRegularHours;
+      const lieuBalanceBefore = parseFloat(employee.lieu_time_balance || 0);
+      let lieuBalanceAfter = lieuBalanceBefore;
+      
+      // âœ… FIXED: Get holiday pay amount and convert to equivalent hours
+      const holidayPayAmount = parseFloat(hours.holiday_pay || 0);
+      const holidayPayHours = holidayPayAmount > 0 && baseWage > 0 ? 
+        (holidayPayAmount / baseWage) : 0;
+      
+      const lieuCalculation = {
+        enabled: employee.lieu_time_enabled || false,
+        maxHours: parseFloat(employee.max_paid_hours_per_period || 0),
+        totalWorkedHours: actualTotalHours,
+        statHours: parseFloat(stat_worked_hours || 0),
+        holidayPayHours: holidayPayHours,
+        lieuEarned: 0,
+        lieuUsed: 0,
+        lieuBalanceBefore: lieuBalanceBefore,
+        lieuBalanceAfter: lieuBalanceBefore
+      };
 
-      // Calculate premium pay
+      if (employee?.lieu_time_enabled) {
+        const maxHours = parseFloat(employee.max_paid_hours_per_period || 0);
+        const currentBalance = parseFloat(employee.lieu_time_balance || 0);
+        
+        // âœ… CRITICAL: Include ALL compensation hours (worked + stat + holiday pay)
+        const totalCompensationHours = actualTotalHours + parseFloat(stat_worked_hours || 0) + holidayPayHours;
+        
+        console.log('ðŸ” LIEU CALCULATION DEBUG:', {
+          employee: `${employee.first_name} ${employee.last_name}`,
+          maxHours: maxHours,
+          actualTotalHours: actualTotalHours,
+          statHours: parseFloat(stat_worked_hours || 0),
+          holidayPayAmount: holidayPayAmount,
+          holidayPayHours: holidayPayHours,
+          totalCompensationHours: totalCompensationHours,
+          currentLieuBalance: currentBalance
+        });
+        
+        if (maxHours > 0) {
+          if (totalCompensationHours > maxHours) {
+            // âœ… OVER MAX: Employee earns lieu time
+            lieuEarned = totalCompensationHours - maxHours;
+            regularHoursPaid = Math.max(0, maxHours - parseFloat(stat_worked_hours || 0) - actualOvertimeHours - holidayPayHours);
+            lieuBalanceAfter = currentBalance + lieuEarned;
+            
+            console.log('ðŸ’° LIEU EARNED:', {
+              earned: lieuEarned,
+              newBalance: lieuBalanceAfter
+            });
+          } else {
+            // âœ… UNDER MAX: Auto-fill with lieu time to reach max hours
+            const shortfall = maxHours - totalCompensationHours;
+            lieuUsed = Math.min(shortfall, currentBalance);
+            regularHoursPaid = actualRegularHours;  // FIX: Don't add lieu hours - paid separately as lieuPay
+            lieuBalanceAfter = currentBalance - lieuUsed;
+            
+            console.log('ðŸ”„ LIEU AUTO-USED:', {
+              shortfall: shortfall,
+              lieuUsed: lieuUsed,
+              regularHoursPaid: regularHoursPaid,
+              newBalance: lieuBalanceAfter
+            });
+          }
+        }
+
+        lieuCalculation.lieuEarned = lieuEarned;
+        lieuCalculation.lieuUsed = lieuUsed;
+        lieuCalculation.lieuBalanceAfter = lieuBalanceAfter;
+      }
+
+      // Check for wage changes
+      let wagePeriods = [];
+      let hasWageChanges = false;
+      
+      if (payPeriod && payPeriod.start && payPeriod.end && wageHistory) {
+        try {
+          wagePeriods = await wageHistory.getWagePeriodsInRange(
+            employee.id,
+            payPeriod.start,
+            payPeriod.end
+          );
+          
+          hasWageChanges = wagePeriods.length > 1;
+          
+          if (hasWageChanges) {
+            console.log(`ðŸ’° WAGE CHANGE DETECTED for ${employee.first_name} ${employee.last_name}`);
+          }
+        } catch (wageError) {
+          console.error('Error getting wage periods:', wageError);
+          wagePeriods = [];
+          hasWageChanges = false;
+        }
+      }
+
+      // âœ… CALCULATE PAY WITH LIEU TIME FIX
+      let regularPay = 0;
+      let overtimePay = 0;
+      let lieuPay = 0;
+      let wageBreakdown = [];
+
+      if (hasWageChanges && wagePeriods.length > 0) {
+        // WAGE CHANGED MID-PERIOD
+        const regularSplits = wageHistory.splitHoursAcrossPeriods(regularHoursPaid, wagePeriods);
+        const overtimeSplits = wageHistory.splitHoursAcrossPeriods(actualOvertimeHours, wagePeriods);
+        
+        // âœ… LIEU TIME: Pay at HIGHEST wage rate
+        const highestWage = Math.max(...wagePeriods.map(p => p.wage));
+        lieuPay = lieuUsed * highestWage;
+
+        regularSplits.forEach((split, index) => {
+          const regAmount = split.hours * split.wage;
+          const otAmount = overtimeSplits[index].hours * split.wage * overtimeMultiplier;
+
+          regularPay += regAmount;
+          overtimePay += otAmount;
+
+          wageBreakdown.push({
+            period: `${split.startDate} to ${split.endDate}`,
+            wage: split.wage,
+            days_in_period: split.daysInPeriod,
+            regular_hours: split.hours,
+            regular_pay: regAmount,
+            overtime_hours: overtimeSplits[index].hours,
+            overtime_pay: otAmount,
+            lieu_hours: 0,
+            lieu_pay: 0,
+            subtotal: regAmount + otAmount,
+            is_lieu_payment: false
+          });
+        });
+        
+        // âœ… Add separate entry for lieu time
+        if (lieuUsed > 0) {
+          wageBreakdown.push({
+            period: `Lieu Time (paid @ $${highestWage.toFixed(2)}/hr)`,
+            wage: highestWage,
+            days_in_period: 0,
+            regular_hours: 0,
+            regular_pay: 0,
+            overtime_hours: 0,
+            overtime_pay: 0,
+            lieu_hours: lieuUsed,
+            lieu_pay: lieuPay,
+            subtotal: lieuPay,
+            is_lieu_payment: true
+          });
+        }
+
+        console.log(`   ðŸ’° Pay breakdown with lieu @ $${highestWage.toFixed(2)}/hr`);
+      } else {
+        // NO WAGE CHANGE
+        const wage = wagePeriods.length > 0 ? wagePeriods[0].wage : baseWage;
+        
+        regularPay = regularHoursPaid * wage;
+        overtimePay = actualOvertimeHours * wage * overtimeMultiplier;
+        lieuPay = lieuUsed * wage;
+
+        wageBreakdown.push({
+          period: payPeriod ? `${payPeriod.start} to ${payPeriod.end}` : 'Full period',
+          wage: wage,
+          days_in_period: wagePeriods[0]?.daysInPeriod || 14,
+          regular_hours: regularHoursPaid,
+          regular_pay: regularPay,
+          overtime_hours: actualOvertimeHours,
+          overtime_pay: overtimePay,
+          lieu_hours: lieuUsed,
+          lieu_pay: lieuPay,
+          subtotal: regularPay + overtimePay + lieuPay,
+          is_lieu_payment: false
+        });
+      }
+
+      // Calculate premiums
       let totalPremiumPay = 0;
       const premiumBreakdown = {};
       
@@ -287,524 +637,163 @@ export const usePayrollCalculations = (businessId) => {
               name: premiumData.name || `Premium ${premiumId}`,
               hours: premiumHours,
               rate: rate,
-              amount: premiumAmount,
-              applies_to_all_hours: premiumData.applies_to_all_hours || false
+              amount: premiumAmount
             };
           }
         });
       }
 
+      // Calculate totals
       const grossPay = regularPay + overtimePay + lieuPay + totalPremiumPay;
-
-      // Calculate vacation pay
       const vacationPay = settings.auto_calculate_vacation ? (grossPay * vacationPercent) : 0;
       const grossPayWithVacation = grossPay + vacationPay;
 
-      // Get CRA compliant tax calculations with fallback
       const payFrequency = settings.pay_frequency || 'weekly';
       const payPeriods = payFrequency === 'weekly' ? 52 : 
                         payFrequency === 'bi-weekly' ? 26 : 
-                        payFrequency === 'monthly' ? 12 : 52;
-      
-      const jurisdiction = settings.tax_jurisdiction || 'ON';
+                        payFrequency === 'monthly' ? 12 : 26;
 
-      let taxDeductions = {
-        federal_tax_period: 0,
-        provincial_tax_period: 0,
-        cpp_contribution: 0,
-        ei_premium: 0,
-        calculation_method: 'fallback_simplified'
-      };
-
-      // Try CRA compliant calculation first
-      if (canadianTax && canadianTax.calculateCRACompliantTaxes) {
-        try {
-          const craResult = await canadianTax.calculateCRACompliantTaxes({
-            grossPay: grossPayWithVacation,
-            payPeriods,
+      let taxDeductions = {};
+      try {
+        if (canadianTax && canadianTax.calculateTaxDeductions) {
+          taxDeductions = await canadianTax.calculateTaxDeductions(
+            grossPayWithVacation,
             claimCode,
             jurisdiction,
-            yearToDateTotals: {
+            payPeriods,
+            {
               yearToDateGross,
-              yearToDateFederalTax,
-              yearToDateProvincialTax,
-              yearToDateCPP,
-              yearToDateEI
-            },
-            employeeId: employee.id
-          });
-
-          if (craResult) {
-            taxDeductions = craResult;
-          }
-        } catch (craError) {
-          console.warn('CRA calculation failed, using fallback:', craError);
+              yearToDateEI,
+              yearToDateCPP
+            }
+          );
         }
-      }
-
-      // Fallback calculation if CRA method fails
-      if (!taxDeductions.federal_tax_period && !taxDeductions.provincial_tax_period) {
+      } catch (taxError) {
+        console.error('Tax calculation error:', taxError);
         taxDeductions = {
-          federal_tax_period: Math.max(0, (grossPayWithVacation - 310) * 0.15),
-          provincial_tax_period: Math.max(0, (grossPayWithVacation - 245) * 0.0505),
-          cpp_contribution: Math.max(0, Math.min((grossPayWithVacation - 67.31) * 0.0595, 74.36)),
+          federal_tax: Math.max(0, (grossPayWithVacation - 310) * 0.15),
+          provincial_tax: Math.max(0, (grossPayWithVacation - 245) * 0.0505),
           ei_premium: Math.min(grossPayWithVacation * 0.0164, 20.72),
+          cpp_contribution: Math.max(0, Math.min((grossPayWithVacation - 67.31) * 0.0595, 74.36)),
           calculation_method: 'fallback_simplified'
         };
       }
 
-      // Extract base tax amounts
-      const baseFederalTax = taxDeductions.federal_tax_period || 0;
-      const baseProvincialTax = taxDeductions.provincial_tax_period || 0;
-
-      // Calculate total federal tax (base + additional)
+      const baseFederalTax = parseFloat(taxDeductions.federal_tax || 0);
       const totalFederalTax = baseFederalTax + additionalFedTax;
-
-      // Calculate total deductions
-      const totalDeductions = totalFederalTax + baseProvincialTax + 
-                             (taxDeductions.cpp_contribution || 0) + 
-                             (taxDeductions.ei_premium || 0);
-
-      const netPay = grossPayWithVacation - totalDeductions;
-
-      // Calculate year-to-date totals
-      const newYearToDateGross = yearToDateGross + grossPayWithVacation;
-      const newYearToDateFederalTax = yearToDateFederalTax + totalFederalTax;
-      const newYearToDateProvincialTax = yearToDateProvincialTax + baseProvincialTax;
-      const newYearToDateCPP = yearToDateCPP + (taxDeductions.cpp_contribution || 0);
-      const newYearToDateEI = yearToDateEI + (taxDeductions.ei_premium || 0);
-
-      // Get claim code information safely
-      let claimCodeInfo = {
-        code: claimCode,
-        description: `Claim Code ${claimCode}`,
-        jurisdiction
-      };
-
-      try {
-        if (canadianTax && canadianTax.getClaimCodeInfo) {
-          claimCodeInfo = canadianTax.getClaimCodeInfo(claimCode, jurisdiction) || claimCodeInfo;
-        }
-      } catch (error) {
-        console.warn('Failed to get claim code info:', error);
-      }
-
-      // Validate CRA compliance safely
-      let complianceCheck = {
-        is_cra_compliant: taxDeductions.calculation_method !== 'fallback_simplified',
-        warnings: [],
-        errors: []
-      };
-
-      try {
-        if (canadianTax && canadianTax.validateCRACompliance) {
-          complianceCheck = await canadianTax.validateCRACompliance({
-            grossPay: grossPayWithVacation,
-            taxDeductions,
-            claimCode,
-            jurisdiction
-          }) || complianceCheck;
-        }
-      } catch (error) {
-        console.warn('Failed to validate CRA compliance:', error);
-      }
-
-      // FIXED: Safe action recording
-      try {
-        if (recordAction && typeof recordAction === 'function') {
-          await recordAction('calculate_employee_pay', true);
-        }
-      } catch (actionError) {
-        console.warn('Failed to record action:', actionError);
-      }
+      const baseProvincialTax = parseFloat(taxDeductions.provincial_tax || 0);
+      const ontarioHealthPremium = parseFloat(taxDeductions.ontario_health_premium || 0);
+      const totalDeductions = totalFederalTax + baseProvincialTax + ontarioHealthPremium + 
+                             (taxDeductions.ei_premium || 0) + (taxDeductions.cpp_contribution || 0);
+      const netPay = Math.max(0, grossPayWithVacation - totalDeductions);
 
       return {
-        // Basic pay components
         employee_id: employee.id,
-        regular_hours,
-        overtime_hours,
-        lieu_hours,
+        regular_hours: actualRegularHours,
+        regular_hours_worked: actualRegularHours,
+        regular_hours_paid: regularHoursPaid,
+        overtime_hours: actualOvertimeHours,
+        lieu_hours: lieuUsed,
+        lieu_earned: lieuEarned,
+        lieu_used: lieuUsed,
+        lieu_balance_before: lieuBalanceBefore,
+        lieu_balance_after: lieuBalanceAfter,
+        stat_holiday_hours: parseFloat(stat_worked_hours || 0),
         regular_pay: regularPay,
         overtime_pay: overtimePay,
         lieu_pay: lieuPay,
         premium_pay: totalPremiumPay,
         premium_breakdown: premiumBreakdown,
-        
-        // Gross pay
         gross_pay: grossPay,
         vacation_pay: vacationPay,
         gross_pay_with_vacation: grossPayWithVacation,
-        
-        // Tax deductions
         federal_tax: baseFederalTax,
         additional_federal_tax: additionalFedTax,
         total_federal_tax: totalFederalTax,
         provincial_tax: baseProvincialTax,
+        ontario_health_premium: ontarioHealthPremium,
         cpp_contribution: taxDeductions.cpp_contribution || 0,
         ei_premium: taxDeductions.ei_premium || 0,
         total_deductions: totalDeductions,
-        
-        // Net pay
-        net_pay: Math.max(0, netPay),
-        
-        // Year-to-date totals
+        net_pay: netPay,
         year_to_date: {
-          gross: newYearToDateGross,
-          cpp: newYearToDateCPP,
-          ei: newYearToDateEI,
-          federal_tax: newYearToDateFederalTax,
-          provincial_tax: newYearToDateProvincialTax
+          gross: yearToDateGross + grossPayWithVacation,
+          cpp: yearToDateCPP + (taxDeductions.cpp_contribution || 0),
+          ei: yearToDateEI + (taxDeductions.ei_premium || 0),
+          federal_tax: yearToDateFederalTax + totalFederalTax,
+          provincial_tax: yearToDateProvincialTax + baseProvincialTax
         },
-        
-        // CRA compliance information
-        cra_compliance: complianceCheck,
-        claim_code_info: claimCodeInfo,
-        tax_calculation_details: taxDeductions,
-        
-        // Calculation metadata
-        calculation_details: {
-          wage: baseWage, 
-          vacation_percent: vacationPercent,
-          overtime_threshold: overtimeThreshold,
-          overtime_multiplier: overtimeMultiplier,
-          pay_frequency: payFrequency,
-          pay_periods: payPeriods,
-          jurisdiction,
-          calculation_timestamp: new Date().toISOString(),
-          calculation_method: taxDeductions.calculation_method || 'unknown',
-          is_cra_compliant: complianceCheck.is_cra_compliant || false,
-          tavari_build_standards: {
-            security_validated: true,
-            authentication_checked: true,
-            tax_calculations: taxDeductions.calculation_method === 'fallback_simplified' ? 'fallback' : 'cra_t4127_compliant'
-          }
-        }
+        wage_breakdown: wageBreakdown,
+        lieu_calculation: lieuCalculation,
+        has_wage_changes: hasWageChanges,
+        calculation_method: taxDeductions.calculation_method || 'cra_compliant'
       };
 
-    } catch (err) {
-      console.error('Error calculating employee pay:', err);
-      
-      try {
-        if (recordAction && typeof recordAction === 'function') {
-          await recordAction('calculate_employee_pay', false);
-        }
-      } catch (actionError) {
-        console.warn('Failed to record error action:', actionError);
-      }
-
-      return {
-        ...defaultResult,
-        employee_id: employee?.id || null,
-        calculation_details: {
-          ...defaultResult.calculation_details,
-          error: err.message,
-          calculation_timestamp: new Date().toISOString()
-        }
-      };
+    } catch (error) {
+      console.error('Error in calculateEmployeePay:', error);
+      return defaultResult;
     }
-  }, [settings, canadianTax, recordAction, validateInput]);
+  }, [settings, wageHistory, canadianTax, recordAction]);
 
-  /**
-   * FIXED: Safe settings initialization
-   */
-  const initializeSettings = useCallback(async () => {
-    if (!businessId) return null;
-
-    try {
-      // Check if settings already exist
-      if (settings) {
-        return settings;
-      }
-
-      console.log('Initializing payroll settings for business:', businessId);
-
-      // Try the database function first
-      try {
-        const { data, error } = await supabase
-          .rpc('get_or_create_payroll_settings', { 
-            business_uuid: businessId 
-          });
-
-        if (!error && data) {
-          await loadData();
-          return data;
-        }
-      } catch (rpcError) {
-        console.warn('RPC function failed, trying manual creation:', rpcError);
-      }
-
-      // Fallback: create settings manually
-      const defaultSettings = {
-        business_id: businessId,
-        pay_frequency: 'weekly',
-        pay_period_cutoff_day: 0,
-        default_vacation_percent: 0.0400,
-        default_claim_code: 1,
-        overtime_threshold: 40.00,
-        overtime_multiplier: 1.50,
-        enable_lieu_time: false,
-        auto_calculate_vacation: true,
-        use_cra_tax_tables: true,
-        tax_jurisdiction: 'ON',
-        tax_year: 2025,
-        cra_document_version: 'T4127-121st-Edition',
-        effective_date: '2025-07-01',
-        created_by: authUser?.id,
-        updated_by: authUser?.id
-      };
-
-      const { data: manualData, error: manualError } = await supabase
-        .from('hrpayroll_settings')
-        .upsert(defaultSettings)
-        .select()
-        .single();
-
-      if (manualError) {
-        console.error('Failed to create settings manually:', manualError);
-        throw manualError;
-      }
-
-      await loadData();
-      return manualData;
-        
-    } catch (err) {
-      console.error('Error initializing settings:', err);
-      return null;
-    }
-  }, [businessId, loadData, settings, authUser]);
-
-  /**
-   * FIXED: Safe settings update
-   */
-  const updateSettings = useCallback(async (newSettings) => {
-    if (!businessId || !newSettings) return null;
-
-    try {
-      const { data, error } = await supabase
-        .from('hrpayroll_settings')
-        .upsert({
-          ...newSettings,
-          business_id: businessId,
-          updated_by: authUser?.id,
-          updated_at: new Date().toISOString()
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      setSettings(data);
-      return data;
-
-    } catch (err) {
-      console.error('Error updating settings:', err);
-      throw err;
-    }
-  }, [businessId, authUser]);
-
-  /**
-   * FIXED: Safe employee premium update
-   */
-  const updateEmployeePremium = useCallback(async (userId, premiumData) => {
-    if (!businessId || !userId || !premiumData) return;
-
-    try {
-      const { error } = await supabase
-        .from('hrpayroll_employee_premiums')
-        .upsert({
-          business_id: businessId,
-          user_id: userId,
-          ...premiumData,
-          updated_at: new Date().toISOString(),
-          updated_by: authUser?.id
-        });
-
-      if (error) throw error;
-
-      await loadData();
-      
-    } catch (err) {
-      console.error('Error updating premium:', err);
-      throw err;
-    }
-  }, [businessId, loadData, authUser]);
-
-  /**
-   * Calculate payroll summary for multiple employees
-   */
   const calculatePayrollSummary = useCallback((payrollEntries) => {
     if (!Array.isArray(payrollEntries)) {
       return {
         totalEmployees: 0,
         totalHours: 0,
-        totalRegularPay: 0,
-        totalOvertimePay: 0,
-        totalPremiumPay: 0,
         totalGrossPay: 0,
-        totalVacationPay: 0,
-        totalDeductions: 0,
-        totalNetPay: 0,
-        totalFederalTax: 0,
-        totalProvincialTax: 0,
-        totalEI: 0,
-        totalCPP: 0,
-        craCompliantEntries: 0,
-        totalComplianceWarnings: 0,
-        totalComplianceErrors: 0
+        totalNetPay: 0
       };
     }
 
     return payrollEntries.reduce((summary, entry) => {
-      if (!entry || typeof entry !== 'object') return summary;
-
       return {
         totalEmployees: summary.totalEmployees + 1,
         totalHours: summary.totalHours + (parseFloat(entry.total_hours) || 0),
-        totalRegularPay: summary.totalRegularPay + (parseFloat(entry.regular_pay) || 0),
-        totalOvertimePay: summary.totalOvertimePay + (parseFloat(entry.overtime_pay) || 0),
-        totalPremiumPay: summary.totalPremiumPay + (parseFloat(entry.premium_pay) || 0),
         totalGrossPay: summary.totalGrossPay + (parseFloat(entry.gross_pay) || 0),
-        totalVacationPay: summary.totalVacationPay + (parseFloat(entry.vacation_pay) || 0),
-        totalDeductions: summary.totalDeductions + (parseFloat(entry.total_deductions) || 0),
-        totalNetPay: summary.totalNetPay + (parseFloat(entry.net_pay) || 0),
-        totalFederalTax: summary.totalFederalTax + (parseFloat(entry.total_federal_tax) || 0),
-        totalProvincialTax: summary.totalProvincialTax + (parseFloat(entry.provincial_tax) || 0),
-        totalEI: summary.totalEI + (parseFloat(entry.ei_premium) || 0),
-        totalCPP: summary.totalCPP + (parseFloat(entry.cpp_contribution) || 0),
-        craCompliantEntries: summary.craCompliantEntries + (entry.cra_compliance?.is_cra_compliant ? 1 : 0),
-        totalComplianceWarnings: summary.totalComplianceWarnings + (entry.cra_compliance?.warnings?.length || 0),
-        totalComplianceErrors: summary.totalComplianceErrors + (entry.cra_compliance?.errors?.length || 0)
+        totalNetPay: summary.totalNetPay + (parseFloat(entry.net_pay) || 0)
       };
     }, {
       totalEmployees: 0,
       totalHours: 0,
-      totalRegularPay: 0,
-      totalOvertimePay: 0,
-      totalPremiumPay: 0,
       totalGrossPay: 0,
-      totalVacationPay: 0,
-      totalDeductions: 0,
-      totalNetPay: 0,
-      totalFederalTax: 0,
-      totalProvincialTax: 0,
-      totalEI: 0,
-      totalCPP: 0,
-      craCompliantEntries: 0,
-      totalComplianceWarnings: 0,
-      totalComplianceErrors: 0
+      totalNetPay: 0
     });
   }, []);
 
-  /**
-   * FIXED: Safe input validation
-   */
   const validatePayrollInputs = useCallback(async (employee, hours) => {
     const errors = [];
     const warnings = [];
 
-    try {
-      if (!employee) {
-        errors.push('Employee data is required');
-      } else {
-        const wage = parseFloat(employee.wage);
-        if (!wage || wage <= 0) {
-          errors.push('Employee must have a valid wage');
-        }
-        
-        const claimCode = parseInt(employee.claim_code || 1);
-        if (claimCode < 0 || claimCode > 10) {
-          errors.push('Claim code must be between 0 and 10');
-        }
-      }
-
-      if (!hours) {
-        errors.push('Hours data is required');
-      } else {
-        const totalHours = (parseFloat(hours.regular_hours) || 0) + (parseFloat(hours.overtime_hours) || 0);
-        if (totalHours <= 0) {
-          errors.push('Employee must have at least some hours worked');
-        }
-        
-        if ((hours.regular_hours || 0) < 0 || (hours.overtime_hours || 0) < 0 || (hours.lieu_hours || 0) < 0) {
-          errors.push('Hours cannot be negative');
-        }
-
-        // Check maximum paid hours per period if set
-        const maxHours = parseFloat(employee?.max_paid_hours_per_period);
-        if (maxHours && totalHours > maxHours) {
-          warnings.push(`Total hours (${totalHours}) exceeds maximum paid hours per period (${maxHours}). Excess will become lieu time.`);
-        }
-
-        // Validate overtime threshold
-        const overtimeThreshold = parseFloat(settings?.overtime_threshold);
-        if (overtimeThreshold && (hours.regular_hours || 0) > overtimeThreshold) {
-          errors.push(`Regular hours (${hours.regular_hours}) exceed overtime threshold (${overtimeThreshold}). Consider moving excess hours to overtime.`);
-        }
-      }
-
-      // Additional CRA compliance checks (safe)
-      try {
-        if (canadianTax && canadianTax.validateCRACompliance) {
-          const complianceResult = await canadianTax.validateCRACompliance({
-            employee,
-            hours,
-            settings
-          });
-          
-          if (complianceResult.warnings) {
-            warnings.push(...complianceResult.warnings);
-          }
-          
-          if (complianceResult.errors) {
-            errors.push(...complianceResult.errors);
-          }
-        }
-      } catch (complianceError) {
-        console.warn('CRA compliance check failed:', complianceError);
-        warnings.push('Unable to validate CRA compliance');
-      }
-
-    } catch (err) {
-      console.error('Error validating payroll inputs:', err);
-      errors.push('Validation failed due to system error');
+    if (!employee) {
+      errors.push('Employee data is required');
+    }
+    if (!hours) {
+      errors.push('Hours data is required');
     }
 
     return {
       isValid: errors.length === 0,
       errors,
-      warnings,
-      hasWarnings: warnings.length > 0
+      warnings
     };
-  }, [settings, canadianTax]);
+  }, []);
 
-  // Initialize data when component mounts
   useEffect(() => {
     loadData();
   }, [loadData]);
 
   return {
-    // Data state
     settings,
     employees,
     payrollRuns,
     loading,
     error,
-    
-    // Core calculation functions
     calculateEmployeePay,
     calculatePayrollSummary,
     validatePayrollInputs,
-    
-    // Settings management
-    initializeSettings,
-    updateSettings,
-    
-    // Employee management
-    updateEmployeePremium,
-    
-    // Data management
     refreshData: loadData,
-    loadData
+    loadData,
+    wageHistory
   };
 };
 

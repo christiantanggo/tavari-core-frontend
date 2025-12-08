@@ -26,7 +26,6 @@ const EnhancedEmployeeTaxReportTab = ({ selectedBusinessId, businessData }) => {
     generateComprehensiveReport
   } = useEETRTData(selectedBusinessId, businessData);
 
-  // Security and Auth contexts
   const security = useSecurityContext({
     componentName: 'EnhancedEmployeeTaxReportTab',
     sensitiveComponent: true,

@@ -1,16 +1,32 @@
+// src/screens/Music/ScheduleCalendarView.jsx - WITH PERMISSION SYSTEM INTEGRATION
 import React, { useState } from 'react';
 import { supabase } from '../../supabaseClient';
-import { FiPlus, FiCalendar, FiClock, FiAlertTriangle, FiX, FiChevronLeft, FiChevronRight } from 'react-icons/fi';
+import { FiPlus, FiCalendar, FiClock, FiAlertTriangle, FiX, FiChevronLeft, FiChevronRight, FiLock } from 'react-icons/fi';
 import styles from './PlaylistManager.module.css';
+import TavariCheckbox from '../../components/UI/TavariCheckbox';
+import toast from 'react-hot-toast';
 
-const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate }) => {
+/**
+ * Schedule Calendar View - Visual week calendar for schedules
+ * Receives permissions from parent MusicSchedules component
+ */
+const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate, permissions }) => {
   // Debug logging
   console.log('ScheduleCalendarView Props:', {
     schedules: schedules,
     playlists: playlists,
     schedulesLength: schedules?.length,
-    playlistsLength: playlists?.length
+    playlistsLength: playlists?.length,
+    permissions
   });
+
+  // Destructure permissions passed from parent
+  const {
+    canManage = false,
+    canCreate = false,
+    canEdit = false,
+    canDelete = false
+  } = permissions || {};
 
   const [selectedTimeSlot, setSelectedTimeSlot] = useState(null);
   const [showCalendarScheduleModal, setShowCalendarScheduleModal] = useState(false);
@@ -37,6 +53,38 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
     repeat_type: 'once',
     repeat_until: null
   });
+
+  // Handle loop playlist change
+  const handleLoopPlaylistChange = (checked) => {
+    if (checked) {
+      setScheduleForm(prev => ({ 
+        ...prev, 
+        loop_playlist: true,
+        stop_when_complete: false
+      }));
+    } else {
+      setScheduleForm(prev => ({ 
+        ...prev, 
+        loop_playlist: false
+      }));
+    }
+  };
+
+  // Handle stop when complete change
+  const handleStopWhenCompleteChange = (checked) => {
+    if (checked) {
+      setScheduleForm(prev => ({ 
+        ...prev, 
+        stop_when_complete: true,
+        loop_playlist: false
+      }));
+    } else {
+      setScheduleForm(prev => ({ 
+        ...prev, 
+        stop_when_complete: false
+      }));
+    }
+  };
 
   // Time slots for calendar (24-hour format)
   const timeSlots = [];
@@ -68,13 +116,6 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
     { id: 6, name: 'Saturday', short: 'Sat' }
   ];
 
-  // Quick day selections
-  const quickDaySelections = [
-    { name: 'Weekdays', days: [1, 2, 3, 4, 5] },
-    { name: 'Weekend', days: [0, 6] },
-    { name: 'All Week', days: [0, 1, 2, 3, 4, 5, 6] }
-  ];
-
   // Navigation functions
   const goToPreviousWeek = () => {
     const newWeekStart = new Date(currentWeekStart);
@@ -103,7 +144,6 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
     const newStart = new Date(`2000-01-01T${newSchedule.start_time}`);
     const newEnd = new Date(`2000-01-01T${newSchedule.end_time}`);
 
-    // Filter schedules for the same date
     const schedulesOnDate = schedules.filter(s => {
       if (newSchedule.schedule_date) {
         return s.schedule_date === newSchedule.schedule_date;
@@ -115,7 +155,6 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
       const existingStart = new Date(`2000-01-01T${existing.start_time}`);
       const existingEnd = new Date(`2000-01-01T${existing.end_time}`);
       
-      // Check for time overlap
       if ((newStart < existingEnd && newEnd > existingStart)) {
         conflicts.push(existing);
       }
@@ -124,16 +163,26 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
     return conflicts;
   };
 
-  // Create schedule
+  // Create schedule with permission check
   const createSchedule = async (e) => {
     e.preventDefault();
-    if (!business?.id || !scheduleForm.playlist_id || !scheduleForm.schedule_date) return;
+
+    // Permission check
+    if (!canCreate) {
+      toast.error('You do not have permission to create schedules');
+      return;
+    }
+
+    if (!business?.id || !scheduleForm.playlist_id || !scheduleForm.schedule_date) {
+      toast.error('Please fill in all required fields');
+      return;
+    }
 
     try {
       // Check for conflicts
       const conflicts = checkScheduleConflicts(scheduleForm);
       if (conflicts.length > 0) {
-        const confirmCreate = confirm(`Warning: This schedule conflicts with ${conflicts.length} existing schedule(s). Continue anyway?`);
+        const confirmCreate = window.confirm(`Warning: This schedule conflicts with ${conflicts.length} existing schedule(s). Continue anyway?`);
         if (!confirmCreate) return;
       }
 
@@ -179,9 +228,11 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
         repeat_type: 'once',
         repeat_until: null
       });
+
+      toast.success('Schedule created successfully');
     } catch (error) {
       console.error('Error creating schedule:', error);
-      alert('Error creating schedule: ' + error.message);
+      toast.error('Error creating schedule: ' + error.message);
     }
   };
 
@@ -210,8 +261,14 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
     return `${formatDate(currentWeekStart)} - ${formatDate(endDate)}, ${currentWeekStart.getFullYear()}`;
   };
 
-  // Handle calendar time slot click
+  // Handle calendar time slot click with permission check
   const handleTimeSlotClick = (dateIndex, time) => {
+    // Permission check
+    if (!canCreate) {
+      toast.error('You do not have permission to create schedules');
+      return;
+    }
+
     const selectedDate = weekDates[dateIndex];
     const dateString = selectedDate.toISOString().split('T')[0];
     
@@ -237,99 +294,55 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
     const selectedDate = weekDates[dateIndex];
     const dateString = selectedDate.toISOString().split('T')[0];
     
-    console.log('Looking for schedule:', {
-      dateString,
-      time,
-      totalSchedules: schedules.length,
-      schedules: schedules
-    });
-    
     const matchingSchedule = schedules.find(schedule => {
-      console.log('Checking schedule:', {
-        scheduleDate: schedule.schedule_date,
-        scheduleStart: schedule.start_time,
-        scheduleEnd: schedule.end_time,
-        repeatType: schedule.repeat_type,
-        currentTime: time,
-        currentDate: dateString
-      });
-      
-      // Check if this time slot matches this schedule
       const scheduleStart = schedule.start_time;
       const scheduleEnd = schedule.end_time;
       
-      // Time comparison - check if current time falls within schedule time range
       const timeInRange = time >= scheduleStart && time < scheduleEnd;
-      console.log('Time in range:', timeInRange, `${time} >= ${scheduleStart} && ${time} < ${scheduleEnd}`);
       
       if (!timeInRange) {
         return false;
       }
       
-      // Check if this date matches based on repeat type
       const scheduleDate = new Date(schedule.schedule_date + 'T00:00:00');
       const currentDate = new Date(dateString + 'T00:00:00');
       
       switch (schedule.repeat_type) {
         case 'once':
-          const isExactDate = schedule.schedule_date === dateString;
-          console.log('Once type match:', isExactDate);
-          return isExactDate;
+          return schedule.schedule_date === dateString;
           
         case 'daily':
-          // Show if current date is on or after schedule date
           if (currentDate < scheduleDate) return false;
-          // Check if repeat_until is set and we haven't passed it
           if (schedule.repeat_until) {
             const repeatUntil = new Date(schedule.repeat_until + 'T00:00:00');
             if (currentDate > repeatUntil) return false;
           }
-          console.log('Daily type match: true');
           return true;
           
         case 'weekly':
-          // Show if current date is on or after schedule date and same day of week
           if (currentDate < scheduleDate) return false;
           if (currentDate.getDay() !== scheduleDate.getDay()) return false;
-          // Check if repeat_until is set and we haven't passed it
           if (schedule.repeat_until) {
             const repeatUntil = new Date(schedule.repeat_until + 'T00:00:00');
             if (currentDate > repeatUntil) return false;
           }
-          console.log('Weekly type match: true');
           return true;
           
         case 'monthly':
-          // Show if current date is on or after schedule date and same day of month
           if (currentDate < scheduleDate) return false;
           if (currentDate.getDate() !== scheduleDate.getDate()) return false;
-          // Check if repeat_until is set and we haven't passed it
           if (schedule.repeat_until) {
             const repeatUntil = new Date(schedule.repeat_until + 'T00:00:00');
             if (currentDate > repeatUntil) return false;
           }
-          console.log('Monthly type match: true');
           return true;
           
         default:
-          const defaultMatch = schedule.schedule_date === dateString;
-          console.log('Default type match:', defaultMatch);
-          return defaultMatch;
+          return schedule.schedule_date === dateString;
       }
     });
 
-    console.log('Found matching schedule:', matchingSchedule);
-
-    // The schedule already has playlist_name and playlist_color from the parent component
-    if (matchingSchedule) {
-      console.log('Returning schedule with existing playlist data:', {
-        name: matchingSchedule.playlist_name,
-        color: matchingSchedule.playlist_color
-      });
-      return matchingSchedule;
-    }
-
-    return null;
+    return matchingSchedule || null;
   };
 
   // Check if date is today
@@ -340,6 +353,25 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
 
   return (
     <div>
+      {/* Permission Notice */}
+      {!canCreate && (
+        <div style={{
+          padding: '16px',
+          backgroundColor: '#EFF6FF',
+          border: '2px solid #3B82F6',
+          borderRadius: '8px',
+          marginBottom: '24px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px'
+        }}>
+          <FiLock size={20} style={{ color: '#1E40AF' }} />
+          <span style={{ color: '#1E40AF', fontWeight: '500' }}>
+            View Only Mode - You can view schedules but cannot create new ones. Contact your administrator for schedule management access.
+          </span>
+        </div>
+      )}
+
       {/* Calendar Description and Navigation */}
       <div className={styles.playlistCard} style={{ marginBottom: '30px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
@@ -373,7 +405,9 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
             Week of {formatWeekRange()}
           </p>
           <p className={styles.playlistDescription}>
-            Click on any time slot to create a new schedule for that specific date and time
+            {canCreate 
+              ? 'Click on any time slot to create a new schedule for that specific date and time'
+              : 'View-only mode - schedule creation requires additional permissions'}
           </p>
         </div>
       </div>
@@ -441,15 +475,16 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
               {weekDates.map((date, dateIndex) => {
                 const schedule = getScheduleForTimeSlot(dateIndex, time);
                 const isPastDate = date < new Date().setHours(0, 0, 0, 0);
+                const isClickable = canCreate && !isPastDate;
                 
                 return (
                   <div
                     key={`${dateIndex}-${time}`}
-                    onClick={() => !isPastDate && handleTimeSlotClick(dateIndex, time)}
+                    onClick={() => isClickable && handleTimeSlotClick(dateIndex, time)}
                     style={{
                       padding: '8px',
                       minHeight: '60px',
-                      cursor: isPastDate ? 'not-allowed' : 'pointer',
+                      cursor: isClickable ? 'pointer' : isPastDate ? 'not-allowed' : 'default',
                       border: '1px solid #e5e7eb',
                       backgroundColor: schedule 
                         ? `${schedule.playlist_color}20` 
@@ -463,15 +498,15 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
                       alignItems: 'center',
                       justifyContent: 'center',
                       transition: 'all 0.2s ease',
-                      opacity: isPastDate ? 0.6 : 1
+                      opacity: isPastDate ? 0.6 : !canCreate && !schedule ? 0.8 : 1
                     }}
                     onMouseEnter={(e) => {
-                      if (!schedule && !isPastDate) {
+                      if (isClickable && !schedule) {
                         e.target.style.backgroundColor = '#f0fdfa';
                       }
                     }}
                     onMouseLeave={(e) => {
-                      if (!schedule && !isPastDate) {
+                      if (isClickable && !schedule) {
                         e.target.style.backgroundColor = isToday(date) ? '#f0fdfa' : '#ffffff';
                       }
                     }}
@@ -480,7 +515,9 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
                         ? `${schedule.playlist_name} (${formatTime(schedule.start_time)} - ${formatTime(schedule.end_time)})` 
                         : isPastDate 
                           ? 'Past date' 
-                          : `Click to create schedule for ${formatDate(date)}`
+                          : canCreate
+                            ? `Click to create schedule for ${formatDate(date)}`
+                            : 'View only - permission required to create schedules'
                     }
                   >
                     {schedule ? (
@@ -501,8 +538,10 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
                           {formatTime(schedule.start_time)} - {formatTime(schedule.end_time)}
                         </div>
                       </div>
-                    ) : !isPastDate ? (
+                    ) : !isPastDate && canCreate ? (
                       <FiPlus style={{ color: '#14B8A6', fontSize: '1.2rem' }} />
+                    ) : !isPastDate && !canCreate ? (
+                      <FiLock style={{ color: '#9CA3AF', fontSize: '1rem' }} />
                     ) : null}
                   </div>
                 );
@@ -538,7 +577,7 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
       </div>
 
       {/* Create Schedule Modal */}
-      {showCalendarScheduleModal && (
+      {showCalendarScheduleModal && canCreate && (
         <div className={styles.modalOverlay}>
           <div className={styles.modal}>
             <div className={styles.modalHeader}>
@@ -630,39 +669,32 @@ const ScheduleCalendarView = ({ schedules, playlists, business, onScheduleUpdate
                   onChange={(e) => setScheduleForm(prev => ({ ...prev, priority: parseInt(e.target.value) }))}
                   className={styles.input}
                 />
-                <small style={{ color: '#6b7280', fontSize: '0.8rem' }}>Higher numbers = higher priority when schedules overlap</small>
+                <small style={{ color: '#6b7280', fontSize: '0.8rem' }}>
+                  Higher numbers = higher priority when schedules overlap
+                </small>
               </div>
 
               <div className={styles.formGroup}>
                 <label className={styles.label}>Playback Options</label>
                 <div style={{ display: 'grid', gap: '10px' }}>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.loop_playlist}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, loop_playlist: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Loop playlist (restart when finished)
-                  </label>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.stop_when_complete}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, stop_when_complete: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Stop when playlist completes (don't loop)
-                  </label>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleForm.immediate_switch}
-                      onChange={(e) => setScheduleForm(prev => ({ ...prev, immediate_switch: e.target.checked }))}
-                      className={styles.checkbox}
-                    />
-                    Switch immediately when schedule starts (interrupt current track)
-                  </label>
+                  <TavariCheckbox
+                    checked={scheduleForm.loop_playlist}
+                    onChange={handleLoopPlaylistChange}
+                    label="Loop playlist (restart when finished)"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={scheduleForm.stop_when_complete}
+                    onChange={handleStopWhenCompleteChange}
+                    label="Stop when playlist completes (switch to shuffle)"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={scheduleForm.immediate_switch}
+                    onChange={(checked) => setScheduleForm(prev => ({ ...prev, immediate_switch: checked }))}
+                    label="Switch immediately when schedule starts (interrupt current track)"
+                    size="md"
+                  />
                 </div>
               </div>
 

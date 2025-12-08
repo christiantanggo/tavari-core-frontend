@@ -12,7 +12,11 @@ const PETPremiumHoursSection = ({
   onPremiumHoursChange,
   saving = false,
   employee = null,
-  isEmployeePremiumEnabled = null
+  isEmployeePremiumEnabled = null,
+  regularHoursPaid = null,
+  overtimeHours = null,
+  statHolidayHours = null,
+  lieuEarned = null
 }) => {
   // Security context for premium operations
   const {
@@ -28,29 +32,59 @@ const PETPremiumHoursSection = ({
   });
 
   /**
-   * Calculate automatic premium hours based on applies_to setting from database
+   * Helper function to format numbers to 2 decimal places
    */
-  const calculateAutomaticPremiumHours = useCallback((premium, totalHours, regularHours, overtimeHours, lieuUsedHours = 0) => {
-    const total = parseFloat(totalHours || 0);
-    const regular = parseFloat(regularHours || 0);
-    const overtime = parseFloat(overtimeHours || 0);
-    const lieuUsed = parseFloat(lieuUsedHours || 0);
+  const formatToTwoDecimals = useCallback((value) => {
+    const num = parseFloat(value || 0);
+    return Math.round(num * 100) / 100;
+  }, []);
+
+  /**
+   * Calculate automatic premium hours based on applies_to setting from database
+   * Premiums should only apply to paid hours (considering max_paid_hours_per_period), not total worked hours
+   * Lieu hours that are paid out should NOT get premiums (they already got premiums when earned)
+   */
+  const calculateAutomaticPremiumHours = useCallback((premium, regularHoursPaidProp, overtimeHoursProp, statHolidayHoursProp, lieuEarnedProp, regularHours, overtimeHours, lieuUsedHours) => {
+    // Use passed props if available (from calculated preview), otherwise fall back to local hours
+    const regularPaid = formatToTwoDecimals(regularHoursPaidProp !== null && regularHoursPaidProp !== undefined ? regularHoursPaidProp : (regularHours || 0));
+    const overtime = formatToTwoDecimals(overtimeHoursProp !== null && overtimeHoursProp !== undefined ? overtimeHoursProp : (overtimeHours || 0));
+    const statHoliday = formatToTwoDecimals(statHolidayHoursProp !== null && statHolidayHoursProp !== undefined ? statHolidayHoursProp : 0);
+    const lieuUsed = formatToTwoDecimals(lieuUsedHours || 0);
+    
+    // Total paid hours = regular hours paid + overtime + stat holiday + paid-out lieu hours
+    const totalPaidHours = regularPaid + overtime + statHoliday + lieuUsed;
+  
+    console.log(`🔄 CALCULATING ${premium.name}:`, {
+      applies_to: premium.applies_to,
+      regularPaid,
+      overtime,
+      statHoliday,
+      totalPaidHours,
+      lieuEarned: lieuEarnedProp,
+      lieuUsed,
+      note: 'Premiums apply to paid hours only, not lieu hours paid out'
+    });
   
     switch (premium.applies_to) {
       case 'all_hours':
-        return total; // Now includes lieu hours in total
+        // Apply to all paid hours including lieu payouts
+        const result = formatToTwoDecimals(totalPaidHours);
+        console.log(`🔄 ${premium.name} (all_hours): ${totalPaidHours} paid hours -> ${result}`);
+        return result;
       
       case 'specific_hours':
         return 0; // Manual entry - will be set by user input
       
       case 'overtime_hours':
-        return overtime; // Apply only to overtime hours
+        return formatToTwoDecimals(overtime); // Apply only to overtime hours
       
       case 'regular_hours':
-        return regular; // Apply only to regular hours
+        // Apply to regular hours paid plus any lieu hours being paid out as regular pay
+        return formatToTwoDecimals(regularPaid + lieuUsed);
       
-      case 'lieu_hours': // NEW CASE for lieu hours specifically
-        return lieuUsed;
+      case 'lieu_hours':
+        console.log(`🔄 ${premium.name} (lieu_hours): Applying to lieu hours ${lieuUsed}`);
+        return formatToTwoDecimals(lieuUsed);
       
       case 'weekend_hours':
         return 0; // For now, default to manual entry
@@ -58,7 +92,7 @@ const PETPremiumHoursSection = ({
       default:
         return 0; // Default to manual entry
     }
-  }, []);
+  }, [formatToTwoDecimals]);
 
   /**
    * Check if premium input should be disabled (automatic calculation)
@@ -107,21 +141,45 @@ const PETPremiumHoursSection = ({
     }
   }, []);
 
-  // Auto-calculate premium hours when total hours change
+  // Auto-calculate premium hours when paid hours change
   useEffect(() => {
     if (allPremiums && allPremiums.length > 0 && localHours) {
-      const totalWorkedHours = parseFloat(localHours.total_hours || 0);
-      const lieuUsedHours = parseFloat(localHours.lieu_used || 0);
-      const totalHours = totalWorkedHours + lieuUsedHours; // INCLUDE LIEU HOURS
-      const regularHours = parseFloat(localHours.regular_hours || totalWorkedHours);
-      const overtimeHours = parseFloat(localHours.overtime_hours || 0);
+      const regularHours = formatToTwoDecimals(localHours.regular_hours || 0);
+      const overtimeHoursLocal = formatToTwoDecimals(localHours.overtime_hours || 0);
+      const lieuUsedHours = formatToTwoDecimals(localHours.lieu_used || 0);
+    
+      console.log('🔄 PREMIUM AUTO-CALC:', {
+        regularHoursPaid,
+        overtimeHours,
+        statHolidayHours,
+        lieuEarned,
+        regularHours,
+        overtimeHoursLocal,
+        lieuUsedHours,
+        premiumHours: localHours.premium_hours,
+        note: 'Using paid hours for premium calculation'
+      });
     
       const updatedPremiumHours = { ...localHours.premium_hours };
       let hasChanges = false;
     
       allPremiums.forEach(premium => {
         if (premium.applies_to !== 'specific_hours' && isEmployeePremiumEnabled?.(employee?.id, premium.name)) {
-          const autoHours = calculateAutomaticPremiumHours(premium, totalHours, regularHours, overtimeHours, lieuUsedHours);
+          const autoHours = calculateAutomaticPremiumHours(
+            premium, 
+            regularHoursPaid, 
+            overtimeHours, 
+            statHolidayHours, 
+            lieuEarned,
+            regularHours,
+            overtimeHoursLocal,
+            lieuUsedHours
+          );
+          console.log(`🔄 PREMIUM ${premium.name} (${premium.applies_to}):`, {
+            current: updatedPremiumHours[premium.name],
+            calculated: autoHours,
+            willUpdate: updatedPremiumHours[premium.name] !== autoHours
+          });
           if (updatedPremiumHours[premium.name] !== autoHours) {
             updatedPremiumHours[premium.name] = autoHours;
             hasChanges = true;
@@ -133,12 +191,22 @@ const PETPremiumHoursSection = ({
         onPremiumHoursChange(updatedPremiumHours);
       }
     }
-  }, [localHours.total_hours, localHours.overtime_hours, localHours.lieu_used, allPremiums, calculateAutomaticPremiumHours, onPremiumHoursChange]);
+  }, [localHours.total_hours, localHours.overtime_hours, localHours.lieu_used, regularHoursPaid, overtimeHours, statHolidayHours, lieuEarned, allPremiums, calculateAutomaticPremiumHours, onPremiumHoursChange, employee, isEmployeePremiumEnabled, formatToTwoDecimals]);
   
   // Handle manual premium hours change
-  const handlePremiumHoursChange = useCallback(async (premiumName, newHours) => {
+  const handlePremiumHoursChange = useCallback(async (premiumName, newHours, shouldFormat = false) => {
     try {
-      const validatedHours = Math.max(0, parseFloat(newHours) || 0);
+      // If shouldFormat is true (from blur event), format to 2 decimals
+      // Otherwise, allow the raw input value for natural typing
+      let validatedHours;
+      if (shouldFormat) {
+        validatedHours = formatToTwoDecimals(Math.max(0, parseFloat(newHours) || 0));
+      } else {
+        // During typing, just validate it's a valid number but don't format
+        validatedHours = newHours === '' ? 0 : parseFloat(newHours);
+        if (isNaN(validatedHours)) return; // Don't update if invalid
+        validatedHours = Math.max(0, validatedHours);
+      }
       
       // Validate input
       const validation = await validateInput(validatedHours.toString(), 'premium_hours');
@@ -156,8 +224,8 @@ const PETPremiumHoursSection = ({
         onPremiumHoursChange(updatedPremiumHours);
       }
 
-      // Log the change
-      if (recordAction && employee) {
+      // Log the change (only on blur/format to avoid excessive logging)
+      if (shouldFormat && recordAction && employee) {
         await recordAction('premium_hours_changed', {
           employee_id: employee.id,
           premium_name: premiumName,
@@ -168,41 +236,41 @@ const PETPremiumHoursSection = ({
     } catch (error) {
       console.error('Error updating premium hours:', error);
     }
-  }, [localHours.premium_hours, onPremiumHoursChange, validateInput, recordAction, employee]);
+  }, [localHours.premium_hours, onPremiumHoursChange, validateInput, recordAction, employee, formatToTwoDecimals]);
 
   // Calculate premium preview totals
   const premiumPreview = useMemo(() => {
     if (!allPremiums || !employee) return { totalPay: 0, breakdown: {} };
     
-    const wage = parseFloat(employee.wage || 0);
+    const wage = formatToTwoDecimals(employee.wage || 0);
     let totalPremiumPay = 0;
     const breakdown = {};
     
     allPremiums.forEach(premium => {
-      const premiumHours = parseFloat(localHours.premium_hours?.[premium.name] || 0);
+      const premiumHours = formatToTwoDecimals(localHours.premium_hours?.[premium.name] || 0);
       
       if (premiumHours > 0) {
         let premiumPay = 0;
         
         if (premium.rate_type === 'percentage') {
-          premiumPay = premiumHours * wage * (parseFloat(premium.rate) / 100);
+          premiumPay = formatToTwoDecimals(premiumHours * wage * (parseFloat(premium.rate) / 100));
         } else {
-          premiumPay = premiumHours * parseFloat(premium.rate);
+          premiumPay = formatToTwoDecimals(premiumHours * parseFloat(premium.rate));
         }
         
-        totalPremiumPay += premiumPay;
+        totalPremiumPay = formatToTwoDecimals(totalPremiumPay + premiumPay);
         breakdown[premium.name] = {
-          hours: premiumHours,
-          rate: premium.rate,
+          hours: formatToTwoDecimals(premiumHours),
+          rate: formatToTwoDecimals(premium.rate),
           rate_type: premium.rate_type,
-          pay: premiumPay,
+          pay: formatToTwoDecimals(premiumPay),
           applies_to: premium.applies_to
         };
       }
     });
     
-    return { totalPay: totalPremiumPay, breakdown };
-  }, [allPremiums, localHours.premium_hours, employee]);
+    return { totalPay: formatToTwoDecimals(totalPremiumPay), breakdown };
+  }, [allPremiums, localHours.premium_hours, employee, formatToTwoDecimals]);
 
   const styles = {
     section: {
@@ -320,7 +388,8 @@ const PETPremiumHoursSection = ({
       
       <div style={styles.premiumGrid}>
         {allPremiums.map((premium, index) => {
-          const currentHours = localHours.premium_hours?.[premium.name] || 0;
+          const rawValue = localHours.premium_hours?.[premium.name];
+          const currentHours = rawValue || 0;
           const isDisabled = isPremiumInputDisabled(premium) || saving;
           const displayText = getPremiumDisplayText(premium);
           const explanation = getPremiumExplanation(premium);
@@ -332,9 +401,9 @@ const PETPremiumHoursSection = ({
               </label>
               <input
                 type="number"
-                step="0.25"
+                step="0.01"
                 min="0"
-                max={parseFloat(localHours.total_hours || 0)}
+                max={formatToTwoDecimals(localHours.total_hours || 0)}
                 style={{
                   ...styles.input,
                   ...(isDisabled ? {
@@ -343,10 +412,17 @@ const PETPremiumHoursSection = ({
                     opacity: 0.7
                   } : {})
                 }}
-                value={currentHours || ''}
+                value={currentHours === 0 && !isDisabled ? '' : currentHours}
                 onChange={(e) => {
                   if (!isDisabled) {
-                    handlePremiumHoursChange(premium.name, e.target.value);
+                    // Allow free typing without formatting
+                    handlePremiumHoursChange(premium.name, e.target.value, false);
+                  }
+                }}
+                onBlur={(e) => {
+                  // Format to 2 decimal places when leaving the field
+                  if (!isDisabled && e.target.value !== '') {
+                    handlePremiumHoursChange(premium.name, e.target.value, true);
                   }
                 }}
                 disabled={isDisabled}
@@ -357,8 +433,8 @@ const PETPremiumHoursSection = ({
               <div style={styles.premiumInfo}>
                 <span style={styles.premiumRate}>
                   {premium.rate_type === 'percentage' 
-                    ? `${premium.rate}% of base rate` 
-                    : `$${premium.rate}/hr`}
+                    ? `${formatToTwoDecimals(premium.rate)}% of base rate` 
+                    : `$${formatToTwoDecimals(premium.rate).toFixed(2)}/hr`}
                 </span>
                 {premium.applies_to !== 'specific_hours' ? (
                   <div style={styles.autoText}>
@@ -389,8 +465,8 @@ const PETPremiumHoursSection = ({
           </div>
           {Object.entries(premiumPreview.breakdown).map(([name, data]) => (
             <div key={name} style={styles.explanationText}>
-              {name}: {data.hours}h × ${data.rate_type === 'percentage' ? 
-                `(${data.rate}% of base)` : data.rate} = ${data.pay.toFixed(2)}
+              {name}: {data.hours.toFixed(2)}h × {data.rate_type === 'percentage' ? 
+                `(${data.rate.toFixed(2)}% of base)` : `$${data.rate.toFixed(2)}`} = ${data.pay.toFixed(2)}
             </div>
           ))}
         </div>

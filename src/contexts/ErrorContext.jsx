@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState } from 'react';
+import ErrorPopup from '../components/ErrorPopup';
 
 const ErrorContext = createContext();
 
@@ -17,5 +18,3 @@ export const ErrorProvider = ({ children }) => {
 };
 
 export const useError = () => useContext(ErrorContext);
-
-import ErrorPopup from '../components/ErrorPopup';

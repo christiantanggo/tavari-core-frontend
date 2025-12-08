@@ -1,17 +1,61 @@
-// screens/TavariAdmin/TOSABusinessEditor.jsx
+// screens/TavariAdmin/TOSABusinessEditor.jsx - WITH PERMISSION SYSTEM + NO CONSOLE LOGGING
 import React, { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { FiEdit, FiSave, FiX, FiDatabase, FiUsers, FiSettings, FiCreditCard } from 'react-icons/fi';
 import { supabase } from '../../supabaseClient';
-import { TavariStyles } from '../../utils/TavariStyles';
-import { SecurityWrapper } from '../../Security';
+import toast from 'react-hot-toast';
+
+// Security & Authentication
+import { SecurityWrapper, useSecurityContext } from '../../Security';
 import { useTOSATavariAuth } from '../../hooks/useTOSATavariAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+
+// Foundation Components
+import { TavariStyles } from '../../utils/TavariStyles';
 import TOSAHeaderBar from '../../components/TavariAdminComp/TOSAHeaderBar';
 import TOSASidebarNav from '../../components/TavariAdminComp/TOSASidebarNav';
 import TOSABusinessSelector from '../../components/TavariAdminComp/TOSABusinessSelector';
 
 const TOSABusinessEditor = () => {
   const { businessId: paramBusinessId } = useParams();
+  const navigate = useNavigate();
+
+  // Security context for sensitive business editing operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'TOSABusinessEditor',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'critical'
+  });
+
+  // TOSA Authentication
+  const auth = useTOSATavariAuth({
+    requiredPermissions: ['business_management'],
+    componentName: 'TOSABusinessEditor'
+  });
+
+  // Permission system (for additional granular checks)
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks for TOSA operations
+  const canViewBusinessData = auth.hasPermission?.('business_management') || false;
+  const canEditBusinessData = auth.hasPermission?.('business_management') || false;
+  const canViewEmployeeData = auth.hasPermission?.('user_management') || auth.hasPermission?.('business_management') || false;
+  const canEditSubscription = auth.hasPermission?.('subscription_management') || false;
+
   const [selectedBusinessId, setSelectedBusinessId] = useState(paramBusinessId || null);
   const [activeTab, setActiveTab] = useState('general');
   const [businessData, setBusinessData] = useState(null);
@@ -19,10 +63,20 @@ const TOSABusinessEditor = () => {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  const auth = useTOSATavariAuth({
-    requiredPermissions: ['business_management'],
-    componentName: 'TOSABusinessEditor'
-  });
+  // Check TOSA authentication on mount
+  // TOSA is now open - no auth check needed
+
+  // Log initial access
+  useEffect(() => {
+    if (auth.isAuthenticated && auth.authUser) {
+      logSecurityEvent('tosa_business_editor_accessed', {
+        action: 'tosa_business_editor_loaded',
+        tosa_user_id: auth.authUser.id,
+        tosa_user_email: auth.authUser.email,
+        param_business_id: paramBusinessId
+      }, 'high');
+    }
+  }, [auth.isAuthenticated, auth.authUser, paramBusinessId]);
 
   useEffect(() => {
     if (selectedBusinessId) {
@@ -38,16 +92,33 @@ const TOSABusinessEditor = () => {
   }, [selectedBusinessId]);
 
   const loadBusinessData = async (businessId) => {
+    if (!canViewBusinessData) {
+      toast.error('You do not have permission to view business data');
+      return;
+    }
+
     setLoading(true);
     setError('');
     
     try {
-      console.log('Loading business data for ID:', businessId, 'Type:', typeof businessId);
-      
-      // Ensure we have a valid UUID string
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('load_business_data_tosa');
+      if (!rateLimitCheck.allowed) {
+        toast.error('Too many requests. Please wait a moment.');
+        setLoading(false);
+        return;
+      }
+
+      // Validate business ID
       if (!businessId || typeof businessId !== 'string') {
         throw new Error('Invalid business ID provided');
       }
+
+      await logSecurityEvent('tosa_business_data_access', {
+        action: 'load_business_data',
+        business_id: businessId,
+        tosa_user_id: auth.authUser?.id
+      }, 'high');
 
       // Load business data - only from businesses table since business_settings doesn't exist
       const { data, error: loadError } = await supabase
@@ -57,11 +128,14 @@ const TOSABusinessEditor = () => {
         .single();
 
       if (loadError) {
-        console.error('Supabase error:', loadError);
+        await logSecurityEvent('tosa_business_data_load_error', {
+          action: 'load_business_data_failed',
+          business_id: businessId,
+          error_message: loadError.message,
+          tosa_user_id: auth.authUser?.id
+        }, 'high');
         throw loadError;
       }
-      
-      console.log('Loaded business data:', data);
       
       // Also try to load related user data for this business
       const { data: userData, error: userError } = await supabase
@@ -71,9 +145,12 @@ const TOSABusinessEditor = () => {
         .limit(10); // Limit to first 10 users for performance
 
       if (userError) {
-        console.warn('Error loading users:', userError);
-      } else {
-        console.log('Loaded users:', userData);
+        await logSecurityEvent('tosa_employee_data_load_warning', {
+          action: 'load_employees_failed',
+          business_id: businessId,
+          error_message: userError.message,
+          tosa_user_id: auth.authUser?.id
+        }, 'medium');
       }
 
       // Combine the data
@@ -84,11 +161,29 @@ const TOSABusinessEditor = () => {
 
       setBusinessData(enrichedData);
 
-      await auth.logUserAction('business_data_loaded', { business_id: businessId });
+      await recordAction('tosa_business_data_loaded', businessId, true);
+      await logSecurityEvent('tosa_business_data_loaded', {
+        action: 'load_business_data_success',
+        business_id: businessId,
+        employee_count: userData?.length || 0,
+        tosa_user_id: auth.authUser?.id
+      }, 'high');
+
+      // Use TOSA auth logging if available
+      if (auth.logUserAction) {
+        await auth.logUserAction('business_data_loaded', { business_id: businessId });
+      }
 
     } catch (err) {
-      console.error('Error in loadBusinessData:', err);
+      await logSecurityEvent('tosa_business_data_load_error', {
+        action: 'load_business_data_exception',
+        business_id: businessId,
+        error_message: err.message,
+        tosa_user_id: auth.authUser?.id
+      }, 'critical');
+      
       setError(err.message);
+      toast.error('Failed to load business data');
     } finally {
       setLoading(false);
     }
@@ -96,9 +191,46 @@ const TOSABusinessEditor = () => {
 
   const saveBusinessData = async () => {
     if (!businessData) return;
+
+    if (!canEditBusinessData) {
+      toast.error('You do not have permission to edit business data');
+      return;
+    }
     
     setSaving(true);
     try {
+      // Rate limit check
+      const rateLimitCheck = await checkRateLimit('save_business_data_tosa');
+      if (!rateLimitCheck.allowed) {
+        toast.error('Too many requests. Please wait a moment.');
+        setSaving(false);
+        return;
+      }
+
+      // Validate inputs
+      const nameValidation = await validateInput(businessData.name, 'text', 'business_name');
+      if (!nameValidation.valid) {
+        toast.error('Invalid business name');
+        setSaving(false);
+        return;
+      }
+
+      if (businessData.email) {
+        const emailValidation = await validateInput(businessData.email, 'email', 'business_email');
+        if (!emailValidation.valid) {
+          toast.error('Invalid email address');
+          setSaving(false);
+          return;
+        }
+      }
+
+      await logSecurityEvent('tosa_business_data_update', {
+        action: 'save_business_data',
+        business_id: businessData.id,
+        changes: ['name', 'email', 'phone', 'is_active', 'subscription_status'],
+        tosa_user_id: auth.authUser?.id
+      }, 'critical');
+
       const { error: saveError } = await supabase
         .from('businesses')
         .update({
@@ -112,27 +244,69 @@ const TOSABusinessEditor = () => {
 
       if (saveError) throw saveError;
 
-      await auth.logUserAction('business_data_saved', { 
+      await recordAction('tosa_business_data_saved', businessData.id, true);
+      await logSecurityEvent('tosa_business_data_saved', {
+        action: 'save_business_data_success',
         business_id: businessData.id,
-        changes: ['name', 'email', 'phone', 'is_active', 'subscription_status']
-      });
+        tosa_user_id: auth.authUser?.id
+      }, 'critical');
 
-      alert('Business data saved successfully!');
+      // Use TOSA auth logging if available
+      if (auth.logUserAction) {
+        await auth.logUserAction('business_data_saved', { 
+          business_id: businessData.id,
+          changes: ['name', 'email', 'phone', 'is_active', 'subscription_status']
+        });
+      }
+
+      toast.success('Business data saved successfully!');
 
     } catch (err) {
+      await logSecurityEvent('tosa_business_data_save_error', {
+        action: 'save_business_data_failed',
+        business_id: businessData.id,
+        error_message: err.message,
+        tosa_user_id: auth.authUser?.id
+      }, 'critical');
+      
       setError(err.message);
-      console.error('Error saving business data:', err);
+      toast.error('Error saving business data');
     } finally {
       setSaving(false);
     }
   };
 
+  const handleTabChange = async (tabId) => {
+    await logSecurityEvent('tosa_tab_changed', {
+      action: 'change_tab',
+      business_id: businessData?.id,
+      from_tab: activeTab,
+      to_tab: tabId,
+      tosa_user_id: auth.authUser?.id
+    }, 'low');
+
+    setActiveTab(tabId);
+  };
+
+  const handleInputChange = async (field, value) => {
+    // Validate text inputs
+    if (typeof value === 'string' && value.length > 0) {
+      const validation = await validateInput(value, 'text', field);
+      if (!validation.valid) {
+        toast.error(`Invalid input for ${field}`);
+        return;
+      }
+    }
+
+    setBusinessData({...businessData, [field]: value});
+  };
+
   const tabs = [
-    { id: 'general', label: 'General Info', icon: <FiEdit /> },
-    { id: 'employees', label: 'Employees', icon: <FiUsers /> },
-    { id: 'settings', label: 'Settings', icon: <FiSettings /> },
-    { id: 'subscription', label: 'Subscription', icon: <FiCreditCard /> },
-    { id: 'database', label: 'Database', icon: <FiDatabase /> }
+    { id: 'general', label: 'General Info', icon: <FiEdit />, permission: 'business_management' },
+    { id: 'employees', label: 'Employees', icon: <FiUsers />, permission: 'user_management' },
+    { id: 'settings', label: 'Settings', icon: <FiSettings />, permission: 'business_management' },
+    { id: 'subscription', label: 'Subscription', icon: <FiCreditCard />, permission: 'subscription_management' },
+    { id: 'database', label: 'Database', icon: <FiDatabase />, permission: 'business_management' }
   ];
 
   const styles = {
@@ -256,20 +430,40 @@ const TOSABusinessEditor = () => {
       fontSize: TavariStyles.typography.fontSize.sm,
       color: TavariStyles.colors.gray600,
       marginTop: TavariStyles.spacing.xs
+    },
+    loading: {
+      ...TavariStyles.components.loading.container
     }
   };
 
   if (auth.authLoading) {
-    return <div>Loading TOSA Business Editor...</div>;
+    return (
+      <SecurityWrapper componentName="TOSABusinessEditor" sensitiveComponent={true} securityLevel="critical">
+        <div style={styles.loading}>
+          <div style={TavariStyles.components.loading.spinner}></div>
+          <div>Loading TOSA Business Editor...</div>
+          <style>{TavariStyles.keyframes.spin}</style>
+        </div>
+      </SecurityWrapper>
+    );
   }
 
   if (!auth.isAuthenticated) {
-    return <div>Access denied. Tavari employees only.</div>;
+    return (
+      <SecurityWrapper componentName="TOSABusinessEditor" sensitiveComponent={true} securityLevel="critical">
+        <div style={{ padding: '40px', textAlign: 'center', color: TavariStyles.colors.danger }}>
+          <h2>Access Denied</h2>
+          <p>Tavari employees only.</p>
+        </div>
+      </SecurityWrapper>
+    );
   }
 
   const renderTabContent = () => {
     if (!businessData) {
-      return <div>Select a business to edit...</div>;
+      return <div style={{ padding: '40px', textAlign: 'center', color: TavariStyles.colors.gray500 }}>
+        Select a business to edit...
+      </div>;
     }
 
     switch (activeTab) {
@@ -282,7 +476,7 @@ const TOSABusinessEditor = () => {
                 style={styles.input}
                 type="text"
                 value={businessData.name || ''}
-                onChange={(e) => setBusinessData({...businessData, name: e.target.value})}
+                onChange={(e) => handleInputChange('name', e.target.value)}
               />
             </div>
             <div style={styles.formGroup}>
@@ -291,7 +485,7 @@ const TOSABusinessEditor = () => {
                 style={styles.input}
                 type="email"
                 value={businessData.email || ''}
-                onChange={(e) => setBusinessData({...businessData, email: e.target.value})}
+                onChange={(e) => handleInputChange('email', e.target.value)}
               />
             </div>
             <div style={styles.formGroup}>
@@ -300,7 +494,7 @@ const TOSABusinessEditor = () => {
                 style={styles.input}
                 type="tel"
                 value={businessData.phone || ''}
-                onChange={(e) => setBusinessData({...businessData, phone: e.target.value})}
+                onChange={(e) => handleInputChange('phone', e.target.value)}
               />
             </div>
             <div style={styles.formGroup}>
@@ -318,6 +512,12 @@ const TOSABusinessEditor = () => {
         );
 
       case 'employees':
+        if (!canViewEmployeeData) {
+          return <div style={{ padding: '40px', textAlign: 'center', color: TavariStyles.colors.danger }}>
+            You do not have permission to view employee data
+          </div>;
+        }
+
         return (
           <div style={styles.employeeList}>
             <h3>Employees ({businessData.users?.length || 0})</h3>
@@ -355,7 +555,7 @@ const TOSABusinessEditor = () => {
                 style={styles.input}
                 type="text"
                 value={businessData.timezone || ''}
-                onChange={(e) => setBusinessData({...businessData, timezone: e.target.value})}
+                onChange={(e) => handleInputChange('timezone', e.target.value)}
                 placeholder="e.g., America/Toronto"
               />
             </div>
@@ -364,7 +564,7 @@ const TOSABusinessEditor = () => {
               <textarea
                 style={styles.textarea}
                 value={businessData.operating_hours || ''}
-                onChange={(e) => setBusinessData({...businessData, operating_hours: e.target.value})}
+                onChange={(e) => handleInputChange('operating_hours', e.target.value)}
                 placeholder="e.g., Mon-Fri: 9AM-5PM"
               />
             </div>
@@ -373,7 +573,7 @@ const TOSABusinessEditor = () => {
               <textarea
                 style={styles.textarea}
                 value={businessData.holiday_hours || ''}
-                onChange={(e) => setBusinessData({...businessData, holiday_hours: e.target.value})}
+                onChange={(e) => handleInputChange('holiday_hours', e.target.value)}
                 placeholder="Special holiday operating hours"
               />
             </div>
@@ -383,7 +583,7 @@ const TOSABusinessEditor = () => {
                 style={styles.input}
                 type="text"
                 value={businessData.tax_number || ''}
-                onChange={(e) => setBusinessData({...businessData, tax_number: e.target.value})}
+                onChange={(e) => handleInputChange('tax_number', e.target.value)}
                 placeholder="Business tax identification number"
               />
             </div>
@@ -391,6 +591,12 @@ const TOSABusinessEditor = () => {
         );
 
       case 'subscription':
+        if (!canEditSubscription) {
+          return <div style={{ padding: '40px', textAlign: 'center', color: TavariStyles.colors.danger }}>
+            You do not have permission to manage subscriptions
+          </div>;
+        }
+
         return (
           <div style={styles.formGrid}>
             <div style={styles.formGroup}>
@@ -459,7 +665,7 @@ const TOSABusinessEditor = () => {
   };
 
   return (
-    <SecurityWrapper componentName="TOSABusinessEditor" sensitiveComponent={true}>
+    <SecurityWrapper componentName="TOSABusinessEditor" sensitiveComponent={true} securityLevel="critical">
       <div style={styles.container}>
         <TOSASidebarNav />
         
@@ -471,13 +677,13 @@ const TOSABusinessEditor = () => {
               <div>
                 <h1 style={styles.title}>Business Editor</h1>
                 <TOSABusinessSelector onBusinessSelect={(business) => {
-                // Extract the ID from the business object
-                const businessId = business ? business.id : null;
-                setSelectedBusinessId(businessId);
-              }} />
+                  // Extract the ID from the business object
+                  const businessId = business ? business.id : null;
+                  setSelectedBusinessId(businessId);
+                }} />
               </div>
               
-              {businessData && (
+              {businessData && canEditBusinessData && (
                 <button
                   style={styles.saveButton}
                   onClick={saveBusinessData}
@@ -502,7 +708,11 @@ const TOSABusinessEditor = () => {
             )}
 
             {loading ? (
-              <div>Loading business data...</div>
+              <div style={styles.loading}>
+                <div style={TavariStyles.components.loading.spinner}></div>
+                <div>Loading business data...</div>
+                <style>{TavariStyles.keyframes.spin}</style>
+              </div>
             ) : (
               <div style={styles.tabContainer}>
                 <div style={styles.tabHeader}>
@@ -513,7 +723,7 @@ const TOSABusinessEditor = () => {
                         ...styles.tab,
                         ...(activeTab === tab.id ? styles.activeTab : {})
                       }}
-                      onClick={() => setActiveTab(tab.id)}
+                      onClick={() => handleTabChange(tab.id)}
                     >
                       {tab.icon}
                       {tab.label}

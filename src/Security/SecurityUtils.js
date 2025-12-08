@@ -220,10 +220,13 @@ class SecurityUtils {
     const sqlPatterns = [
       /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE)\b)/gi,
       /(\b(UNION|OR|AND)\b.*\b(SELECT|INSERT|UPDATE|DELETE)\b)/gi,
-      /('|(\\x27)|(\\x2D)|(-)|(%27)|(%2D))/gi,
+      // Only match SQL comment pattern (--) not single dashes which are valid in emails/names
+      /(\-\-)/gi,
       /((\%3D)|(=))[^\n]*((\%27)|(\')|(\-\-)|(\%3B)|(:))/gi,
       /(\w*)((\%27)|(\'))((\%6F)|o|(\%4F))((\%72)|r|(\%52))/gi,
       /((\%27)|(\'))union/gi,
+      // Match single quotes that might be used for SQL injection (but allow apostrophes in names)
+      /('.*(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE|UNION|OR|AND).*')/gi,
     ];
     
     for (const pattern of sqlPatterns) {
@@ -291,7 +294,7 @@ class SecurityUtils {
         return devIP;
       }
 
-      // Try multiple IP services for production
+      // Try multiple IP services for production with proper timeout
       const services = [
         'https://api.ipify.org?format=json',
         'https://ipapi.co/json/',
@@ -300,7 +303,22 @@ class SecurityUtils {
       
       for (const service of services) {
         try {
-          const response = await fetch(service, { timeout: 5000 });
+          // Use AbortController for proper timeout handling
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
+          
+          const response = await fetch(service, { 
+            signal: controller.signal,
+            method: 'GET',
+            mode: 'cors'
+          });
+          
+          clearTimeout(timeoutId);
+          
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          
           const data = await response.json();
           
           // Different services return IP in different formats
@@ -312,7 +330,11 @@ class SecurityUtils {
             return ip;
           }
         } catch (error) {
-          console.warn(`Failed to get IP from ${service}:`, error);
+          if (error.name === 'AbortError') {
+            console.warn(`IP service ${service} timed out`);
+          } else {
+            console.warn(`Failed to get IP from ${service}:`, error);
+          }
           continue;
         }
       }

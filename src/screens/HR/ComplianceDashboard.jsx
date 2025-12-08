@@ -1,8 +1,12 @@
+// screens/HR/ComplianceDashboard.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, CheckCircle, Clock, XCircle, Filter, Search, Plus, X } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import ComplianceTrackingModal from '../../components/HR/ComplianceTrackingModal';
+import toast from 'react-hot-toast';
 
 const ComplianceDashboard = () => {
   const navigate = useNavigate();
@@ -13,6 +17,16 @@ const ComplianceDashboard = () => {
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState(null);
   const [userRole, setUserRole] = useState(null);
+
+  // NEW: Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
 
   // Component state
   const [complianceRecords, setComplianceRecords] = useState([]);
@@ -25,6 +39,26 @@ const ComplianceDashboard = () => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [selectedEmployee, setSelectedEmployee] = useState(null);
   const [error, setError] = useState(null);
+
+  // Permission checks
+  const canViewCompliance = hasAnyPermission([
+    'hr.compliance.view',
+    'hr.employees.view_all'
+  ]) || hasElevatedPrivileges();
+
+  const canCreateCompliance = hasPermission('hr.compliance.create') || hasElevatedPrivileges();
+
+  const canResolveCompliance = hasPermission('hr.compliance.resolve') || hasElevatedPrivileges();
+
+  const canManageCompliance = hasPermission('hr.compliance.manage') || isOwner();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewCompliance) {
+      toast.error('You do not have permission to view compliance tracking');
+      navigate('/dashboard/hr/dashboard');
+    }
+  }, [permissionsLoading, canViewCompliance]);
 
   // Authentication and business context setup (copied from TabScreen pattern)
   useEffect(() => {
@@ -85,14 +119,14 @@ const ComplianceDashboard = () => {
 
   // Load compliance data and employees
   useEffect(() => {
-    if (selectedBusinessId && !authLoading) {
+    if (selectedBusinessId && !authLoading && canViewCompliance) {
       loadComplianceRecords();
       loadEmployees();
       
       // Update compliance statuses on load
       updateComplianceStatuses();
     }
-  }, [selectedBusinessId, authLoading]);
+  }, [selectedBusinessId, authLoading, canViewCompliance]);
 
   const updateComplianceStatuses = async () => {
     try {
@@ -118,6 +152,7 @@ const ComplianceDashboard = () => {
       setComplianceRecords(data || []);
     } catch (error) {
       console.error('Error loading compliance records:', error);
+      toast.error('Failed to load compliance records');
       setError('Failed to load compliance records');
     } finally {
       setLoading(false);
@@ -169,8 +204,9 @@ const ComplianceDashboard = () => {
   };
 
   const handleResolveCompliance = async (complianceId) => {
-    if (!authUser || !['owner', 'manager'].includes(userRole)) {
-      setError('You do not have permission to resolve compliance records');
+    // Check permission before proceeding
+    if (!canResolveCompliance) {
+      toast.error('You do not have permission to resolve compliance records');
       return;
     }
 
@@ -184,18 +220,27 @@ const ComplianceDashboard = () => {
       if (error) throw error;
 
       if (data) {
+        toast.success('Compliance record resolved successfully');
         // Reload compliance records to show updated status
         await loadComplianceRecords();
       } else {
+        toast.error('Failed to resolve compliance record');
         setError('Failed to resolve compliance record');
       }
     } catch (error) {
       console.error('Error resolving compliance:', error);
+      toast.error('Failed to resolve compliance record: ' + error.message);
       setError('Failed to resolve compliance record: ' + error.message);
     }
   };
 
   const handleCreateCompliance = (employee) => {
+    // Check permission before proceeding
+    if (!canCreateCompliance) {
+      toast.error('You do not have permission to create compliance records');
+      return;
+    }
+
     setSelectedEmployee(employee);
     setShowCreateModal(true);
   };
@@ -203,6 +248,7 @@ const ComplianceDashboard = () => {
   const handleComplianceCreated = () => {
     setShowCreateModal(false);
     setSelectedEmployee(null);
+    toast.success('Compliance record created successfully');
     loadComplianceRecords(); // Refresh the list
   };
 
@@ -259,10 +305,6 @@ const ComplianceDashboard = () => {
     return type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
   };
 
-  const canManageCompliance = () => {
-    return userRole && ['owner', 'manager'].includes(userRole);
-  };
-
   // Get compliance statistics
   const stats = {
     total: filteredRecords.length,
@@ -271,12 +313,29 @@ const ComplianceDashboard = () => {
     dueThisWeek: filteredRecords.filter(r => r.days_until_due !== null && r.days_until_due <= 7 && r.days_until_due >= 0).length
   };
 
-  // Loading and error states (same pattern as TabScreen)
-  if (authLoading) {
+  // Show loading state while permissions are being checked
+  if (permissionsLoading || authLoading) {
     return (
       <div style={{...styles.container, justifyContent: 'center', alignItems: 'center'}}>
         <h3>Loading Compliance Dashboard...</h3>
         <p>Authenticating user and loading business data...</p>
+      </div>
+    );
+  }
+
+  // Show access denied if user doesn't have permission
+  if (!canViewCompliance) {
+    return (
+      <div style={{...styles.container, justifyContent: 'center', alignItems: 'center'}}>
+        <h3>⚠️ Access Denied</h3>
+        <p>You do not have permission to view the compliance dashboard.</p>
+        <p>Please contact your administrator if you believe this is an error.</p>
+        <button 
+          style={styles.createButton}
+          onClick={() => navigate('/dashboard/hr/dashboard')}
+        >
+          Return to HR Dashboard
+        </button>
       </div>
     );
   }
@@ -408,7 +467,12 @@ const ComplianceDashboard = () => {
           </div>
         </div>
         
-        {canManageCompliance() && (
+        {/* Create Compliance Button - Protected */}
+        <PermissionGate
+          permissions={['hr.compliance.create']}
+          requireElevated
+          fallback={null}
+        >
           <div style={styles.actionButtons}>
             <select
               onChange={(e) => {
@@ -428,7 +492,7 @@ const ComplianceDashboard = () => {
               ))}
             </select>
           </div>
-        )}
+        </PermissionGate>
       </div>
 
       {/* Compliance Records */}
@@ -443,6 +507,14 @@ const ComplianceDashboard = () => {
                 : 'Create compliance records to track employee probation periods and other requirements.'
               }
             </p>
+            <PermissionGate
+              permissions={['hr.compliance.create']}
+              requireElevated
+            >
+              <p style={styles.emptyText}>
+                Select an employee from the dropdown above to create a compliance record.
+              </p>
+            </PermissionGate>
           </div>
         ) : (
           <div style={styles.recordGrid}>
@@ -544,17 +616,24 @@ const ComplianceDashboard = () => {
                   )}
                 </div>
 
-                {canManageCompliance() && record.compliance_status !== 'resolved' && (
-                  <div style={styles.recordActions}>
-                    <button
-                      onClick={() => handleResolveCompliance(record.id)}
-                      style={styles.resolveButton}
-                      title="Mark as Resolved"
-                    >
-                      <CheckCircle size={16} />
-                      Resolve
-                    </button>
-                  </div>
+                {/* Resolve Button - Protected */}
+                {record.compliance_status !== 'resolved' && (
+                  <PermissionGate
+                    permissions={['hr.compliance.resolve']}
+                    requireElevated
+                    fallback={null}
+                  >
+                    <div style={styles.recordActions}>
+                      <button
+                        onClick={() => handleResolveCompliance(record.id)}
+                        style={styles.resolveButton}
+                        title="Mark as Resolved"
+                      >
+                        <CheckCircle size={16} />
+                        Resolve
+                      </button>
+                    </div>
+                  </PermissionGate>
                 )}
 
                 <div style={styles.recordMeta}>
@@ -575,17 +654,22 @@ const ComplianceDashboard = () => {
         )}
       </div>
 
-      {/* Create Compliance Modal */}
-      <ComplianceTrackingModal
-        isOpen={showCreateModal}
-        onClose={() => {
-          setShowCreateModal(false);
-          setSelectedEmployee(null);
-        }}
-        employee={selectedEmployee}
-        businessId={selectedBusinessId}
-        onComplianceCreated={handleComplianceCreated}
-      />
+      {/* Create Compliance Modal - Protected */}
+      <PermissionGate
+        permissions={['hr.compliance.create']}
+        requireElevated
+      >
+        <ComplianceTrackingModal
+          isOpen={showCreateModal}
+          onClose={() => {
+            setShowCreateModal(false);
+            setSelectedEmployee(null);
+          }}
+          employee={selectedEmployee}
+          businessId={selectedBusinessId}
+          onComplianceCreated={handleComplianceCreated}
+        />
+      </PermissionGate>
     </div>
   );
 };

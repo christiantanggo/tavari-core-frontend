@@ -1,14 +1,64 @@
-// screens/Mail/CampaignList.jsx
+// screens/Mail/CampaignList.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import EmailPauseBanner, { blockEmailSendIfPaused } from '../../components/EmailPauseBanner';
-import { FiMail, FiPlus, FiEdit3, FiSend, FiEye, FiTrash2, FiCopy, FiClock, FiCheckCircle, FiAlertCircle, FiRefreshCw } from 'react-icons/fi';
+import { 
+  FiMail, FiPlus, FiEdit3, FiSend, FiEye, FiTrash2, FiCopy, 
+  FiClock, FiCheckCircle, FiAlertCircle, FiRefreshCw 
+} from 'react-icons/fi';
+
+// Permission System Imports
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import toast from 'react-hot-toast';
 
 const CampaignList = () => {
   const navigate = useNavigate();
   const { business } = useBusiness();
+  
+  // Security context for campaign data
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'CampaignList',
+    sensitiveComponent: false,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Authentication using standardized hook
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin'],
+    requireBusiness: true,
+    componentName: 'CampaignList'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
   const [campaigns, setCampaigns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all'); // all, draft, sent, scheduled
@@ -23,11 +73,26 @@ const CampaignList = () => {
   // Use localStorage as primary source, context as fallback
   const businessId = localStorage.getItem('currentBusinessId') || business?.id;
 
+  // Permission checks
+  const canViewCampaigns = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+  const canCreateCampaigns = hasPermission('mail.campaigns.create') || hasElevatedPrivileges();
+  const canEditCampaigns = hasPermission('mail.campaigns.create') || hasElevatedPrivileges();
+  const canSendCampaigns = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
+  const canDeleteCampaigns = hasPermission('mail.campaigns.delete') || hasElevatedPrivileges();
+
+  // Check permissions on mount
   useEffect(() => {
-    if (businessId) {
+    if (!permissionsLoading && !authLoading && !canViewCampaigns) {
+      toast.error('You do not have permission to view campaigns');
+      navigate('/dashboard');
+    }
+  }, [permissionsLoading, authLoading, canViewCampaigns]);
+
+  useEffect(() => {
+    if (businessId && !authLoading && !permissionsLoading && canViewCampaigns) {
       loadCampaigns();
     }
-  }, [businessId, filter]);
+  }, [businessId, filter, authLoading, permissionsLoading, canViewCampaigns]);
 
   // Listen for localStorage changes to update pause state
   useEffect(() => {
@@ -46,11 +111,24 @@ const CampaignList = () => {
   }, []);
 
   const loadCampaigns = async () => {
-    if (!businessId) return;
+    if (!businessId || !canViewCampaigns) return;
     
+    // Rate limiting
+    if (!checkRateLimit('load_campaigns', 10, 60000)) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
+
+      await logSecurityEvent('campaigns_list_access', {
+        action: 'load_campaigns',
+        filter: filter,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'low');
       
       let query = supabase
         .from('mail_campaigns')
@@ -69,14 +147,17 @@ const CampaignList = () => {
         console.error('Error loading campaigns:', error);
         setError('Failed to load campaigns. Please try again.');
         setCampaigns([]);
+        await recordAction('campaigns_loaded', false, businessId);
         return;
       }
 
       setCampaigns(data || []);
+      await recordAction('campaigns_loaded', true, businessId);
     } catch (error) {
       console.error('Error loading campaigns:', error);
       setError('Failed to load campaigns. Please try again.');
       setCampaigns([]);
+      await recordAction('campaigns_loaded', false, businessId);
     } finally {
       setLoading(false);
     }
@@ -132,22 +213,83 @@ const CampaignList = () => {
   };
 
   const handleEdit = (campaignId) => {
+    // Permission check
+    if (!canEditCampaigns) {
+      toast.error('You do not have permission to edit campaigns');
+      return;
+    }
+
     if (blockEmailSendIfPaused('Campaign editing')) return;
+    
+    logSecurityEvent('campaign_edit_navigation', {
+      action: 'navigate_to_edit',
+      campaign_id: campaignId,
+      business_id: businessId,
+      user_id: authUser?.id
+    }, 'low');
+
     navigate(`/dashboard/mail/builder/${campaignId}`);
   };
 
   const handleSendNow = (campaignId) => {
+    // Permission check
+    if (!canSendCampaigns) {
+      toast.error('You do not have permission to send campaigns');
+      return;
+    }
+
     if (blockEmailSendIfPaused('Campaign sending')) return;
+    
+    logSecurityEvent('campaign_send_navigation', {
+      action: 'navigate_to_sender',
+      campaign_id: campaignId,
+      business_id: businessId,
+      user_id: authUser?.id
+    }, 'high');
+
     navigate(`/dashboard/mail/sender/${campaignId}`);
   };
 
   const handleCreateCampaign = () => {
+    // Permission check
+    if (!canCreateCampaigns) {
+      toast.error('You do not have permission to create campaigns');
+      return;
+    }
+
     if (blockEmailSendIfPaused('Campaign creation')) return;
+    
+    logSecurityEvent('campaign_create_navigation', {
+      action: 'navigate_to_create',
+      business_id: businessId,
+      user_id: authUser?.id
+    }, 'low');
+
     navigate('/dashboard/mail/builder');
   };
 
   const handleDuplicate = async (campaign) => {
+    // Permission check
+    if (!canCreateCampaigns) {
+      toast.error('You do not have permission to duplicate campaigns');
+      return;
+    }
+
+    // Rate limiting
+    if (!checkRateLimit('duplicate_campaign', 5, 60000)) {
+      toast.error('Too many duplicate requests. Please wait a moment.');
+      return;
+    }
+
     try {
+      await logSecurityEvent('campaign_duplicate', {
+        action: 'duplicate_campaign',
+        original_campaign_id: campaign.id,
+        campaign_name: campaign.name,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'medium');
+
       // Create a duplicate campaign
       const duplicateData = {
         business_id: businessId,
@@ -159,7 +301,7 @@ const CampaignList = () => {
         status: 'draft',
         total_recipients: 0,
         emails_sent: 0,
-        created_by: campaign.created_by
+        created_by: authUser?.id
       };
 
       const { data, error } = await supabase
@@ -170,28 +312,52 @@ const CampaignList = () => {
 
       if (error) {
         console.error('Error duplicating campaign:', error);
-        alert('Failed to duplicate campaign. Please try again.');
+        toast.error('Failed to duplicate campaign. Please try again.');
+        await recordAction('campaign_duplicated', false, campaign.id);
         return;
       }
 
       // Reload campaigns to show the new duplicate
       loadCampaigns();
+      toast.success('Campaign duplicated successfully');
+      await recordAction('campaign_duplicated', true, data.id);
       
       // Navigate to edit the new campaign (with pause check)
       if (blockEmailSendIfPaused('Campaign editing')) return;
       navigate(`/dashboard/mail/builder/${data.id}`);
     } catch (error) {
       console.error('Error duplicating campaign:', error);
-      alert('Failed to duplicate campaign. Please try again.');
+      toast.error('Failed to duplicate campaign. Please try again.');
+      await recordAction('campaign_duplicated', false, campaign.id);
     }
   };
 
   const handleDelete = async (campaignId, campaignName) => {
+    // Permission check
+    if (!canDeleteCampaigns) {
+      toast.error('You do not have permission to delete campaigns');
+      return;
+    }
+
     if (!window.confirm(`Are you sure you want to delete "${campaignName}"? This action cannot be undone.`)) {
       return;
     }
 
+    // Rate limiting
+    if (!checkRateLimit('delete_campaign', 5, 60000)) {
+      toast.error('Too many delete requests. Please wait a moment.');
+      return;
+    }
+
     try {
+      await logSecurityEvent('campaign_delete', {
+        action: 'delete_campaign',
+        campaign_id: campaignId,
+        campaign_name: campaignName,
+        business_id: businessId,
+        user_id: authUser?.id
+      }, 'high');
+
       const { error } = await supabase
         .from('mail_campaigns')
         .delete()
@@ -200,15 +366,19 @@ const CampaignList = () => {
 
       if (error) {
         console.error('Error deleting campaign:', error);
-        alert('Failed to delete campaign. Please try again.');
+        toast.error('Failed to delete campaign. Please try again.');
+        await recordAction('campaign_deleted', false, campaignId);
         return;
       }
 
       // Reload campaigns to remove the deleted one
       loadCampaigns();
+      toast.success('Campaign deleted successfully');
+      await recordAction('campaign_deleted', true, campaignId);
     } catch (error) {
       console.error('Error deleting campaign:', error);
-      alert('Failed to delete campaign. Please try again.');
+      toast.error('Failed to delete campaign. Please try again.');
+      await recordAction('campaign_deleted', false, campaignId);
     }
   };
 
@@ -223,217 +393,249 @@ const CampaignList = () => {
     sending: campaigns.filter(c => c.status === 'sending').length
   };
 
-  if (loading) {
+  if (authLoading || permissionsLoading || loading) {
     return (
-      <div style={styles.container}>
-        <div style={styles.loading}>
-          <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
-          <div>Loading campaigns...</div>
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.loading}>
+            <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
+            <div>Loading campaigns...</div>
+          </div>
         </div>
-      </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  if (authError) {
+    return (
+      <POSAuthWrapper>
+        <div style={styles.container}>
+          <div style={styles.errorState}>
+            <FiAlertCircle style={styles.errorIcon} />
+            <h2>Authentication Error</h2>
+            <p>{authError}</p>
+          </div>
+        </div>
+      </POSAuthWrapper>
     );
   }
 
   return (
-    <div style={styles.container}>
-      {/* Pause Banner */}
-      <EmailPauseBanner />
+    <POSAuthWrapper>
+      <SecurityWrapper>
+        <div style={styles.container}>
+          {/* Pause Banner */}
+          <EmailPauseBanner />
 
-      {/* Header */}
-      <div style={styles.header}>
-        <div style={styles.headerLeft}>
-          <h1 style={styles.title}>Email Campaigns</h1>
-          <p style={styles.subtitle}>Create and manage your email marketing campaigns</p>
-        </div>
-        <button 
-          style={{
-            ...styles.createButton,
-            ...(emailSendingPaused ? styles.disabledButton : {})
-          }}
-          onClick={handleCreateCampaign}
-          disabled={emailSendingPaused}
-        >
-          <FiPlus style={styles.buttonIcon} />
-          Create Campaign
-          {emailSendingPaused && <span style={styles.pausedLabel}>(Paused)</span>}
-        </button>
-      </div>
-
-      {/* Error Message */}
-      {error && (
-        <div style={styles.errorMessage}>
-          <FiAlertCircle style={styles.errorIcon} />
-          <span>{error}</span>
-          <button 
-            style={styles.retryButton}
-            onClick={loadCampaigns}
-          >
-            <FiRefreshCw style={styles.buttonIcon} />
-            Retry
-          </button>
-        </div>
-      )}
-
-      {/* Filter Tabs */}
-      <div style={styles.filterTabs}>
-        {[
-          { key: 'all', label: `All (${campaignCounts.all})` },
-          { key: 'draft', label: `Drafts (${campaignCounts.draft})` },
-          { key: 'sent', label: `Sent (${campaignCounts.sent})` },
-          { key: 'scheduled', label: `Scheduled (${campaignCounts.scheduled})` },
-          ...(campaignCounts.sending > 0 ? [{ key: 'sending', label: `Sending (${campaignCounts.sending})` }] : [])
-        ].map(tab => (
-          <button
-            key={tab.key}
-            style={{
-              ...styles.filterTab,
-              ...(filter === tab.key ? styles.activeFilterTab : {})
-            }}
-            onClick={() => setFilter(tab.key)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Campaigns List */}
-      {filteredCampaigns.length === 0 ? (
-        <div style={styles.emptyState}>
-          <div style={styles.emptyIcon}><FiMail /></div>
-          <h3 style={styles.emptyTitle}>
-            {filter === 'all' 
-              ? 'No campaigns found'
-              : `No ${filter} campaigns found`
-            }
-          </h3>
-          <p style={styles.emptyText}>
-            {filter === 'all' 
-              ? "You haven't created any campaigns yet. Create your first email campaign to get started!"
-              : `No campaigns with status "${filter}" found. Try switching to a different filter or create a new campaign.`
-            }
-          </p>
-          <button 
-            style={{
-              ...styles.emptyButton,
-              ...(emailSendingPaused ? styles.disabledButton : {})
-            }}
-            onClick={handleCreateCampaign}
-            disabled={emailSendingPaused}
-          >
-            <FiPlus style={styles.buttonIcon} />
-            Create Your First Campaign
-            {emailSendingPaused && <span style={styles.pausedLabel}>(Paused)</span>}
-          </button>
-        </div>
-      ) : (
-        <div style={styles.campaignsList}>
-          {filteredCampaigns.map(campaign => (
-            <div key={campaign.id} style={styles.campaignCard}>
-              <div style={styles.campaignHeader}>
-                <div style={styles.campaignInfo}>
-                  <div style={styles.campaignName}>{campaign.name}</div>
-                  <div style={styles.campaignSubject}>{campaign.subject_line}</div>
-                </div>
-                <div style={styles.campaignStatus}>
-                  {getStatusIcon(campaign.status)}
-                  <span style={styles.statusText}>{getStatusText(campaign.status)}</span>
-                </div>
-              </div>
-              
-              <div style={styles.campaignStats}>
-                <div style={styles.stat}>
-                  <span style={styles.statLabel}>Recipients:</span>
-                  <span style={styles.statValue}>
-                    {(campaign.total_recipients || 0).toLocaleString()}
-                  </span>
-                </div>
-                <div style={styles.stat}>
-                  <span style={styles.statLabel}>Sent:</span>
-                  <span style={styles.statValue}>
-                    {(campaign.emails_sent || 0).toLocaleString()}
-                  </span>
-                </div>
-                <div style={styles.stat}>
-                  <span style={styles.statLabel}>Created:</span>
-                  <span style={styles.statValue}>{formatDate(campaign.created_at)}</span>
-                </div>
-                {campaign.sent_at && (
-                  <div style={styles.stat}>
-                    <span style={styles.statLabel}>Sent:</span>
-                    <span style={styles.statValue}>{formatDate(campaign.sent_at)}</span>
-                  </div>
-                )}
-                {campaign.scheduled_at && (
-                  <div style={styles.stat}>
-                    <span style={styles.statLabel}>Scheduled:</span>
-                    <span style={styles.statValue}>{formatDate(campaign.scheduled_at)}</span>
-                  </div>
-                )}
-              </div>
-              
-              <div style={styles.campaignActions}>
-                {(campaign.status === 'draft' || campaign.status === 'scheduled') && (
-                  <button 
-                    style={{
-                      ...styles.actionButton,
-                      ...(emailSendingPaused ? styles.disabledActionButton : {})
-                    }}
-                    onClick={() => handleEdit(campaign.id)}
-                    disabled={emailSendingPaused}
-                  >
-                    <FiEdit3 style={styles.actionIcon} />
-                    Edit
-                    {emailSendingPaused && <span style={styles.actionPausedLabel}>Paused</span>}
-                  </button>
-                )}
-                
-                <button 
-                  style={styles.actionButton}
-                  onClick={() => navigate(`/dashboard/mail/campaigns/${campaign.id}`)}
-                >
-                  <FiEye style={styles.actionIcon} />
-                  View Details
-                </button>
-                
-                <button 
-                  style={styles.actionButton}
-                  onClick={() => handleDuplicate(campaign)}
-                >
-                  <FiCopy style={styles.actionIcon} />
-                  Duplicate
-                </button>
-                
-                {campaign.status === 'draft' && (
-                  <button 
-                    style={{
-                      ...styles.actionButton,
-                      ...styles.sendButton,
-                      ...(emailSendingPaused ? styles.disabledSendButton : {})
-                    }}
-                    onClick={() => handleSendNow(campaign.id)}
-                    disabled={emailSendingPaused}
-                  >
-                    <FiSend style={styles.actionIcon} />
-                    Send Now
-                    {emailSendingPaused && <span style={styles.actionPausedLabel}>Paused</span>}
-                  </button>
-                )}
-                
-                {(campaign.status === 'draft' || campaign.status === 'scheduled' || campaign.status === 'sending') && (
-                  <button 
-                    style={{...styles.actionButton, ...styles.deleteButton}}
-                    onClick={() => handleDelete(campaign.id, campaign.name)}
-                  >
-                    <FiTrash2 style={styles.actionIcon} />
-                    Delete
-                  </button>
-                )}
-              </div>
+          {/* Header */}
+          <div style={styles.header}>
+            <div style={styles.headerLeft}>
+              <h1 style={styles.title}>Email Campaigns</h1>
+              <p style={styles.subtitle}>Create and manage your email marketing campaigns</p>
             </div>
-          ))}
+            <PermissionGate permission="mail.campaigns.create">
+              <button 
+                style={{
+                  ...styles.createButton,
+                  ...(emailSendingPaused ? styles.disabledButton : {})
+                }}
+                onClick={handleCreateCampaign}
+                disabled={emailSendingPaused}
+              >
+                <FiPlus style={styles.buttonIcon} />
+                Create Campaign
+                {emailSendingPaused && <span style={styles.pausedLabel}>(Paused)</span>}
+              </button>
+            </PermissionGate>
+          </div>
+
+          {/* Error Message */}
+          {error && (
+            <div style={styles.errorMessage}>
+              <FiAlertCircle style={styles.errorIcon} />
+              <span>{error}</span>
+              <button 
+                style={styles.retryButton}
+                onClick={loadCampaigns}
+              >
+                <FiRefreshCw style={styles.buttonIcon} />
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* Filter Tabs */}
+          <div style={styles.filterTabs}>
+            {[
+              { key: 'all', label: `All (${campaignCounts.all})` },
+              { key: 'draft', label: `Drafts (${campaignCounts.draft})` },
+              { key: 'sent', label: `Sent (${campaignCounts.sent})` },
+              { key: 'scheduled', label: `Scheduled (${campaignCounts.scheduled})` },
+              ...(campaignCounts.sending > 0 ? [{ key: 'sending', label: `Sending (${campaignCounts.sending})` }] : [])
+            ].map(tab => (
+              <button
+                key={tab.key}
+                style={{
+                  ...styles.filterTab,
+                  ...(filter === tab.key ? styles.activeFilterTab : {})
+                }}
+                onClick={() => setFilter(tab.key)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Campaigns List */}
+          {filteredCampaigns.length === 0 ? (
+            <div style={styles.emptyState}>
+              <div style={styles.emptyIcon}><FiMail /></div>
+              <h3 style={styles.emptyTitle}>
+                {filter === 'all' 
+                  ? 'No campaigns found'
+                  : `No ${filter} campaigns found`
+                }
+              </h3>
+              <p style={styles.emptyText}>
+                {filter === 'all' 
+                  ? "You haven't created any campaigns yet. Create your first email campaign to get started!"
+                  : `No campaigns with status "${filter}" found. Try switching to a different filter or create a new campaign.`
+                }
+              </p>
+              <PermissionGate permission="mail.campaigns.create">
+                <button 
+                  style={{
+                    ...styles.emptyButton,
+                    ...(emailSendingPaused ? styles.disabledButton : {})
+                  }}
+                  onClick={handleCreateCampaign}
+                  disabled={emailSendingPaused}
+                >
+                  <FiPlus style={styles.buttonIcon} />
+                  Create Your First Campaign
+                  {emailSendingPaused && <span style={styles.pausedLabel}>(Paused)</span>}
+                </button>
+              </PermissionGate>
+            </div>
+          ) : (
+            <div style={styles.campaignsList}>
+              {filteredCampaigns.map(campaign => (
+                <div key={campaign.id} style={styles.campaignCard}>
+                  <div style={styles.campaignHeader}>
+                    <div style={styles.campaignInfo}>
+                      <div style={styles.campaignName}>{campaign.name}</div>
+                      <div style={styles.campaignSubject}>{campaign.subject_line}</div>
+                    </div>
+                    <div style={styles.campaignStatus}>
+                      {getStatusIcon(campaign.status)}
+                      <span style={styles.statusText}>{getStatusText(campaign.status)}</span>
+                    </div>
+                  </div>
+                  
+                  <div style={styles.campaignStats}>
+                    <div style={styles.stat}>
+                      <span style={styles.statLabel}>Recipients:</span>
+                      <span style={styles.statValue}>
+                        {(campaign.total_recipients || 0).toLocaleString()}
+                      </span>
+                    </div>
+                    <div style={styles.stat}>
+                      <span style={styles.statLabel}>Sent:</span>
+                      <span style={styles.statValue}>
+                        {(campaign.emails_sent || 0).toLocaleString()}
+                      </span>
+                    </div>
+                    <div style={styles.stat}>
+                      <span style={styles.statLabel}>Created:</span>
+                      <span style={styles.statValue}>{formatDate(campaign.created_at)}</span>
+                    </div>
+                    {campaign.sent_at && (
+                      <div style={styles.stat}>
+                        <span style={styles.statLabel}>Sent:</span>
+                        <span style={styles.statValue}>{formatDate(campaign.sent_at)}</span>
+                      </div>
+                    )}
+                    {campaign.scheduled_at && (
+                      <div style={styles.stat}>
+                        <span style={styles.statLabel}>Scheduled:</span>
+                        <span style={styles.statValue}>{formatDate(campaign.scheduled_at)}</span>
+                      </div>
+                    )}
+                  </div>
+                  
+                  <div style={styles.campaignActions}>
+                    <PermissionGate permission="mail.campaigns.create">
+                      {(campaign.status === 'draft' || campaign.status === 'scheduled') && (
+                        <button 
+                          style={{
+                            ...styles.actionButton,
+                            ...(emailSendingPaused ? styles.disabledActionButton : {})
+                          }}
+                          onClick={() => handleEdit(campaign.id)}
+                          disabled={emailSendingPaused}
+                        >
+                          <FiEdit3 style={styles.actionIcon} />
+                          Edit
+                          {emailSendingPaused && <span style={styles.actionPausedLabel}>Paused</span>}
+                        </button>
+                      )}
+                    </PermissionGate>
+                    
+                    <button 
+                      style={styles.actionButton}
+                      onClick={() => navigate(`/dashboard/mail/campaigns/${campaign.id}`)}
+                    >
+                      <FiEye style={styles.actionIcon} />
+                      View Details
+                    </button>
+                    
+                    <PermissionGate permission="mail.campaigns.create">
+                      <button 
+                        style={styles.actionButton}
+                        onClick={() => handleDuplicate(campaign)}
+                      >
+                        <FiCopy style={styles.actionIcon} />
+                        Duplicate
+                      </button>
+                    </PermissionGate>
+                    
+                    <PermissionGate permission="mail.campaigns.send">
+                      {campaign.status === 'draft' && (
+                        <button 
+                          style={{
+                            ...styles.actionButton,
+                            ...styles.sendButton,
+                            ...(emailSendingPaused ? styles.disabledSendButton : {})
+                          }}
+                          onClick={() => handleSendNow(campaign.id)}
+                          disabled={emailSendingPaused}
+                        >
+                          <FiSend style={styles.actionIcon} />
+                          Send Now
+                          {emailSendingPaused && <span style={styles.actionPausedLabel}>Paused</span>}
+                        </button>
+                      )}
+                    </PermissionGate>
+                    
+                    <PermissionGate permission="mail.campaigns.delete">
+                      {(campaign.status === 'draft' || campaign.status === 'scheduled' || campaign.status === 'sending') && (
+                        <button 
+                          style={{...styles.actionButton, ...styles.deleteButton}}
+                          onClick={() => handleDelete(campaign.id, campaign.name)}
+                        >
+                          <FiTrash2 style={styles.actionIcon} />
+                          Delete
+                        </button>
+                      )}
+                    </PermissionGate>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-      )}
-    </div>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 
@@ -457,6 +659,19 @@ const styles = {
     fontSize: '48px',
     marginBottom: '20px',
     color: 'teal',
+  },
+  errorState: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '60px',
+    textAlign: 'center',
+  },
+  errorIcon: {
+    fontSize: '48px',
+    color: '#f44336',
+    marginBottom: '20px',
   },
   header: {
     display: 'flex',
@@ -520,9 +735,6 @@ const styles = {
     alignItems: 'center',
     gap: '10px',
     color: '#f44336',
-  },
-  errorIcon: {
-    fontSize: '18px',
   },
   retryButton: {
     backgroundColor: '#f44336',

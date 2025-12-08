@@ -1,10 +1,12 @@
-// src/screens/POS/POSReportsScreen.jsx
-// Fixed version - removed redundant POSAuthWrapper
+// src/screens/POS/POSReportsScreen.jsx - Production Ready with Permissions & Security
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
-import { logAction } from '../../helpers/posAudit';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
+import { SecurityWrapper, useSecurityContext } from '../../Security';
+import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
 
@@ -32,13 +34,57 @@ import ProfitMarginAnalysisReport from '../../components/Reports/ProfitMarginAna
 import PromotionalEffectivenessReport from '../../components/Reports/PromotionalEffectivenessReport';
 
 const POSReportsScreen = () => {
-  // Authentication and business context - use hook directly without wrapper
+  // Authentication
   const auth = usePOSAuth({
     requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'POS Reports Screen'
   });
 
+  // Security context
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSReportsScreen',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'medium'
+  });
+
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks for different report types
+  const canViewSalesReports = hasAnyPermission([
+    'pos.reports.view',
+    'pos.reports.sales'
+  ]) || hasElevatedPrivileges();
+
+  const canViewFinancialReports = hasAnyPermission([
+    'pos.reports.view',
+    'pos.reports.financial'
+  ]) || hasElevatedPrivileges();
+
+  const canViewInventoryReports = hasAnyPermission([
+    'pos.reports.view',
+    'pos.reports.inventory'
+  ]) || hasElevatedPrivileges();
+
+  const canViewEmployeeReports = hasPermission('pos.reports.employee') || hasElevatedPrivileges();
+  const canViewCustomerReports = hasPermission('pos.reports.customer') || hasElevatedPrivileges();
+  const canExportReports = hasPermission('pos.reports.export') || hasElevatedPrivileges();
+  const canEmailReports = hasPermission('pos.reports.email') || hasElevatedPrivileges();
+
+  // Tax calculations
   const {
     calculateTotalTax,
     formatTaxAmount,
@@ -48,7 +94,7 @@ const POSReportsScreen = () => {
     error: taxError
   } = useTaxCalculations(auth.selectedBusinessId);
 
-  // Available report types with their components
+  // Report configuration
   const REPORT_COMPONENTS = {
     'sales-summary': SalesSummaryReport,
     'payment-methods': PaymentMethodsReport,
@@ -97,6 +143,32 @@ const POSReportsScreen = () => {
     'promotional-effectiveness': 'Promotional Effectiveness'
   };
 
+  // Report type to permission mapping
+  const REPORT_PERMISSIONS = {
+    'sales-summary': 'sales',
+    'payment-methods': 'financial',
+    'cash-drawer': 'financial',
+    'hourly-breakdown': 'sales',
+    'tax-report': 'financial',
+    'end-period': 'financial',
+    'refunds-voids': 'financial',
+    'discount-usage': 'sales',
+    'top-items': 'inventory',
+    'category-performance': 'inventory',
+    'low-stock': 'inventory',
+    'product-mix': 'inventory',
+    'employee-performance': 'employee',
+    'labor-analysis': 'employee',
+    'shift-reports': 'employee',
+    'loyalty-program': 'customer',
+    'customer-history': 'customer',
+    'customer-value': 'customer',
+    'year-comparison': 'financial',
+    'profit-margin': 'financial',
+    'promotional-effectiveness': 'sales'
+  };
+
+  // State
   const [reportData, setReportData] = useState({
     salesTotals: 0,
     refundTotals: 0,
@@ -128,8 +200,27 @@ const POSReportsScreen = () => {
   const [compareToLastYear, setCompareToLastYear] = useState(false);
   const [includeTaxBreakdown, setIncludeTaxBreakdown] = useState(true);
   const [selectedReport, setSelectedReport] = useState('sales-summary');
-  
   const [employees, setEmployees] = useState([]);
+
+  // Check if user can view current report
+  const canViewCurrentReport = () => {
+    const reportType = REPORT_PERMISSIONS[selectedReport];
+    
+    switch (reportType) {
+      case 'sales':
+        return canViewSalesReports;
+      case 'financial':
+        return canViewFinancialReports;
+      case 'inventory':
+        return canViewInventoryReports;
+      case 'employee':
+        return canViewEmployeeReports;
+      case 'customer':
+        return canViewCustomerReports;
+      default:
+        return canViewSalesReports;
+    }
+  };
 
   useEffect(() => {
     if (auth.selectedBusinessId && auth.isReady) {
@@ -146,6 +237,11 @@ const POSReportsScreen = () => {
 
   const loadEmployees = async () => {
     try {
+      await logSecurityEvent('employees_list_accessed', {
+        action: 'load_for_reports',
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       const { data, error } = await supabase
         .from('user_roles')
         .select(`
@@ -165,7 +261,10 @@ const POSReportsScreen = () => {
       
       setEmployees(employeeList);
     } catch (err) {
-      console.error('Error loading employees:', err);
+      await logSecurityEvent('employees_list_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
     }
   };
 
@@ -215,10 +314,29 @@ const POSReportsScreen = () => {
 
   const generateReport = async () => {
     if (!auth.selectedBusinessId || !auth.isReady) return;
+    if (!canViewCurrentReport()) {
+      setError('You do not have permission to view this report type');
+      return;
+    }
+
+    // Rate limiting for report generation
+    const rateLimitCheck = await checkRateLimit('generate_report', 20, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many report requests. Please wait a moment.');
+      return;
+    }
 
     try {
       setLoading(true);
       setError(null);
+
+      await logSecurityEvent('report_generated', {
+        report_type: selectedReport,
+        date_range: dateRange,
+        business_id: auth.selectedBusinessId,
+        generated_by: auth.authUser?.id,
+        custom_dates: dateRange === 'custom' ? { start: customDateStart, end: customDateEnd } : null
+      }, 'low');
 
       const { start, end } = getDateFilter();
       
@@ -242,7 +360,6 @@ const POSReportsScreen = () => {
       const { data: sales, error: salesError } = await salesQuery;
       if (salesError) throw salesError;
 
-      // Filter only completed sales for calculations
       const completedSales = sales?.filter(sale => sale.payment_status === 'paid' || sale.payment_status === 'completed') || [];
 
       // Get refunds
@@ -395,73 +512,122 @@ const POSReportsScreen = () => {
         }
       });
 
-      await logAction({
-        action: 'pos_report_generated',
-        context: 'POSReportsScreen',
-        metadata: {
-          date_range: dateRange,
-          total_sales: salesTotals,
-          net_sales: netSales,
-          transactions_count: completedSales?.length || 0,
-          selected_report: selectedReport,
-          business_id: auth.selectedBusinessId
-        }
-      });
+      await recordAction('pos_report_generated', {
+        report_type: selectedReport,
+        date_range: dateRange,
+        total_sales: salesTotals,
+        net_sales: netSales,
+        transactions_count: completedSales?.length || 0
+      }, true);
 
     } catch (err) {
-      console.error('Error generating report:', err);
+      await logSecurityEvent('report_generation_error', {
+        error: err.message,
+        report_type: selectedReport,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Failed to generate report: ' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  // Handle export from report components
-  const handleExport = (content, format, reportType) => {
-    const fileName = `${reportType}-${dateRange}-${new Date().toISOString().split('T')[0]}`;
-    
-    if (format === 'csv' || format === 'excel') {
-      const encodedUri = encodeURI(content);
-      const link = document.createElement("a");
-      link.setAttribute("href", encodedUri);
-      link.setAttribute("download", fileName + (format === 'csv' ? '.csv' : '.xlsx'));
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } else if (format === 'pdf') {
-      // PDF export would be implemented here
-      alert('PDF export functionality will be implemented with a PDF library');
+  // Export handler
+  const handleExport = async (content, format, reportType) => {
+    if (!canExportReports) {
+      alert('You do not have permission to export reports');
+      await logSecurityEvent('report_export_denied', {
+        report_type: reportType,
+        format: format,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      return;
     }
 
-    logAction({
-      action: 'pos_report_exported',
-      context: 'POSReportsScreen',
-      metadata: {
-        format,
+    const rateLimitCheck = await checkRateLimit('export_report', 5, 60000);
+    if (!rateLimitCheck.allowed) {
+      alert('Too many export attempts. Please wait a moment.');
+      return;
+    }
+
+    try {
+      const fileName = `${reportType}-${dateRange}-${new Date().toISOString().split('T')[0]}`;
+      
+      if (format === 'csv' || format === 'excel') {
+        const encodedUri = encodeURI(content);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", fileName + (format === 'csv' ? '.csv' : '.xlsx'));
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      } else if (format === 'pdf') {
+        alert('PDF export functionality will be implemented with a PDF library');
+      }
+
+      await logSecurityEvent('report_exported', {
+        format: format,
         report_type: reportType,
         file_name: fileName,
         date_range: dateRange,
+        business_id: auth.selectedBusinessId,
+        exported_by: auth.authUser?.id
+      }, 'low');
+
+      await recordAction('pos_report_exported', {
+        format: format,
+        report_type: reportType
+      }, true);
+
+    } catch (err) {
+      await logSecurityEvent('report_export_error', {
+        error: err.message,
+        report_type: reportType,
         business_id: auth.selectedBusinessId
-      }
-    });
+      }, 'medium');
+    }
   };
 
-  // Handle email from report components
-  const handleEmail = (emailContent) => {
-    // Email functionality would be implemented here
-    // For now, we'll just open the default email client
-    const mailtoLink = `mailto:?subject=${encodeURIComponent(emailContent.subject)}&body=${encodeURIComponent(emailContent.body)}`;
-    window.open(mailtoLink);
+  // Email handler
+  const handleEmail = async (emailContent) => {
+    if (!canEmailReports) {
+      alert('You do not have permission to email reports');
+      await logSecurityEvent('report_email_denied', {
+        report_type: selectedReport,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      return;
+    }
 
-    logAction({
-      action: 'pos_report_emailed',
-      context: 'POSReportsScreen',
-      metadata: {
+    const rateLimitCheck = await checkRateLimit('email_report', 3, 60000);
+    if (!rateLimitCheck.allowed) {
+      alert('Too many email attempts. Please wait a moment.');
+      return;
+    }
+
+    try {
+      const mailtoLink = `mailto:?subject=${encodeURIComponent(emailContent.subject)}&body=${encodeURIComponent(emailContent.body)}`;
+      window.open(mailtoLink);
+
+      await logSecurityEvent('report_emailed', {
         report_type: selectedReport,
         date_range: dateRange,
+        business_id: auth.selectedBusinessId,
+        emailed_by: auth.authUser?.id
+      }, 'low');
+
+      await recordAction('pos_report_emailed', {
+        report_type: selectedReport
+      }, true);
+
+    } catch (err) {
+      await logSecurityEvent('report_email_error', {
+        error: err.message,
+        report_type: selectedReport,
         business_id: auth.selectedBusinessId
-      }
-    });
+      }, 'medium');
+    }
   };
 
   const formatCurrency = (amount) => `$${(amount || 0).toFixed(2)}`;
@@ -535,189 +701,269 @@ const POSReportsScreen = () => {
       padding: TavariStyles.spacing.xl,
       textAlign: 'center',
       color: TavariStyles.colors.gray500
+    },
+
+    noAccessContainer: {
+      padding: TavariStyles.spacing['3xl'],
+      textAlign: 'center'
+    },
+
+    noAccessText: {
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600,
+      margin: 0
     }
   };
 
-  // Get the selected report component
   const ReportComponent = REPORT_COMPONENTS[selectedReport];
 
-  // Show loading state if auth is loading
-  if (auth.authLoading) {
-    return <div style={styles.loading}>Authenticating...</div>;
+  // Check overall access
+  if (!permissionsLoading && !canViewSalesReports && !canViewFinancialReports && !canViewInventoryReports && !canViewEmployeeReports && !canViewCustomerReports) {
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['employee', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="POS Reports Screen"
+        >
+          <div style={styles.container}>
+            <div style={styles.noAccessContainer}>
+              <h3 style={{ color: TavariStyles.colors.danger }}>Access Denied</h3>
+              <p style={styles.noAccessText}>
+                You do not have permission to view any reports.
+              </p>
+            </div>
+          </div>
+        </POSAuthWrapper>
+      </SecurityWrapper>
+    );
   }
 
-  // Show error if auth failed
+  if (auth.authLoading || permissionsLoading) {
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['employee', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="POS Reports Screen"
+        >
+          <div style={styles.loading}>Loading...</div>
+        </POSAuthWrapper>
+      </SecurityWrapper>
+    );
+  }
+
   if (auth.authError) {
-    return <div style={styles.errorBanner}>{auth.authError}</div>;
+    return (
+      <SecurityWrapper>
+        <POSAuthWrapper
+          requiredRoles={['employee', 'manager', 'owner']}
+          requireBusiness={true}
+          componentName="POS Reports Screen"
+        >
+          <div style={styles.errorBanner}>{auth.authError}</div>
+        </POSAuthWrapper>
+      </SecurityWrapper>
+    );
   }
 
-  // Main render - NO POSAuthWrapper needed since we're using the hook directly
   return (
-    <div style={styles.container}>
-      {error && <div style={styles.errorBanner}>{error}</div>}
-      {taxError && <div style={styles.errorBanner}>Tax calculation error: {taxError}</div>}
+    <SecurityWrapper>
+      <POSAuthWrapper
+        requiredRoles={['employee', 'manager', 'owner']}
+        requireBusiness={true}
+        componentName="POS Reports Screen"
+      >
+        <div style={styles.container}>
+          {error && <div style={styles.errorBanner}>{error}</div>}
+          {taxError && <div style={styles.errorBanner}>Tax calculation error: {taxError}</div>}
 
-      {/* Report Controls */}
-      <div style={styles.controls}>
-        <div style={styles.controlGroup}>
-          <label style={styles.label}>Report Type:</label>
-          <select
-            value={selectedReport}
-            onChange={(e) => setSelectedReport(e.target.value)}
-            style={styles.select}
-          >
-            <optgroup label="Daily Operations">
-              <option value="sales-summary">Daily Sales Summary</option>
-              <option value="cash-drawer">Cash Drawer Reconciliation</option>
-              <option value="hourly-breakdown">Hourly Sales Breakdown</option>
-              <option value="payment-methods">Payment Method Analysis</option>
-            </optgroup>
-            <optgroup label="Financial & Tax">
-              <option value="tax-report">Tax Compliance Report</option>
-              <option value="end-period">End-of-Period Sales</option>
-              <option value="refunds-voids">Refunds & Voids Report</option>
-              <option value="discount-usage">Discount Usage Report</option>
-            </optgroup>
-            <optgroup label="Inventory & Products">
-              <option value="top-items">Top/Bottom Selling Items</option>
-              <option value="category-performance">Category Performance</option>
-              <option value="low-stock">Low Stock Alerts</option>
-              <option value="product-mix">Product Mix Analysis</option>
-            </optgroup>
-            <optgroup label="Staff & Labor">
-              <option value="employee-performance">Employee Sales Performance</option>
-              <option value="labor-analysis">Labor Cost Analysis</option>
-              <option value="shift-reports">Shift Performance Reports</option>
-            </optgroup>
-            <optgroup label="Customer Insights">
-              <option value="loyalty-program">Loyalty Program Report</option>
-              <option value="customer-history">Customer Transaction History</option>
-              <option value="customer-value">Average Customer Value</option>
-            </optgroup>
-            <optgroup label="Business Intelligence">
-              <option value="year-comparison">Year-over-Year Comparison</option>
-              <option value="profit-margin">Profit Margin Analysis</option>
-              <option value="promotional-effectiveness">Promotional Effectiveness</option>
-            </optgroup>
-          </select>
-        </div>
-
-        <div style={styles.controlGroup}>
-          <label style={styles.label}>Date Range:</label>
-          <select
-            value={dateRange}
-            onChange={(e) => setDateRange(e.target.value)}
-            style={styles.select}
-          >
-            <option value="today">Today</option>
-            <option value="yesterday">Yesterday</option>
-            <option value="week">This Week</option>
-            <option value="month">This Month</option>
-            <option value="custom">Custom Range</option>
-          </select>
-        </div>
-
-        {dateRange === 'custom' && (
-          <>
+          {/* Report Controls */}
+          <div style={styles.controls}>
             <div style={styles.controlGroup}>
-              <label style={styles.label}>Start Date:</label>
-              <input
-                type="date"
-                value={customDateStart}
-                onChange={(e) => setCustomDateStart(e.target.value)}
-                style={styles.input}
+              <label style={styles.label}>Report Type:</label>
+              <select
+                value={selectedReport}
+                onChange={(e) => setSelectedReport(e.target.value)}
+                style={styles.select}
+              >
+                {canViewSalesReports && (
+                  <optgroup label="Daily Operations">
+                    <option value="sales-summary">Daily Sales Summary</option>
+                    <option value="cash-drawer">Cash Drawer Reconciliation</option>
+                    <option value="hourly-breakdown">Hourly Sales Breakdown</option>
+                    <option value="payment-methods">Payment Method Analysis</option>
+                  </optgroup>
+                )}
+                {canViewFinancialReports && (
+                  <optgroup label="Financial & Tax">
+                    <option value="tax-report">Tax Compliance Report</option>
+                    <option value="end-period">End-of-Period Sales</option>
+                    <option value="refunds-voids">Refunds & Voids Report</option>
+                    <option value="discount-usage">Discount Usage Report</option>
+                  </optgroup>
+                )}
+                {canViewInventoryReports && (
+                  <optgroup label="Inventory & Products">
+                    <option value="top-items">Top/Bottom Selling Items</option>
+                    <option value="category-performance">Category Performance</option>
+                    <option value="low-stock">Low Stock Alerts</option>
+                    <option value="product-mix">Product Mix Analysis</option>
+                  </optgroup>
+                )}
+                {canViewEmployeeReports && (
+                  <optgroup label="Staff & Labor">
+                    <option value="employee-performance">Employee Sales Performance</option>
+                    <option value="labor-analysis">Labor Cost Analysis</option>
+                    <option value="shift-reports">Shift Performance Reports</option>
+                  </optgroup>
+                )}
+                {canViewCustomerReports && (
+                  <optgroup label="Customer Insights">
+                    <option value="loyalty-program">Loyalty Program Report</option>
+                    <option value="customer-history">Customer Transaction History</option>
+                    <option value="customer-value">Average Customer Value</option>
+                  </optgroup>
+                )}
+                {canViewFinancialReports && (
+                  <optgroup label="Business Intelligence">
+                    <option value="year-comparison">Year-over-Year Comparison</option>
+                    <option value="profit-margin">Profit Margin Analysis</option>
+                    <option value="promotional-effectiveness">Promotional Effectiveness</option>
+                  </optgroup>
+                )}
+              </select>
+            </div>
+
+            <div style={styles.controlGroup}>
+              <label style={styles.label}>Date Range:</label>
+              <select
+                value={dateRange}
+                onChange={(e) => setDateRange(e.target.value)}
+                style={styles.select}
+              >
+                <option value="today">Today</option>
+                <option value="yesterday">Yesterday</option>
+                <option value="week">This Week</option>
+                <option value="month">This Month</option>
+                <option value="custom">Custom Range</option>
+              </select>
+            </div>
+
+            {dateRange === 'custom' && (
+              <>
+                <div style={styles.controlGroup}>
+                  <label style={styles.label}>Start Date:</label>
+                  <input
+                    type="date"
+                    value={customDateStart}
+                    onChange={(e) => setCustomDateStart(e.target.value)}
+                    style={styles.input}
+                  />
+                </div>
+                <div style={styles.controlGroup}>
+                  <label style={styles.label}>End Date:</label>
+                  <input
+                    type="date"
+                    value={customDateEnd}
+                    onChange={(e) => setCustomDateEnd(e.target.value)}
+                    style={styles.input}
+                  />
+                </div>
+              </>
+            )}
+
+            <div style={styles.controlGroup}>
+              <label style={styles.label}>Employee:</label>
+              <select
+                value={selectedEmployee}
+                onChange={(e) => setSelectedEmployee(e.target.value)}
+                style={styles.select}
+              >
+                <option value="all">All Employees</option>
+                {employees.map(emp => (
+                  <option key={emp.id} value={emp.id}>
+                    {emp.full_name || emp.email}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={styles.controlGroup}>
+              <TavariCheckbox
+                checked={compareToLastYear}
+                onChange={setCompareToLastYear}
+                label="Compare to Last Year"
+                id="compare-last-year"
               />
             </div>
+
             <div style={styles.controlGroup}>
-              <label style={styles.label}>End Date:</label>
-              <input
-                type="date"
-                value={customDateEnd}
-                onChange={(e) => setCustomDateEnd(e.target.value)}
-                style={styles.input}
+              <TavariCheckbox
+                checked={includeTaxBreakdown}
+                onChange={setIncludeTaxBreakdown}
+                label="Include Tax Breakdown"
+                id="include-tax-breakdown"
               />
             </div>
-          </>
-        )}
+          </div>
 
-        <div style={styles.controlGroup}>
-          <label style={styles.label}>Employee:</label>
-          <select
-            value={selectedEmployee}
-            onChange={(e) => setSelectedEmployee(e.target.value)}
-            style={styles.select}
-          >
-            <option value="all">All Employees</option>
-            {employees.map(emp => (
-              <option key={emp.id} value={emp.id}>
-                {emp.full_name || emp.email}
-              </option>
-            ))}
-          </select>
-        </div>
+          {/* Quick Summary Cards */}
+          <PermissionGate permissions={['pos.reports.view']} fallback={null}>
+            <div style={styles.summaryGrid}>
+              <div style={styles.summaryCard}>
+                <div style={styles.summaryValue}>{formatCurrency(reportData.salesTotals)}</div>
+                <div style={styles.summaryLabel}>Total Sales</div>
+              </div>
+              <div style={styles.summaryCard}>
+                <div style={styles.summaryValue}>{formatCurrency(reportData.netSales)}</div>
+                <div style={styles.summaryLabel}>Net Sales</div>
+              </div>
+              <div style={styles.summaryCard}>
+                <div style={styles.summaryValue}>{reportData.totalTransactions}</div>
+                <div style={styles.summaryLabel}>Transactions</div>
+              </div>
+              <div style={styles.summaryCard}>
+                <div style={styles.summaryValue}>{formatCurrency(reportData.avgTransaction)}</div>
+                <div style={styles.summaryLabel}>Avg Transaction</div>
+              </div>
+            </div>
+          </PermissionGate>
 
-        <div style={styles.controlGroup}>
-          <TavariCheckbox
-            checked={compareToLastYear}
-            onChange={setCompareToLastYear}
-            label="Compare to Last Year"
-            id="compare-last-year"
-          />
+          {/* Report Content */}
+          {loading ? (
+            <div style={styles.loading}>Generating report...</div>
+          ) : !canViewCurrentReport() ? (
+            <div style={styles.noAccessContainer}>
+              <h3 style={{ color: TavariStyles.colors.danger }}>Access Denied</h3>
+              <p style={styles.noAccessText}>
+                You do not have permission to view this report type.
+              </p>
+            </div>
+          ) : ReportComponent ? (
+            <ReportComponent
+              data={reportData}
+              dateRange={dateRange}
+              customDateStart={customDateStart}
+              customDateEnd={customDateEnd}
+              compareToLastYear={compareToLastYear}
+              selectedEmployee={selectedEmployee}
+              employees={employees}
+              businessId={auth.selectedBusinessId}
+              onExport={handleExport}
+              onEmail={handleEmail}
+              canExport={canExportReports}
+              canEmail={canEmailReports}
+            />
+          ) : (
+            <div style={styles.reportNotImplemented}>
+              <h3>{REPORT_NAMES[selectedReport] || 'Unknown Report'}</h3>
+              <p>This report is not yet implemented. Check back soon!</p>
+            </div>
+          )}
         </div>
-
-        <div style={styles.controlGroup}>
-          <TavariCheckbox
-            checked={includeTaxBreakdown}
-            onChange={setIncludeTaxBreakdown}
-            label="Include Tax Breakdown"
-            id="include-tax-breakdown"
-          />
-        </div>
-      </div>
-
-      {/* Quick Summary Cards */}
-      <div style={styles.summaryGrid}>
-        <div style={styles.summaryCard}>
-          <div style={styles.summaryValue}>{formatCurrency(reportData.salesTotals)}</div>
-          <div style={styles.summaryLabel}>Total Sales</div>
-        </div>
-        <div style={styles.summaryCard}>
-          <div style={styles.summaryValue}>{formatCurrency(reportData.netSales)}</div>
-          <div style={styles.summaryLabel}>Net Sales</div>
-        </div>
-        <div style={styles.summaryCard}>
-          <div style={styles.summaryValue}>{reportData.totalTransactions}</div>
-          <div style={styles.summaryLabel}>Transactions</div>
-        </div>
-        <div style={styles.summaryCard}>
-          <div style={styles.summaryValue}>{formatCurrency(reportData.avgTransaction)}</div>
-          <div style={styles.summaryLabel}>Avg Transaction</div>
-        </div>
-      </div>
-
-      {/* Report Content */}
-      {loading ? (
-        <div style={styles.loading}>Generating report...</div>
-      ) : ReportComponent ? (
-        <ReportComponent
-          data={reportData}
-          dateRange={dateRange}
-          customDateStart={customDateStart}
-          customDateEnd={customDateEnd}
-          compareToLastYear={compareToLastYear}
-          selectedEmployee={selectedEmployee}
-          employees={employees}
-          businessId={auth.selectedBusinessId}
-          onExport={handleExport}
-          onEmail={handleEmail}
-        />
-      ) : (
-        <div style={styles.reportNotImplemented}>
-          <h3>{REPORT_NAMES[selectedReport] || 'Unknown Report'}</h3>
-          <p>This report is not yet implemented. Check back soon!</p>
-        </div>
-      )}
-    </div>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

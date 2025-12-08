@@ -4,12 +4,31 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../../supabaseClient';
 import { useBusiness } from '../../../contexts/BusinessContext';
 import { useUserProfile } from '../../../hooks/useUserProfile';
+import { usePermissions } from '../../../hooks/usePermissions';
+import PermissionGate from '../../../components/Auth/PermissionGate';
 import SessionManager from '../../../components/SessionManager';
+import toast from 'react-hot-toast';
+import { FiLock } from 'react-icons/fi';
 
 const PayoutHistory = () => {
   const navigate = useNavigate();
   const { business } = useBusiness();
   const { profile } = useUserProfile();
+  
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    isOwner,
+    isManager,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewRevenue = hasAnyPermission(['reports.financial.view', 'music.ads.manage']) || hasElevatedPrivileges();
+  const canManagePayouts = hasPermission('reports.financial.view') || isOwner(); // Only owners can manage payouts
+  const canEditBankInfo = isOwner(); // Only owners can edit bank info
   
   const [payouts, setPayouts] = useState([]);
   const [currentBalance, setCurrentBalance] = useState(0);
@@ -37,12 +56,18 @@ const PayoutHistory = () => {
   ];
 
   useEffect(() => {
-    if (business?.id) {
+    if (business?.id && !permissionsLoading) {
+      if (!canViewRevenue) {
+        toast.error('You do not have permission to view payout history');
+        navigate('/dashboard/music');
+        return;
+      }
+      
       loadPayoutHistory();
       loadBankInfo();
       calculateCurrentBalance();
     }
-  }, [business?.id, timeframe]);
+  }, [business?.id, timeframe, permissionsLoading, canViewRevenue]);
 
   const loadPayoutHistory = async () => {
     if (!business?.id) return;
@@ -88,8 +113,8 @@ const PayoutHistory = () => {
       setPayouts(processedPayouts);
       
     } catch (err) {
-      console.error('Error loading payout history:', err);
       setError(err.message);
+      toast.error('Failed to load payout history');
     } finally {
       setIsLoading(false);
       setRefreshing(false);
@@ -126,7 +151,7 @@ const PayoutHistory = () => {
       }
       
     } catch (err) {
-      console.error('Error loading bank info:', err);
+      // Silent fail for bank info loading
     }
   };
 
@@ -150,12 +175,17 @@ const PayoutHistory = () => {
       setCurrentBalance(balance);
       
     } catch (err) {
-      console.error('Error calculating current balance:', err);
       setCurrentBalance(0);
     }
   };
 
   const saveBankInfo = async () => {
+    // Permission check
+    if (!canEditBankInfo) {
+      toast.error('Only the business owner can edit bank account information');
+      return;
+    }
+
     if (!business?.id) return;
     
     try {
@@ -182,22 +212,27 @@ const PayoutHistory = () => {
       if (error) throw error;
       
       setShowBankModal(false);
-      alert('Bank information saved successfully');
+      toast.success('Bank information saved successfully');
       
     } catch (err) {
-      console.error('Error saving bank info:', err);
-      alert('Failed to save bank information');
+      toast.error('Failed to save bank information');
     }
   };
 
   const requestPayout = async () => {
+    // Permission check
+    if (!canManagePayouts) {
+      toast.error('You do not have permission to request payouts');
+      return;
+    }
+
     if (currentBalance < payoutThreshold) {
-      alert(`Minimum payout amount is ${formatCurrency(payoutThreshold)}`);
+      toast.error(`Minimum payout amount is ${formatCurrency(payoutThreshold)}`);
       return;
     }
     
     if (!bankInfo.accountNumber || !bankInfo.routingNumber) {
-      alert('Please configure your bank account information first');
+      toast.error('Please configure your bank account information first');
       setShowBankModal(true);
       return;
     }
@@ -228,7 +263,7 @@ const PayoutHistory = () => {
         .eq('business_id', business.id)
         .eq('payment_status', 'pending');
       
-      alert(`Payout request of ${formatCurrency(currentBalance)} submitted successfully!`);
+      toast.success(`Payout request of ${formatCurrency(currentBalance)} submitted successfully!`);
       
       // Refresh data
       await Promise.all([
@@ -237,8 +272,7 @@ const PayoutHistory = () => {
       ]);
       
     } catch (err) {
-      console.error('Error requesting payout:', err);
-      alert('Failed to request payout. Please try again.');
+      toast.error('Failed to request payout. Please try again.');
     }
   };
 
@@ -307,6 +341,42 @@ const PayoutHistory = () => {
     }).format(amount || 0);
   };
 
+  // Show loading while permissions are being checked
+  if (permissionsLoading) {
+    return (
+      <SessionManager>
+        <div style={styles.loadingContainer}>
+          <div style={styles.spinner}></div>
+          <div style={styles.loadingText}>Loading permissions...</div>
+        </div>
+      </SessionManager>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canViewRevenue) {
+    return (
+      <SessionManager>
+        <div style={styles.errorContainer}>
+          <FiLock size={64} style={{ color: '#f44336', marginBottom: '20px' }} />
+          <h2 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>Access Denied</h2>
+          <p style={{ fontSize: '16px', color: '#666', marginBottom: '20px' }}>
+            You do not have permission to view payout history.
+          </p>
+          <p style={{ fontSize: '14px', color: '#999', marginBottom: '30px' }}>
+            Contact your business owner for access to financial information.
+          </p>
+          <button 
+            onClick={() => navigate('/dashboard/music')} 
+            style={styles.retryButton}
+          >
+            Return to Music Dashboard
+          </button>
+        </div>
+      </SessionManager>
+    );
+  }
+
   if (isLoading) {
     return (
       <SessionManager>
@@ -338,6 +408,23 @@ const PayoutHistory = () => {
         <div style={styles.card}>
           <h1 style={styles.title}>Payout Status</h1>
           
+          {!canManagePayouts && (
+            <div style={{ 
+              marginBottom: '15px', 
+              padding: '10px', 
+              backgroundColor: '#fff3cd', 
+              borderRadius: '4px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}>
+              <FiLock size={16} style={{ color: '#856404' }} />
+              <span style={{ color: '#856404', fontSize: '14px' }}>
+                View-only mode - Only the business owner can request payouts
+              </span>
+            </div>
+          )}
+          
           <div style={styles.balanceSection}>
             <div style={styles.balanceInfo}>
               <div style={styles.balanceAmount}>{formatCurrency(currentBalance)}</div>
@@ -366,24 +453,60 @@ const PayoutHistory = () => {
           </div>
 
           <div style={styles.actionButtons}>
-            <button
-              onClick={requestPayout}
-              disabled={currentBalance < payoutThreshold}
-              style={{
-                ...styles.payoutButton,
-                backgroundColor: currentBalance >= payoutThreshold ? '#009688' : '#ccc',
-                cursor: currentBalance >= payoutThreshold ? 'pointer' : 'not-allowed'
-              }}
+            <PermissionGate
+              requireOwner
+              fallback={
+                <button
+                  disabled
+                  style={{
+                    ...styles.payoutButton,
+                    backgroundColor: '#ccc',
+                    cursor: 'not-allowed',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px'
+                  }}
+                  title="Only the business owner can request payouts"
+                >
+                  <FiLock size={16} />
+                  Request Payout
+                </button>
+              }
             >
-              Request Payout
-            </button>
+              <button
+                onClick={requestPayout}
+                disabled={currentBalance < payoutThreshold}
+                style={{
+                  ...styles.payoutButton,
+                  backgroundColor: currentBalance >= payoutThreshold ? '#009688' : '#ccc',
+                  cursor: currentBalance >= payoutThreshold ? 'pointer' : 'not-allowed'
+                }}
+              >
+                Request Payout
+              </button>
+            </PermissionGate>
             
-            <button
-              onClick={() => setShowBankModal(true)}
-              style={styles.bankButton}
+            <PermissionGate
+              requireOwner
+              fallback={
+                <button
+                  onClick={() => setShowBankModal(true)}
+                  style={{ ...styles.bankButton, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                  disabled={!canEditBankInfo}
+                >
+                  <FiLock size={16} />
+                  Bank Details
+                </button>
+              }
             >
-              Bank Details
-            </button>
+              <button
+                onClick={() => setShowBankModal(true)}
+                style={styles.bankButton}
+              >
+                Bank Details
+              </button>
+            </PermissionGate>
             
             <button
               onClick={onRefresh}
@@ -496,6 +619,21 @@ const PayoutHistory = () => {
             <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
               <h2 style={styles.modalTitle}>Bank Account Details</h2>
 
+              {!canEditBankInfo && (
+                <div style={{ 
+                  marginBottom: '15px', 
+                  padding: '10px', 
+                  backgroundColor: '#fff3cd', 
+                  borderRadius: '4px',
+                  textAlign: 'center'
+                }}>
+                  <FiLock size={16} style={{ color: '#856404', marginRight: '8px' }} />
+                  <span style={{ color: '#856404', fontSize: '14px' }}>
+                    View-only - Only the business owner can edit bank information
+                  </span>
+                </div>
+              )}
+
               <div style={styles.modalContent}>
                 <div style={styles.inputGroup}>
                   <label style={styles.inputLabel}>Account Name</label>
@@ -505,6 +643,7 @@ const PayoutHistory = () => {
                     onChange={(e) => setBankInfo(prev => ({ ...prev, accountName: e.target.value }))}
                     style={styles.input}
                     placeholder="Business or personal name"
+                    disabled={!canEditBankInfo}
                   />
                 </div>
 
@@ -516,6 +655,7 @@ const PayoutHistory = () => {
                     onChange={(e) => setBankInfo(prev => ({ ...prev, accountNumber: e.target.value }))}
                     style={styles.input}
                     placeholder="Bank account number"
+                    disabled={!canEditBankInfo}
                   />
                 </div>
 
@@ -527,6 +667,7 @@ const PayoutHistory = () => {
                     onChange={(e) => setBankInfo(prev => ({ ...prev, routingNumber: e.target.value }))}
                     style={styles.input}
                     placeholder="Bank routing/transit number"
+                    disabled={!canEditBankInfo}
                   />
                 </div>
 
@@ -538,6 +679,7 @@ const PayoutHistory = () => {
                     onChange={(e) => setBankInfo(prev => ({ ...prev, bankName: e.target.value }))}
                     style={styles.input}
                     placeholder="Name of your bank"
+                    disabled={!canEditBankInfo}
                   />
                 </div>
 
@@ -547,6 +689,7 @@ const PayoutHistory = () => {
                     value={bankInfo.accountType}
                     onChange={(e) => setBankInfo(prev => ({ ...prev, accountType: e.target.value }))}
                     style={styles.input}
+                    disabled={!canEditBankInfo}
                   >
                     <option value="checking">Checking</option>
                     <option value="savings">Savings</option>
@@ -560,14 +703,16 @@ const PayoutHistory = () => {
                   onClick={() => setShowBankModal(false)}
                   style={styles.cancelButton}
                 >
-                  Cancel
+                  {canEditBankInfo ? 'Cancel' : 'Close'}
                 </button>
-                <button
-                  onClick={saveBankInfo}
-                  style={styles.saveButton}
-                >
-                  Save
-                </button>
+                {canEditBankInfo && (
+                  <button
+                    onClick={saveBankInfo}
+                    style={styles.saveButton}
+                  >
+                    Save
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -1000,6 +1145,18 @@ if (!document.querySelector('#payout-history-styles')) {
     
     [style*="payoutItem"]:hover {
       background-color: #f5f5f5 !important;
+    }
+
+    input:disabled,
+    select:disabled {
+      background-color: #f5f5f5;
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
     }
   `;
   document.head.appendChild(styleSheet);

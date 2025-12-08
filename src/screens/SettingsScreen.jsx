@@ -1,18 +1,170 @@
-import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+// src/screens/SettingsScreen.jsx - WITH SUCCESS MODAL
+import React, { useEffect, useState, useCallback } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useBusinessContext } from '../contexts/BusinessContext';
 import { supabase } from '../supabaseClient';
+import { SecurityWrapper } from '../Security';
+import { usePOSAuth } from '../hooks/usePOSAuth';
+import { usePermissions } from '../hooks/usePermissions';
+import POSAuthWrapper from '../components/Auth/POSAuthWrapper';
+import PermissionGate from '../components/Auth/PermissionGate';
+import SessionManager from '../components/SessionManager';
 import toast from 'react-hot-toast';
+import { 
+  createOnboardingForm, 
+  getOnboardingFormStatus, 
+  createOnboardingFormLink,
+  getMerchantDetails,
+  isFinixConfigured 
+} from '../helpers/finixApi';
+import AppBuilderBrandingService from '../services/AppBuilder/AppBuilderBrandingService';
+
+// Import tab components
+import BasicInfoTab from '../components/Settings/BasicInfoTab';
+import OperatingHoursTab from '../components/Settings/OperatingHoursTab';
+import HolidayHoursTab from '../components/Settings/HolidayHoursTab';
+import RoleManagementTab from '../components/Settings/RoleManagementTab';
+import ColorsTab from '../components/Settings/ColorsTab';
+import SchedulingSettingsTab from '../components/Settings/SchedulingSettingsTab';
+
+// Success Modal Component
+const SuccessModal = ({ isOpen, onClose }) => {
+  if (!isOpen) return null;
+
+  return (
+    <div style={modalStyles.overlay}>
+      <div style={modalStyles.modal}>
+        <div style={modalStyles.checkmark}>✓</div>
+        <h2 style={modalStyles.title}>Changes Saved Successfully!</h2>
+        <p style={modalStyles.message}>
+          Your business settings have been updated. The page will refresh to show your changes.
+        </p>
+        <button 
+          onClick={onClose}
+          style={modalStyles.button}
+        >
+          OK
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const modalStyles = {
+  overlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999
+  },
+  modal: {
+    backgroundColor: 'white',
+    borderRadius: '16px',
+    padding: '40px',
+    textAlign: 'center',
+    maxWidth: '400px',
+    width: '90%',
+    boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)'
+  },
+  checkmark: {
+    width: '80px',
+    height: '80px',
+    borderRadius: '50%',
+    backgroundColor: '#10b981',
+    color: 'white',
+    fontSize: '48px',
+    lineHeight: '80px',
+    margin: '0 auto 20px',
+    fontWeight: 'bold'
+  },
+  title: {
+    margin: '0 0 12px',
+    fontSize: '24px',
+    color: '#1f2937',
+    fontWeight: 'bold'
+  },
+  message: {
+    margin: '0 0 24px',
+    fontSize: '16px',
+    color: '#6b7280',
+    lineHeight: '1.5'
+  },
+  button: {
+    backgroundColor: '#008080',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    padding: '12px 32px',
+    fontSize: '16px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+    minWidth: '120px',
+    transition: 'all 0.2s ease'
+  }
+};
 
 const SettingsScreen = () => {
   const navigate = useNavigate();
   const { selectedBusinessId } = useBusinessContext();
+  const [searchParams] = useSearchParams();
 
   const [businessData, setBusinessData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState('basic'); // basic, hours, holidays
+  const [activeTab, setActiveTab] = useState('basic');
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  
+  // Branding/Colors state
+  const [brandingData, setBrandingData] = useState({
+    primary_color: '#3B82F6',
+    secondary_color: '#1E40AF',
+    accent_color: '#60A5FA',
+    logo_url: '',
+    favicon_url: ''
+  });
+  const [schedulingSettings, setSchedulingSettings] = useState(null);
+  
+  // Tavari Pay specific state
+  const [tavarPayLoading, setTavarPayLoading] = useState(false);
+  const [tavarPayError, setTavarPayError] = useState('');
+  const [merchantDetails, setMerchantDetails] = useState(null);
+
+  // Authentication
+  const auth = usePOSAuth({
+    requiredRoles: ['owner', 'admin', 'manager'],
+    requireBusiness: true,
+    componentName: 'SettingsScreen'
+  });
+
+  const {
+    authUser,
+    userRole,
+    authLoading,
+    selectedBusinessId: authBusinessId
+  } = auth;
+
+  // Permission system
+  const permissions = usePermissions();
+  const { 
+    hasPermission, 
+    hasElevatedPrivileges,
+    isOwner: isOwnerFunc,
+    loading: permissionsLoading 
+  } = permissions;
+
+  // Permission checks
+  const canViewSettings = hasPermission('business.settings.view') || hasElevatedPrivileges();
+  const canEditBasicInfo = hasPermission('business.settings.edit') || hasElevatedPrivileges();
+  const canEditHours = hasPermission('business.hours.edit') || hasElevatedPrivileges();
+  const canManageRoles = hasPermission('admin.roles.view') || hasElevatedPrivileges();
+  const canManageTavariPay = hasPermission('business.tavari_pay.manage') || (isOwnerFunc && isOwnerFunc());
 
   // Default operating hours structure
   const defaultHours = {
@@ -25,28 +177,83 @@ const SettingsScreen = () => {
     sunday: { open: '12:00', close: '16:00', closed: true }
   };
 
-  const daysOfWeek = [
-    { key: 'monday', label: 'Monday' },
-    { key: 'tuesday', label: 'Tuesday' },
-    { key: 'wednesday', label: 'Wednesday' },
-    { key: 'thursday', label: 'Thursday' },
-    { key: 'friday', label: 'Friday' },
-    { key: 'saturday', label: 'Saturday' },
-    { key: 'sunday', label: 'Sunday' }
-  ];
-
-  const timezones = [
-    { value: 'America/Toronto', label: 'Eastern Time (Toronto)' },
-    { value: 'America/Winnipeg', label: 'Central Time (Winnipeg)' },
-    { value: 'America/Edmonton', label: 'Mountain Time (Edmonton)' },
-    { value: 'America/Vancouver', label: 'Pacific Time (Vancouver)' },
-    { value: 'America/St_Johns', label: 'Newfoundland Time (St. Johns)' },
-    { value: 'America/Halifax', label: 'Atlantic Time (Halifax)' }
-  ];
-
+  // Check URL params for tab selection
   useEffect(() => {
-    const fetchBusiness = async () => {
-      setLoading(true);
+    const tab = searchParams.get('tab');
+    if (tab) {
+      setActiveTab(tab);
+    }
+  }, [searchParams]);
+
+  // Fetch branding/colors data from app_branding table
+  const fetchBranding = useCallback(async () => {
+    if (!selectedBusinessId) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('app_branding')
+        .select('primary_color, secondary_color, accent_color, logo_url, favicon_url')
+        .eq('business_id', selectedBusinessId)
+        .maybeSingle();
+
+      if (error && error.code !== 'PGRST116') {
+        console.error('Error fetching branding:', error);
+        return;
+      }
+
+      if (data) {
+        setBrandingData({
+          primary_color: data.primary_color || '#3B82F6',
+          secondary_color: data.secondary_color || '#1E40AF',
+          accent_color: data.accent_color || '#60A5FA',
+          logo_url: data.logo_url || '',
+          favicon_url: data.favicon_url || ''
+        });
+      }
+    } catch (err) {
+      console.error('Error fetching branding data:', err);
+    }
+  }, [selectedBusinessId]);
+
+  const fetchMerchantDetails = async (merchantId) => {
+    try {
+      const details = await getMerchantDetails(merchantId, selectedBusinessId);
+      setMerchantDetails(details);
+    } catch (err) {
+      console.error('Error fetching merchant details:', err);
+    }
+  };
+
+  const fetchSchedulingSettings = useCallback(async () => {
+    if (!selectedBusinessId) return;
+    try {
+      const { data, error } = await supabase
+        .from('scheduling_settings')
+        .select('*')
+        .eq('business_id', selectedBusinessId)
+        .maybeSingle();
+
+      if (error && error.code !== 'PGRST116') {
+        console.error('Error fetching scheduling settings:', error);
+        return;
+      }
+
+      if (data) {
+        setSchedulingSettings(data);
+      } else {
+        setSchedulingSettings(null);
+      }
+    } catch (err) {
+      console.error('Error loading scheduling settings:', err);
+    }
+  }, [selectedBusinessId]);
+
+  const fetchBusiness = useCallback(async () => {
+    if (!selectedBusinessId) return;
+
+    setLoading(true);
+
+    try {
       const { data, error } = await supabase
         .from('businesses')
         .select('*')
@@ -54,9 +261,7 @@ const SettingsScreen = () => {
         .single();
 
       if (error || !data) {
-        setError('Unable to load business settings.');
-        setLoading(false);
-        return;
+        throw new Error(error?.message || 'Unable to load business settings.');
       }
 
       // Ensure operating_hours has proper structure
@@ -70,33 +275,167 @@ const SettingsScreen = () => {
       }
 
       setBusinessData(data);
+
+      // Fetch branding/colors data
+      await fetchBranding();
+
+      // Fetch scheduling settings
+      await fetchSchedulingSettings();
+
+      // Fetch merchant details if merchant ID exists
+      if (data.finix_merchant_id && canManageTavariPay) {
+        fetchMerchantDetails(data.finix_merchant_id);
+      }
+
+    } catch (err) {
+      setError(err.message || 'Unable to load business settings.');
+      toast.error('Failed to load settings: ' + err.message);
+    } finally {
       setLoading(false);
-    };
-
-    if (selectedBusinessId && typeof selectedBusinessId === 'string') {
-      fetchBusiness();
-    } else {
-      console.warn('Invalid selectedBusinessId in context:', selectedBusinessId);
     }
-  }, [selectedBusinessId]);
+  }, [selectedBusinessId, canManageTavariPay, fetchBranding, fetchSchedulingSettings]);
 
-  const handleSave = async () => {
-    if (!businessData.name.trim()) {
-      setError('Business name cannot be empty.');
+  // Main data fetching effect
+  useEffect(() => {
+    if (!authLoading && !permissionsLoading && canViewSettings && selectedBusinessId) {
+      fetchBusiness();
+    }
+  }, [selectedBusinessId, authLoading, permissionsLoading, canViewSettings, fetchBusiness]);
+
+  // Handle modal close and page refresh
+  const handleModalClose = () => {
+    setShowSuccessModal(false);
+    window.location.reload();
+  };
+
+  // SAVE FUNCTION WITH MODAL
+  const handleSave = useCallback(async () => {
+    if (!businessData) {
+      toast.error('No data to save');
       return;
     }
 
-    if (businessData.business_email && !businessData.business_email.includes('@')) {
-      setError('Please enter a valid business email.');
+    if (!canEditBasicInfo && activeTab === 'basic') {
+      toast.error('You do not have permission to edit basic information');
+      return;
+    }
+
+    if (!canEditHours && (activeTab === 'hours' || activeTab === 'holidays')) {
+      toast.error('You do not have permission to edit hours');
+      return;
+    }
+
+    if (!canEditBasicInfo && activeTab === 'colors') {
+      toast.error('You do not have permission to edit colors');
       return;
     }
 
     setSaving(true);
     
-    // FIXED: Remove updated_at from the update since it doesn't exist in the table
-    const { error } = await supabase
-      .from('businesses')
-      .update({
+    try {
+      // Handle colors tab separately
+      if (activeTab === 'colors') {
+        const { data: updateResult, error: updateError } = await supabase
+          .from('app_branding')
+          .upsert({
+            business_id: selectedBusinessId,
+            primary_color: brandingData.primary_color,
+            secondary_color: brandingData.secondary_color,
+            accent_color: brandingData.accent_color,
+            logo_url: brandingData.logo_url,
+            favicon_url: brandingData.favicon_url,
+            updated_at: new Date().toISOString()
+          }, {
+            onConflict: 'business_id'
+          })
+          .select();
+
+        if (updateError) {
+          if (updateError.code === '42501') {
+            throw new Error('Permission denied: You do not have permission to update colors.');
+          }
+          throw updateError;
+        }
+
+        if (!updateResult || updateResult.length === 0) {
+          throw new Error('Update failed: No rows were updated.');
+        }
+
+        setError('');
+        setSaving(false);
+        setShowSuccessModal(true);
+        return;
+      }
+
+      // Handle basic tab - also save logo/favicon if they exist
+      if (activeTab === 'basic') {
+        // Save business data
+        if (!businessData.name || businessData.name.trim().length < 2) {
+          toast.error('Business name must be at least 2 characters');
+          setSaving(false);
+          return;
+        }
+
+        const updateData = {
+          name: businessData.name.trim(),
+          business_address: businessData.business_address?.trim() || '',
+          business_city: businessData.business_city?.trim() || '',
+          business_state: businessData.business_state?.trim() || 'ON',
+          business_postal: businessData.business_postal?.trim() || '',
+          business_phone: businessData.business_phone?.trim() || '',
+          business_email: businessData.business_email?.trim() || '',
+          business_website: businessData.business_website?.trim() || '',
+          tax_number: businessData.tax_number?.trim() || '',
+          operating_hours: businessData.operating_hours || defaultHours,
+          holiday_hours: businessData.holiday_hours || [],
+          timezone: businessData.timezone || 'America/Toronto'
+        };
+
+        const { data: updateResult, error: updateError } = await supabase
+          .from('businesses')
+          .update(updateData)
+          .eq('id', selectedBusinessId)
+          .select();
+
+        if (updateError) {
+          if (updateError.code === '42501') {
+            throw new Error('Permission denied: You do not have permission to update this business.');
+          }
+          throw updateError;
+        }
+
+        if (!updateResult || updateResult.length === 0) {
+          throw new Error('Update failed: No rows were updated.');
+        }
+
+        // Also save logo/favicon if they exist in brandingData
+        if (brandingData.logo_url || brandingData.favicon_url) {
+          await supabase
+            .from('app_branding')
+            .upsert({
+              business_id: selectedBusinessId,
+              logo_url: brandingData.logo_url || null,
+              favicon_url: brandingData.favicon_url || null,
+              updated_at: new Date().toISOString()
+            }, {
+              onConflict: 'business_id'
+            });
+        }
+
+        setError('');
+        setSaving(false);
+        setShowSuccessModal(true);
+        return;
+      }
+
+      // Basic validation for other tabs
+      if (!businessData.name || businessData.name.trim().length < 2) {
+        toast.error('Business name must be at least 2 characters');
+        setSaving(false);
+        return;
+      }
+
+      const updateData = {
         name: businessData.name.trim(),
         business_address: businessData.business_address?.trim() || '',
         business_city: businessData.business_city?.trim() || '',
@@ -109,23 +448,42 @@ const SettingsScreen = () => {
         operating_hours: businessData.operating_hours || defaultHours,
         holiday_hours: businessData.holiday_hours || [],
         timezone: businessData.timezone || 'America/Toronto'
-      })
-      .eq('id', selectedBusinessId);
+      };
 
-    if (error) {
-      console.error('Save error:', error);
-      toast.error('Failed to save changes.');
-      setError(`Failed to save: ${error.message}`);
-    } else {
-      toast.success('Business settings saved successfully!');
+      const { data: updateResult, error: updateError } = await supabase
+        .from('businesses')
+        .update(updateData)
+        .eq('id', selectedBusinessId)
+        .select();
+
+      if (updateError) {
+        if (updateError.code === '42501') {
+          throw new Error('Permission denied: You do not have permission to update this business.');
+        }
+        throw updateError;
+      }
+
+      if (!updateResult || updateResult.length === 0) {
+        throw new Error('Update failed: No rows were updated.');
+      }
+
       setError('');
-    }
+      setSaving(false);
+      
+      // Show success modal instead of toast
+      setShowSuccessModal(true);
 
-    setSaving(false);
-  };
+    } catch (error) {
+      const errorMessage = error.message || 'Failed to save changes.';
+      toast.error(errorMessage);
+      setError(`Failed to save: ${errorMessage}`);
+      setSaving(false);
+    }
+  }, [businessData, brandingData, selectedBusinessId, activeTab, canEditBasicInfo, canEditHours]);
 
   const handleChange = (e) => {
-    setBusinessData({ ...businessData, [e.target.name]: e.target.value });
+    const { name, value } = e.target;
+    setBusinessData({ ...businessData, [name]: value });
   };
 
   const handleHoursChange = (day, field, value) => {
@@ -186,384 +544,622 @@ const SettingsScreen = () => {
     setBusinessData({ ...businessData, holiday_hours: updatedHolidays });
   };
 
-  if (loading) {
+  // Handle asset upload (logo/favicon)
+  const handleUploadAsset = async (file, assetType) => {
+    if (!selectedBusinessId) {
+      toast.error('Business ID is required');
+      return;
+    }
+
+    try {
+      AppBuilderBrandingService.setBusinessId(selectedBusinessId);
+      
+      let result;
+      if (assetType === 'logo') {
+        result = await AppBuilderBrandingService.uploadLogo(file, selectedBusinessId);
+        setBrandingData(prev => ({ ...prev, logo_url: result.url }));
+      } else if (assetType === 'favicon') {
+        result = await AppBuilderBrandingService.uploadFavicon(file, selectedBusinessId);
+        setBrandingData(prev => ({ ...prev, favicon_url: result.url }));
+      }
+      
+      toast.success(`${assetType} uploaded successfully`);
+    } catch (error) {
+      console.error(`Error uploading ${assetType}:`, error);
+      toast.error(`Failed to upload ${assetType}`);
+    }
+  };
+
+  // ============================================
+  // TAVARI PAY FUNCTIONS
+  // ============================================
+
+  const handleStartOnboarding = async () => {
+    if (!canManageTavariPay) {
+      toast.error('You do not have permission to manage Tavari Pay');
+      return;
+    }
+
+    const finixConfigured = isFinixConfigured();
+
+    if (!finixConfigured) {
+      setTavarPayError('Finix API is not configured. Please contact support.');
+      return;
+    }
+
+    setTavarPayLoading(true);
+    setTavarPayError('');
+
+    try {
+      const formPayload = {
+        name: businessData.name,
+        email: businessData.business_email,
+        phone: businessData.business_phone,
+        address: businessData.business_address,
+        city: businessData.business_city,
+        state: businessData.business_state,
+        postal: businessData.business_postal
+      };
+
+      const origin = window.location.origin;
+      const returnUrl = `${origin}/tavari-pay/onboarding/success`;
+      const cancelUrl = `${origin}/tavari-pay/onboarding/cancelled`;
+
+      const formData = await createOnboardingForm(formPayload, returnUrl, selectedBusinessId, cancelUrl);
+      
+      const updatePayload = {
+        finix_onboarding_form_id: formData.formId,
+        finix_onboarding_link_url: formData.linkUrl,
+        finix_onboarding_expires_at: formData.expiresAt,
+        finix_onboarding_status: formData.status,
+        finix_identity_id: formData.identityId
+      };
+
+      const { error: updateError } = await supabase
+        .from('businesses')
+        .update(updatePayload)
+        .eq('id', selectedBusinessId);
+
+      if (updateError) {
+        throw new Error('Failed to save onboarding data');
+      }
+
+      window.location.href = formData.linkUrl;
+
+    } catch (err) {
+      setTavarPayError(err.message || 'Failed to start onboarding process');
+      toast.error('Failed to start onboarding');
+    } finally {
+      setTavarPayLoading(false);
+    }
+  };
+
+  const handleGenerateNewLink = async () => {
+    if (!canManageTavariPay) {
+      toast.error('You do not have permission to manage Tavari Pay');
+      return;
+    }
+
+    if (!businessData.finix_onboarding_form_id) {
+      setTavarPayError('No onboarding form found');
+      return;
+    }
+
+    setTavarPayLoading(true);
+    setTavarPayError('');
+
+    try {
+      const origin = window.location.origin;
+      const linkData = await createOnboardingFormLink(businessData.finix_onboarding_form_id, selectedBusinessId, {
+        returnUrl: `${origin}/tavari-pay/onboarding/success`,
+        cancelUrl: `${origin}/tavari-pay/onboarding/cancelled`
+      });
+      
+      const { error: updateError } = await supabase
+        .from('businesses')
+        .update({
+          finix_onboarding_link_url: linkData.linkUrl,
+          finix_onboarding_expires_at: linkData.expiresAt
+        })
+        .eq('id', selectedBusinessId);
+
+      if (updateError) {
+        throw new Error('Failed to save new link');
+      }
+
+      setBusinessData({
+        ...businessData,
+        finix_onboarding_link_url: linkData.linkUrl,
+        finix_onboarding_expires_at: linkData.expiresAt
+      });
+
+      toast.success('New onboarding link generated!');
+
+    } catch (err) {
+      setTavarPayError(err.message || 'Failed to generate new link');
+      toast.error('Failed to generate new link');
+    } finally {
+      setTavarPayLoading(false);
+    }
+  };
+
+  const handleCheckStatus = async () => {
+    if (!businessData.finix_onboarding_form_id) {
+      return;
+    }
+
+    setTavarPayLoading(true);
+
+    try {
+      const status = await getOnboardingFormStatus(businessData.finix_onboarding_form_id, selectedBusinessId);
+      
+      const updates = {
+        finix_onboarding_status: status.status,
+      };
+
+      if (status.identityId) {
+        updates.finix_identity_id = status.identityId;
+      }
+
+      if (status.merchantId) {
+        updates.finix_merchant_id = status.merchantId;
+        await fetchMerchantDetails(status.merchantId);
+      }
+
+      const { error: updateError } = await supabase
+        .from('businesses')
+        .update(updates)
+        .eq('id', selectedBusinessId);
+
+      if (!updateError) {
+        setBusinessData({ ...businessData, ...updates });
+        toast.success('Status updated!');
+      }
+
+    } catch (err) {
+      setTavarPayError(err.message || 'Failed to check status');
+    } finally {
+      setTavarPayLoading(false);
+    }
+  };
+
+  const getStatusBadge = (status) => {
+    const badges = {
+      'NOT_STARTED': { text: 'Not Started', color: '#6b7280', bgColor: '#f3f4f6' },
+      'INCOMPLETE': { text: 'Incomplete', color: '#d97706', bgColor: '#fef3c7' },
+      'IN_PROGRESS': { text: 'In Progress', color: '#2563eb', bgColor: '#dbeafe' },
+      'UPDATE_REQUESTED': { text: 'Update Requested', color: '#dc2626', bgColor: '#fee2e2' },
+      'COMPLETED': { text: 'Completed', color: '#059669', bgColor: '#d1fae5' },
+      'APPROVED': { text: 'Approved', color: '#059669', bgColor: '#d1fae5' },
+      'REJECTED': { text: 'Rejected', color: '#dc2626', bgColor: '#fee2e2' }
+    };
+
+    const badge = badges[status] || badges['NOT_STARTED'];
+
     return (
-      <div style={styles.container}>
-        <div style={styles.loading}>Loading business settings...</div>
-      </div>
+      <span style={{
+        padding: '4px 12px',
+        borderRadius: '12px',
+        fontSize: '14px',
+        fontWeight: 'bold',
+        backgroundColor: badge.bgColor,
+        color: badge.color
+      }}>
+        {badge.text}
+      </span>
     );
-  }
+  };
 
-  if (error && !businessData) {
+  const renderTavariPayTab = () => {
+    if (!businessData) return null;
+
+    const hasStarted = businessData.finix_onboarding_form_id;
+    const isApproved = businessData.finix_onboarding_status === 'APPROVED' || merchantDetails?.onboardingState === 'APPROVED';
+    const linkExpired = businessData.finix_onboarding_expires_at && new Date(businessData.finix_onboarding_expires_at) < new Date();
+
     return (
-      <div style={styles.container}>
-        <div style={styles.error}>{error}</div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h2>Business Settings</h2>
-        <p>Update your business information for receipts, reports, and customer communications</p>
-      </div>
-
-      {/* Tab Navigation */}
-      <div style={styles.tabNav}>
-        <button 
-          style={{...styles.tab, ...(activeTab === 'basic' ? styles.activeTab : {})}}
-          onClick={() => setActiveTab('basic')}
-        >
-          Basic Information
-        </button>
-        <button 
-          style={{...styles.tab, ...(activeTab === 'hours' ? styles.activeTab : {})}}
-          onClick={() => setActiveTab('hours')}
-        >
-          Operating Hours
-        </button>
-        <button 
-          style={{...styles.tab, ...(activeTab === 'holidays' ? styles.activeTab : {})}}
-          onClick={() => setActiveTab('holidays')}
-        >
-          Holiday Hours
-        </button>
-      </div>
-
-      <div style={styles.content}>
-        {/* Basic Information Tab */}
-        {activeTab === 'basic' && (
-          <>
-            <div style={styles.section}>
-              <h3 style={styles.sectionTitle}>Basic Information</h3>
-              
-              <div style={styles.formGrid}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Business Name *</label>
-                  <input
-                    type="text"
-                    name="name"
-                    value={businessData?.name || ''}
-                    onChange={handleChange}
-                    style={styles.input}
-                    placeholder="Enter your business name"
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Business Email</label>
-                  <input
-                    type="email"
-                    name="business_email"
-                    value={businessData?.business_email || ''}
-                    onChange={handleChange}
-                    style={styles.input}
-                    placeholder="info@yourbusiness.com"
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Business Phone</label>
-                  <input
-                    type="tel"
-                    name="business_phone"
-                    value={businessData?.business_phone || ''}
-                    onChange={handleChange}
-                    style={styles.input}
-                    placeholder="(519) 555-0123"
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Website</label>
-                  <input
-                    type="url"
-                    name="business_website"
-                    value={businessData?.business_website || ''}
-                    onChange={handleChange}
-                    style={styles.input}
-                    placeholder="www.yourbusiness.com"
-                  />
-                </div>
-              </div>
+      <div style={styles.section}>
+        <div style={styles.tavariPayHeader}>
+          <div>
+            <h3 style={styles.sectionTitle}>Tavari Pay - Payment Processing</h3>
+            <p style={styles.subtitle}>
+              Enable payment processing powered by Finix to accept credit cards, debit cards, and ACH payments.
+            </p>
+          </div>
+          {hasStarted && (
+            <div>
+              {getStatusBadge(businessData.finix_onboarding_status || 'NOT_STARTED')}
             </div>
+          )}
+        </div>
 
-            <div style={styles.section}>
-              <h3 style={styles.sectionTitle}>Business Address</h3>
-              
-              <div style={styles.formGrid}>
-                <div style={{...styles.formGroup, gridColumn: '1 / -1'}}>
-                  <label style={styles.label}>Street Address</label>
-                  <input
-                    type="text"
-                    name="business_address"
-                    value={businessData?.business_address || ''}
-                    onChange={handleChange}
-                    style={styles.input}
-                    placeholder="123 Main Street"
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>City</label>
-                  <input
-                    type="text"
-                    name="business_city"
-                    value={businessData?.business_city || ''}
-                    onChange={handleChange}
-                    style={styles.input}
-                    placeholder="Your City"
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Province/State</label>
-                  <select
-                    name="business_state"
-                    value={businessData?.business_state || 'ON'}
-                    onChange={handleChange}
-                    style={styles.select}
-                  >
-                    <option value="ON">Ontario</option>
-                    <option value="BC">British Columbia</option>
-                    <option value="AB">Alberta</option>
-                    <option value="SK">Saskatchewan</option>
-                    <option value="MB">Manitoba</option>
-                    <option value="QC">Quebec</option>
-                    <option value="NB">New Brunswick</option>
-                    <option value="NS">Nova Scotia</option>
-                    <option value="PE">Prince Edward Island</option>
-                    <option value="NL">Newfoundland and Labrador</option>
-                    <option value="YT">Yukon</option>
-                    <option value="NT">Northwest Territories</option>
-                    <option value="NU">Nunavut</option>
-                  </select>
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Postal Code</label>
-                  <input
-                    type="text"
-                    name="business_postal"
-                    value={businessData?.business_postal || ''}
-                    onChange={handleChange}
-                    style={styles.input}
-                    placeholder="N1A 1A1"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div style={styles.section}>
-              <h3 style={styles.sectionTitle}>Tax Information</h3>
-              
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Tax Number (HST/GST)</label>
-                <input
-                  type="text"
-                  name="tax_number"
-                  value={businessData?.tax_number || ''}
-                  onChange={handleChange}
-                  style={styles.input}
-                  placeholder="HST# 123456789RT0001"
-                />
-                <div style={styles.helpText}>
-                  This will appear on receipts and invoices for tax compliance
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Operating Hours Tab */}
-        {activeTab === 'hours' && businessData && (
-          <div style={styles.section}>
-            <h3 style={styles.sectionTitle}>Regular Operating Hours</h3>
-            
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Timezone</label>
-              <select
-                name="timezone"
-                value={businessData.timezone || 'America/Toronto'}
-                onChange={handleChange}
-                style={styles.select}
-              >
-                {timezones.map(tz => (
-                  <option key={tz.value} value={tz.value}>{tz.label}</option>
-                ))}
-              </select>
-            </div>
-
-            <div style={styles.hoursGrid}>
-              {daysOfWeek.map(({ key, label }) => {
-                const dayHours = businessData.operating_hours?.[key] || defaultHours[key];
-                
-                return (
-                  <div key={key} style={styles.dayRow}>
-                    <div style={styles.dayLabel}>{label}</div>
-                    
-                    <div style={styles.hoursControls}>
-                      <div style={styles.closedToggle}>
-                        <input
-                          type="checkbox"
-                          id={`closed-${key}`}
-                          checked={dayHours.closed}
-                          onChange={() => handleDayClosedToggle(key)}
-                          style={styles.checkbox}
-                        />
-                        <label htmlFor={`closed-${key}`} style={styles.closedLabel}>
-                          Closed
-                        </label>
-                      </div>
-                      
-                      {!dayHours.closed && (
-                        <div style={styles.timeControls}>
-                          <div style={styles.timeInputGroup}>
-                            <label style={styles.timeLabel}>Open:</label>
-                            <input
-                              type="time"
-                              value={dayHours.open}
-                              onChange={(e) => handleHoursChange(key, 'open', e.target.value)}
-                              style={styles.timeInput}
-                            />
-                          </div>
-                          
-                          <div style={styles.timeInputGroup}>
-                            <label style={styles.timeLabel}>Close:</label>
-                            <input
-                              type="time"
-                              value={dayHours.close}
-                              onChange={(e) => handleHoursChange(key, 'close', e.target.value)}
-                              style={styles.timeInput}
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+        {tavarPayError && (
+          <div style={styles.errorBanner}>
+            {tavarPayError}
           </div>
         )}
 
-        {/* Holiday Hours Tab */}
-        {activeTab === 'holidays' && businessData && (
-          <div style={styles.section}>
-            <div style={styles.holidayHeader}>
-              <h3 style={styles.sectionTitle}>Holiday & Special Hours</h3>
-              <button onClick={addHoliday} style={styles.addButton}>
-                + Add Holiday
-              </button>
-            </div>
+        {!isFinixConfigured() && (
+          <div style={styles.warningBanner}>
+            ⚠️ Finix API is not configured. Please add your API credentials to the .env file.
+          </div>
+        )}
+
+        {!hasStarted ? (
+          <div style={styles.onboardingCard}>
+            <h4 style={{ marginTop: 0 }}>Get Started with Tavari Pay</h4>
+            <p>To start accepting payments, you'll need to complete merchant onboarding with our payment processor.</p>
             
-            {businessData.holiday_hours?.length === 0 && (
-              <div style={styles.emptyState}>
-                <p>No holiday hours configured.</p>
-                <p>Click "Add Holiday" to set special hours for holidays or events.</p>
+            <div style={styles.featureList}>
+              <div style={styles.featureItem}>✓ Accept credit and debit cards</div>
+              <div style={styles.featureItem}>✓ Process ACH bank transfers</div>
+              <div style={styles.featureItem}>✓ Manage subscriptions and recurring billing</div>
+              <div style={styles.featureItem}>✓ PCI-compliant payment processing</div>
+              <div style={styles.featureItem}>✓ Next-day settlement to your bank account</div>
+            </div>
+
+            <p style={{ fontSize: '14px', color: '#6b7280', marginTop: '20px' }}>
+              The onboarding process takes about 5-10 minutes and requires basic business information.
+            </p>
+
+            <button
+              onClick={handleStartOnboarding}
+              disabled={tavarPayLoading || !isFinixConfigured() || !canManageTavariPay}
+              style={styles.primaryButton}
+            >
+              {tavarPayLoading ? 'Loading...' : 'Start Onboarding Process'}
+            </button>
+          </div>
+        ) : isApproved ? (
+          <div style={styles.approvedCard}>
+            <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+              <div style={{ fontSize: '48px' }}>✔</div>
+              <h4 style={{ color: '#059669', margin: '10px 0' }}>Tavari Pay is Active!</h4>
+              <p style={{ color: '#6b7280' }}>Your business is approved and ready to accept payments</p>
+            </div>
+
+            {merchantDetails && (
+              <div style={styles.detailsGrid}>
+                <div style={styles.detailItem}>
+                  <div style={styles.detailLabel}>Merchant ID</div>
+                  <div style={styles.detailValue}>{merchantDetails.merchantId}</div>
+                </div>
+                <div style={styles.detailItem}>
+                  <div style={styles.detailLabel}>Processing Status</div>
+                  <div style={styles.detailValue}>
+                    {merchantDetails.processingEnabled ? '✔ Enabled' : '✗ Disabled'}
+                  </div>
+                </div>
+                <div style={styles.detailItem}>
+                  <div style={styles.detailLabel}>Settlement Status</div>
+                  <div style={styles.detailValue}>
+                    {merchantDetails.settlementEnabled ? '✔ Enabled' : '✗ Disabled'}
+                  </div>
+                </div>
+                <div style={styles.detailItem}>
+                  <div style={styles.detailLabel}>Processor</div>
+                  <div style={styles.detailValue}>{merchantDetails.processor}</div>
+                </div>
               </div>
             )}
 
-            {businessData.holiday_hours?.map((holiday) => (
-              <div key={holiday.id} style={styles.holidayRow}>
-                <div style={styles.holidayGrid}>
-                  <div style={styles.formGroup}>
-                    <label style={styles.label}>Date</label>
-                    <input
-                      type="date"
-                      value={holiday.date}
-                      onChange={(e) => updateHoliday(holiday.id, 'date', e.target.value)}
-                      style={styles.input}
-                    />
-                  </div>
-                  
-                  <div style={styles.formGroup}>
-                    <label style={styles.label}>Holiday Name</label>
-                    <input
-                      type="text"
-                      value={holiday.name}
-                      onChange={(e) => updateHoliday(holiday.id, 'name', e.target.value)}
-                      style={styles.input}
-                      placeholder="Christmas Day, New Year's Eve, etc."
-                    />
-                  </div>
+            <div style={{ marginTop: '20px', display: 'flex', gap: '10px' }}>
+              <button
+                onClick={handleCheckStatus}
+                disabled={tavarPayLoading}
+                style={styles.secondaryButton}
+              >
+                {tavarPayLoading ? 'Checking...' : 'Refresh Status'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={styles.onboardingCard}>
+            <h4 style={{ marginTop: 0 }}>Onboarding Status</h4>
+            
+            <div style={{ marginBottom: '20px' }}>
+              <div style={styles.detailItem}>
+                <div style={styles.detailLabel}>Current Status</div>
+                <div>{getStatusBadge(businessData.finix_onboarding_status)}</div>
+              </div>
+
+              {businessData.finix_onboarding_form_id && (
+                <div style={styles.detailItem}>
+                  <div style={styles.detailLabel}>Form ID</div>
+                  <div style={styles.detailValue}>{businessData.finix_onboarding_form_id}</div>
                 </div>
-                
-                <div style={styles.holidayControls}>
-                  <div style={styles.closedToggle}>
-                    <input
-                      type="checkbox"
-                      id={`holiday-closed-${holiday.id}`}
-                      checked={holiday.closed}
-                      onChange={(e) => updateHoliday(holiday.id, 'closed', e.target.checked)}
-                      style={styles.checkbox}
-                    />
-                    <label htmlFor={`holiday-closed-${holiday.id}`} style={styles.closedLabel}>
-                      Closed All Day
-                    </label>
-                  </div>
-                  
-                  {!holiday.closed && (
-                    <div style={styles.holidayTimes}>
-                      <div style={styles.timeInputGroup}>
-                        <label style={styles.timeLabel}>Open:</label>
-                        <input
-                          type="time"
-                          value={holiday.hours?.open || '10:00'}
-                          onChange={(e) => updateHolidayHours(holiday.id, 'open', e.target.value)}
-                          style={styles.timeInput}
-                        />
-                      </div>
-                      
-                      <div style={styles.timeInputGroup}>
-                        <label style={styles.timeLabel}>Close:</label>
-                        <input
-                          type="time"
-                          value={holiday.hours?.close || '14:00'}
-                          onChange={(e) => updateHolidayHours(holiday.id, 'close', e.target.value)}
-                          style={styles.timeInput}
-                        />
-                      </div>
-                    </div>
-                  )}
+              )}
+            </div>
+
+            {businessData.finix_onboarding_status === 'INCOMPLETE' || businessData.finix_onboarding_status === 'IN_PROGRESS' ? (
+              <div>
+                <p>You can continue your onboarding where you left off:</p>
+                {linkExpired ? (
+                  <button
+                    onClick={handleGenerateNewLink}
+                    disabled={tavarPayLoading || !canManageTavariPay}
+                    style={styles.primaryButton}
+                  >
+                    {tavarPayLoading ? 'Generating...' : 'Generate New Onboarding Link'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => window.location.href = businessData.finix_onboarding_link_url}
+                    disabled={!businessData.finix_onboarding_link_url}
+                    style={styles.primaryButton}
+                  >
+                    Continue Onboarding
+                  </button>
+                )}
+              </div>
+            ) : businessData.finix_onboarding_status === 'UPDATE_REQUESTED' ? (
+              <div>
+                <div style={styles.warningBanner}>
+                  ⚠️ Additional information is required. Please complete the onboarding form.
                 </div>
-                
-                <button 
-                  onClick={() => removeHoliday(holiday.id)}
-                  style={styles.removeButton}
+                {linkExpired ? (
+                  <button
+                    onClick={handleGenerateNewLink}
+                    disabled={tavarPayLoading || !canManageTavariPay}
+                    style={styles.primaryButton}
+                  >
+                    {tavarPayLoading ? 'Generating...' : 'Generate New Link'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => window.location.href = businessData.finix_onboarding_link_url}
+                    disabled={!businessData.finix_onboarding_link_url}
+                    style={styles.primaryButton}
+                  >
+                    Update Information
+                  </button>
+                )}
+              </div>
+            ) : businessData.finix_onboarding_status === 'COMPLETED' ? (
+              <div>
+                <p>Your onboarding is complete and under review. This usually takes just a few minutes.</p>
+                <button
+                  onClick={handleCheckStatus}
+                  disabled={tavarPayLoading}
+                  style={styles.secondaryButton}
                 >
-                  Remove
+                  {tavarPayLoading ? 'Checking...' : 'Check Approval Status'}
                 </button>
               </div>
-            ))}
-          </div>
-        )}
-
-        {error && businessData && (
-          <div style={styles.errorMessage}>
-            {error}
+            ) : businessData.finix_onboarding_status === 'REJECTED' ? (
+              <div>
+                <div style={styles.errorBanner}>
+                  Your application was not approved. Please contact support for more information.
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
       </div>
+    );
+  };
 
-      <div style={styles.actions}>
-        <button 
-          onClick={() => navigate('/dashboard/audit-logs')} 
-          style={styles.secondaryButton}
-        >
-          View Audit Logs
-        </button>
-        
-        <button 
-          onClick={handleSave} 
-          disabled={saving || !businessData} 
-          style={styles.primaryButton}
-        >
-          {saving ? 'Saving Changes...' : 'Save Business Settings'}
-        </button>
-      </div>
-    </div>
+  // Render loading state
+  if (loading || authLoading || permissionsLoading) {
+    return (
+      <SessionManager>
+        <div style={styles.container}>
+          <div style={styles.loading}>Loading business settings...</div>
+        </div>
+      </SessionManager>
+    );
+  }
+
+  // Render permission denied
+  if (!canViewSettings) {
+    return (
+      <SessionManager>
+        <div style={styles.container}>
+          <div style={{ textAlign: 'center', padding: '60px 20px' }}>
+            <h2 style={{ color: '#374151', marginBottom: '16px' }}>Access Denied</h2>
+            <p style={{ color: '#6b7280' }}>You do not have permission to view settings</p>
+          </div>
+        </div>
+      </SessionManager>
+    );
+  }
+
+  // Render error state
+  if (error && !businessData) {
+    return (
+      <SessionManager>
+        <div style={styles.container}>
+          <div style={styles.error}>{error}</div>
+        </div>
+      </SessionManager>
+    );
+  }
+
+  // Main render
+  return (
+    <POSAuthWrapper
+      requiredRoles={['owner', 'admin', 'manager']}
+      requireBusiness={true}
+      componentName="SettingsScreen"
+    >
+      <SecurityWrapper>
+        <SessionManager>
+          <div style={styles.container}>
+            <div style={styles.header}>
+              <h2>Business Settings</h2>
+              <p>Update your business information and manage system access</p>
+              <p style={styles.deploymentDate}>Deployed: November 17, 2025 v2</p>
+            </div>
+
+            {/* Tab Navigation */}
+            <div style={styles.tabNav}>
+              <PermissionGate permission="business.settings.view" fallback={null}>
+                <button 
+                  style={{...styles.tab, ...(activeTab === 'basic' ? styles.activeTab : {})}}
+                  onClick={() => setActiveTab('basic')}
+                >
+                  📋 Basic Info
+                </button>
+              </PermissionGate>
+
+              <PermissionGate permission="business.hours.edit" fallback={null}>
+                <button 
+                  style={{...styles.tab, ...(activeTab === 'hours' ? styles.activeTab : {})}}
+                  onClick={() => setActiveTab('hours')}
+                >
+                  🕐 Hours
+                </button>
+              </PermissionGate>
+
+              <PermissionGate permission="business.hours.edit" fallback={null}>
+                <button 
+                  style={{...styles.tab, ...(activeTab === 'holidays' ? styles.activeTab : {})}}
+                  onClick={() => setActiveTab('holidays')}
+                >
+                  🎄 Holidays
+                </button>
+              </PermissionGate>
+
+              <PermissionGate permission="admin.roles.view" fallback={null}>
+                <button 
+                  style={{...styles.tab, ...(activeTab === 'roles' ? styles.activeTab : {})}}
+                  onClick={() => setActiveTab('roles')}
+                >
+                  🔑 Roles & Access
+                </button>
+              </PermissionGate>
+
+              <PermissionGate permission="business.settings.edit" fallback={null}>
+                <button 
+                  style={{...styles.tab, ...(activeTab === 'colors' ? styles.activeTab : {})}}
+                  onClick={() => setActiveTab('colors')}
+                >
+                  🎨 Colors
+                </button>
+              </PermissionGate>
+
+              <PermissionGate permission="business.settings.edit" fallback={null}>
+                <button
+                  style={{...styles.tab, ...(activeTab === 'scheduling' ? styles.activeTab : {})}}
+                  onClick={() => setActiveTab('scheduling')}
+                >
+                  📆 Scheduling
+                </button>
+              </PermissionGate>
+
+              <PermissionGate permission="business.tavari_pay.manage" requireOwner fallback={null}>
+                <button 
+                  style={{...styles.tab, ...(activeTab === 'tavari-pay' ? styles.activeTab : {})}}
+                  onClick={() => setActiveTab('tavari-pay')}
+                >
+                  💳 Tavari Pay
+                </button>
+              </PermissionGate>
+            </div>
+
+            <div style={styles.content}>
+              {/* Basic Information Tab */}
+              {activeTab === 'basic' && businessData && canEditBasicInfo && (
+                <BasicInfoTab
+                  businessData={businessData}
+                  handleChange={handleChange}
+                  styles={styles}
+                  brandingData={brandingData}
+                  setBrandingData={setBrandingData}
+                  handleUploadAsset={handleUploadAsset}
+                />
+              )}
+
+              {/* Operating Hours Tab */}
+              {activeTab === 'hours' && businessData && canEditHours && (
+                <OperatingHoursTab
+                  businessData={businessData}
+                  handleChange={handleChange}
+                  handleHoursChange={handleHoursChange}
+                  handleDayClosedToggle={handleDayClosedToggle}
+                  styles={styles}
+                  defaultHours={defaultHours}
+                />
+              )}
+
+              {/* Holiday Hours Tab */}
+              {activeTab === 'holidays' && businessData && canEditHours && (
+                <HolidayHoursTab
+                  businessData={businessData}
+                  addHoliday={addHoliday}
+                  updateHoliday={updateHoliday}
+                  updateHolidayHours={updateHolidayHours}
+                  removeHoliday={removeHoliday}
+                  styles={styles}
+                />
+              )}
+
+              {/* Role Management Tab */}
+              {activeTab === 'roles' && canManageRoles && (
+                <RoleManagementTab
+                  businessId={selectedBusinessId}
+                  styles={styles}
+                />
+              )}
+
+              {/* Colors Tab */}
+              {activeTab === 'colors' && canEditBasicInfo && (
+                <ColorsTab
+                  brandingData={brandingData}
+                  setBrandingData={setBrandingData}
+                  canEdit={canEditBasicInfo}
+                />
+              )}
+
+              {activeTab === 'scheduling' && canEditHours && (
+                <SchedulingSettingsTab
+                  businessId={selectedBusinessId}
+                  operatingHours={businessData?.operating_hours}
+                  initialSettings={schedulingSettings}
+                  onSettingsUpdated={(updated) => setSchedulingSettings(updated)}
+                  onShowSuccess={() => setShowSuccessModal(true)}
+                />
+              )}
+
+              {/* Tavari Pay Tab */}
+              {activeTab === 'tavari-pay' && canManageTavariPay && renderTavariPayTab()}
+
+              {error && businessData && (
+                <div style={styles.errorMessage}>
+                  {error}
+                </div>
+              )}
+            </div>
+
+            {/* Only show save button for tabs that need it */}
+            {['basic', 'hours', 'holidays', 'colors'].includes(activeTab) && (
+              <div style={styles.actions}>
+                <button 
+                  onClick={() => navigate('/dashboard/audit-logs')} 
+                  style={styles.secondaryButtonBottom}
+                >
+                  View Audit Logs
+                </button>
+                
+                <button 
+                  onClick={handleSave} 
+                  disabled={saving || !businessData} 
+                  style={styles.primaryButtonBottom}
+                >
+                  {saving ? 'Saving Changes...' : 'Save Business Settings'}
+                </button>
+              </div>
+            )}
+
+            {/* Success Modal */}
+            <SuccessModal 
+              isOpen={showSuccessModal} 
+              onClose={handleModalClose} 
+            />
+          </div>
+        </SessionManager>
+      </SecurityWrapper>
+    </POSAuthWrapper>
   );
 };
 
@@ -574,7 +1170,7 @@ const styles = {
     height: '100vh',
     backgroundColor: '#f8f9fa',
     padding: '20px',
-    paddingTop: '100px',
+    paddingTop: '120px',
     boxSizing: 'border-box'
   },
   header: {
@@ -626,6 +1222,17 @@ const styles = {
     borderBottom: '2px solid #008080',
     paddingBottom: '8px'
   },
+  subtitle: {
+    color: '#6b7280',
+    fontSize: '14px',
+    margin: '8px 0 0 0'
+  },
+  deploymentDate: {
+    color: '#9ca3af',
+    fontSize: '12px',
+    margin: '4px 0 0 0',
+    fontStyle: 'italic'
+  },
   formGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
@@ -662,128 +1269,6 @@ const styles = {
     marginTop: '4px',
     fontStyle: 'italic'
   },
-  hoursGrid: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '15px'
-  },
-  dayRow: {
-    display: 'flex',
-    alignItems: 'center',
-    padding: '15px',
-    backgroundColor: '#f9fafb',
-    borderRadius: '6px',
-    border: '1px solid #e5e7eb'
-  },
-  dayLabel: {
-    fontSize: '16px',
-    fontWeight: 'bold',
-    color: '#374151',
-    minWidth: '120px'
-  },
-  hoursControls: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '25px',
-    flex: 1
-  },
-  closedToggle: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    minWidth: '80px'
-  },
-  // FIXED: Enhanced checkbox styles for better visibility
-  checkbox: {
-    width: '20px',
-    height: '20px',
-    cursor: 'pointer',
-    accentColor: '#008080',
-    transform: 'scale(1.2)', // Make checkbox bigger
-    margin: '0' // Remove default margins
-  },
-  closedLabel: {
-    fontSize: '14px',
-    color: '#374151',
-    cursor: 'pointer',
-    userSelect: 'none',
-    fontWeight: '500'
-  },
-  timeControls: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '20px'
-  },
-  timeInputGroup: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px'
-  },
-  timeLabel: {
-    fontSize: '14px',
-    color: '#374151',
-    minWidth: '40px',
-    fontWeight: '500'
-  },
-  timeInput: {
-    padding: '8px',
-    border: '1px solid #d1d5db',
-    borderRadius: '4px',
-    fontSize: '14px'
-  },
-  holidayHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: '20px'
-  },
-  addButton: {
-    padding: '8px 16px',
-    backgroundColor: '#008080',
-    color: 'white',
-    border: 'none',
-    borderRadius: '6px',
-    fontSize: '14px',
-    fontWeight: 'bold',
-    cursor: 'pointer'
-  },
-  emptyState: {
-    textAlign: 'center',
-    padding: '40px 20px',
-    color: '#6b7280'
-  },
-  holidayRow: {
-    padding: '20px',
-    backgroundColor: '#f9fafb',
-    borderRadius: '6px',
-    border: '1px solid #e5e7eb',
-    marginBottom: '15px'
-  },
-  holidayGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: '15px',
-    marginBottom: '15px'
-  },
-  holidayControls: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '20px',
-    marginBottom: '15px'
-  },
-  holidayTimes: {
-    display: 'flex',
-    gap: '15px'
-  },
-  removeButton: {
-    padding: '6px 12px',
-    backgroundColor: '#dc2626',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    fontSize: '12px',
-    cursor: 'pointer'
-  },
   errorMessage: {
     backgroundColor: '#fee2e2',
     color: '#dc2626',
@@ -797,7 +1282,7 @@ const styles = {
     gap: '15px',
     justifyContent: 'space-between'
   },
-  secondaryButton: {
+  secondaryButtonBottom: {
     flex: 1,
     padding: '15px',
     backgroundColor: '#6b7280',
@@ -809,7 +1294,7 @@ const styles = {
     cursor: 'pointer',
     transition: 'all 0.2s ease'
   },
-  primaryButton: {
+  primaryButtonBottom: {
     flex: 2,
     padding: '15px',
     backgroundColor: '#008080',
@@ -834,6 +1319,101 @@ const styles = {
     padding: '40px',
     color: '#dc2626',
     fontSize: '16px'
+  },
+  // Tavari Pay specific styles
+  tavariPayHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: '25px'
+  },
+  onboardingCard: {
+    backgroundColor: '#f9fafb',
+    border: '2px solid #e5e7eb',
+    borderRadius: '8px',
+    padding: '30px',
+    marginTop: '20px'
+  },
+  approvedCard: {
+    backgroundColor: '#f0fdf4',
+    border: '2px solid #86efac',
+    borderRadius: '8px',
+    padding: '30px',
+    marginTop: '20px'
+  },
+  featureList: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
+    gap: '12px',
+    margin: '20px 0'
+  },
+  featureItem: {
+    fontSize: '15px',
+    color: '#374151',
+    padding: '8px 0'
+  },
+  primaryButton: {
+    padding: '12px 24px',
+    backgroundColor: '#008080',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    fontSize: '16px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+    marginTop: '10px'
+  },
+  secondaryButton: {
+    padding: '12px 24px',
+    backgroundColor: '#6b7280',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    fontSize: '16px',
+    fontWeight: 'bold',
+    cursor: 'pointer'
+  },
+  detailsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+    gap: '20px',
+    marginTop: '20px'
+  },
+  detailItem: {
+    padding: '15px',
+    backgroundColor: 'white',
+    borderRadius: '6px',
+    border: '1px solid #e5e7eb'
+  },
+  detailLabel: {
+    fontSize: '12px',
+    color: '#6b7280',
+    fontWeight: 'bold',
+    textTransform: 'uppercase',
+    marginBottom: '4px'
+  },
+  detailValue: {
+    fontSize: '16px',
+    color: '#1f2937',
+    fontWeight: '500'
+  },
+  errorBanner: {
+    backgroundColor: '#fee2e2',
+    color: '#dc2626',
+    padding: '12px 16px',
+    borderRadius: '6px',
+    marginBottom: '15px',
+    border: '1px solid #fecaca',
+    fontSize: '14px'
+  },
+  warningBanner: {
+    backgroundColor: '#fef3c7',
+    color: '#d97706',
+    padding: '12px 16px',
+    borderRadius: '6px',
+    marginBottom: '15px',
+    border: '1px solid #fde68a',
+    fontSize: '14px'
   }
 };
 

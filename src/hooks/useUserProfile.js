@@ -21,15 +21,9 @@ export function useUserProfile() {
         .eq('id', user.id)
         .single();
 
-      const { data: roleData } = await supabase
-        .from('user_roles')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('active', true)
-        .single();
-
+      // Role info is handled by RoleContext, not this hook
       setProfile(profileData || null);
-      setRoleInfo(roleData || null);
+      setRoleInfo(null);
       setLoading(false);
     };
 

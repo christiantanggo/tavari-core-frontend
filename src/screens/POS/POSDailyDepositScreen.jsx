@@ -6,7 +6,13 @@ import { supabase } from '../../supabaseClient';
 // Foundation Components
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import { TavariStyles } from '../../utils/TavariStyles';
+
+// Security
+import { SecurityWrapper } from '../../Security';
+import { useSecurityContext } from '../../Security';
 
 // Deposit Components
 import POSDepositCountComponent from '../../components/POS/POSDailyDepositScreen/POSDepositCountComponent';
@@ -15,12 +21,43 @@ import POSDepositHistoryComponent from '../../components/POS/POSDailyDepositScre
 const POSDailyDepositScreen = () => {
   const navigate = useNavigate();
   
+  // Security context for deposit operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSDailyDepositScreen',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'high'
+  });
+
   // Authentication using standardized hook
   const auth = usePOSAuth({
     requiredRoles: ['manager', 'owner'],
     requireBusiness: true,
     componentName: 'POSDailyDepositScreen'
   });
+
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks
+  const canViewDeposits = hasAnyPermission([
+    'pos.deposits.view',
+    'pos.deposits.create'
+  ]) || hasElevatedPrivileges();
+
+  const canCreateDeposits = hasPermission('pos.deposits.create') || hasElevatedPrivileges();
+  const canViewHistory = hasPermission('pos.deposits.view_history') || hasElevatedPrivileges();
 
   // State management
   const [activeTab, setActiveTab] = useState('deposit');
@@ -39,13 +76,18 @@ const POSDailyDepositScreen = () => {
     try {
       setLoading(true);
       
+      await logSecurityEvent('daily_deposit_screen_accessed', {
+        action: 'load_settings',
+        business_id: auth.selectedBusinessId
+      }, 'low');
+
       const { data: settings, error: settingsError } = await supabase
         .from('pos_settings')
         .select('*')
         .eq('business_id', auth.selectedBusinessId)
-        .single();
+        .maybeSingle();
 
-      if (settingsError && settingsError.code !== 'PGRST116') {
+      if (settingsError && settingsError.code && settingsError.code !== 'PGRST116') {
         throw settingsError;
       }
 
@@ -61,15 +103,33 @@ const POSDailyDepositScreen = () => {
       setBusinessSettings(defaultSettings);
       
     } catch (err) {
-      console.error('Error loading business settings:', err);
+      await logSecurityEvent('daily_deposit_load_error', {
+        error: err.message,
+        business_id: auth.selectedBusinessId
+      }, 'medium');
+      
       setError('Failed to load business settings');
     } finally {
       setLoading(false);
     }
   };
 
+  const handleTabChange = async (tab) => {
+    // Check permissions before switching tabs
+    if (tab === 'history' && !canViewHistory) {
+      return;
+    }
+    
+    if (tab === 'deposit' && !canCreateDeposits) {
+      return;
+    }
+
+    await recordAction('deposit_tab_change', { new_tab: tab }, true);
+    setActiveTab(tab);
+  };
+
   // Show loading state while authentication and settings are loading
-  if (!auth.isReady || loading) {
+  if (!auth.isReady || loading || permissionsLoading) {
     return (
       <POSAuthWrapper
         requiredRoles={['manager', 'owner']}
@@ -80,6 +140,34 @@ const POSDailyDepositScreen = () => {
             <div style={TavariStyles.components.loading.spinner}></div>
             <div>Loading daily deposit screen...</div>
             <style>{TavariStyles.keyframes.spin}</style>
+          </div>
+        </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  // Check overall access permission
+  if (!canViewDeposits) {
+    return (
+      <POSAuthWrapper
+        requiredRoles={['manager', 'owner']}
+        componentName="POSDailyDepositScreen"
+      >
+        <div style={styles.container}>
+          <div style={styles.errorContainer}>
+            <h3 style={styles.errorTitle}>Access Denied</h3>
+            <p style={styles.errorMessage}>
+              You do not have permission to access daily deposit management.
+            </p>
+            <button
+              style={TavariStyles.utils.merge(
+                TavariStyles.components.button.base,
+                TavariStyles.components.button.variants.secondary
+              )}
+              onClick={() => navigate('/dashboard/pos/register')}
+            >
+              Return to Register
+            </button>
           </div>
         </div>
       </POSAuthWrapper>
@@ -113,79 +201,110 @@ const POSDailyDepositScreen = () => {
   }
 
   return (
-    <POSAuthWrapper
-      requiredRoles={['manager', 'owner']}
-      componentName="POSDailyDepositScreen"
-    >
-      <div style={styles.container}>
-        {/* Header */}
-        <div style={styles.header}>
-          <div style={styles.headerContent}>
-            <h1 style={styles.title}>Daily Deposit</h1>
-            <p style={styles.subtitle}>
-              Manage cash counting and deposit reconciliation
-            </p>
+    <SecurityWrapper>
+      <POSAuthWrapper
+        requiredRoles={['manager', 'owner']}
+        componentName="POSDailyDepositScreen"
+      >
+        <div style={styles.container}>
+          {/* Header */}
+          <div style={styles.header}>
+            <div style={styles.headerContent}>
+              <h1 style={styles.title}>Daily Deposit</h1>
+              <p style={styles.subtitle}>
+                Manage cash counting and deposit reconciliation
+              </p>
+            </div>
+            <button
+              style={TavariStyles.utils.merge(
+                TavariStyles.components.button.base,
+                TavariStyles.components.button.variants.secondary
+              )}
+              onClick={() => navigate('/dashboard/pos/register')}
+            >
+              Back to Register
+            </button>
           </div>
-          <button
-            style={TavariStyles.utils.merge(
-              TavariStyles.components.button.base,
-              TavariStyles.components.button.variants.secondary
+
+          {/* Tab Navigation */}
+          <div style={styles.tabContainer}>
+            <div style={styles.tabNav}>
+              {canCreateDeposits && (
+                <button
+                  style={{
+                    ...styles.tab,
+                    ...(activeTab === 'deposit' ? styles.activeTab : styles.inactiveTab)
+                  }}
+                  onClick={() => handleTabChange('deposit')}
+                >
+                  Current Deposit
+                </button>
+              )}
+              {canViewHistory && (
+                <button
+                  style={{
+                    ...styles.tab,
+                    ...(activeTab === 'history' ? styles.activeTab : styles.inactiveTab)
+                  }}
+                  onClick={() => handleTabChange('history')}
+                >
+                  Deposit History
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Tab Content */}
+          <div style={styles.tabContent}>
+            {activeTab === 'deposit' && canCreateDeposits && (
+              <PermissionGate
+                permissions={['pos.deposits.create']}
+                requireElevated
+                fallback={
+                  <div style={styles.noAccessContainer}>
+                    <p style={styles.noAccessText}>
+                      ⚠️ You do not have permission to create deposits (requires manager/owner)
+                    </p>
+                  </div>
+                }
+              >
+                <POSDepositCountComponent
+                  businessId={auth.selectedBusinessId}
+                  userId={auth.authUser?.id}
+                  businessSettings={businessSettings}
+                  onDepositComplete={() => {
+                    loadBusinessSettings();
+                    if (canViewHistory) {
+                      handleTabChange('history');
+                    }
+                  }}
+                />
+              </PermissionGate>
             )}
-            onClick={() => navigate('/dashboard/pos/register')}
-          >
-            Back to Register
-          </button>
-        </div>
-
-        {/* Tab Navigation */}
-        <div style={styles.tabContainer}>
-          <div style={styles.tabNav}>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'deposit' ? styles.activeTab : styles.inactiveTab)
-              }}
-              onClick={() => setActiveTab('deposit')}
-            >
-              Current Deposit
-            </button>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'history' ? styles.activeTab : styles.inactiveTab)
-              }}
-              onClick={() => setActiveTab('history')}
-            >
-              Deposit History
-            </button>
+            
+            {activeTab === 'history' && canViewHistory && (
+              <PermissionGate
+                permissions={['pos.deposits.view_history']}
+                requireElevated
+                fallback={
+                  <div style={styles.noAccessContainer}>
+                    <p style={styles.noAccessText}>
+                      ⚠️ You do not have permission to view deposit history (requires manager/owner)
+                    </p>
+                  </div>
+                }
+              >
+                <POSDepositHistoryComponent
+                  businessId={auth.selectedBusinessId}
+                  userId={auth.authUser?.id}
+                  businessSettings={businessSettings}
+                />
+              </PermissionGate>
+            )}
           </div>
         </div>
-
-        {/* Tab Content */}
-        <div style={styles.tabContent}>
-          {activeTab === 'deposit' && (
-            <POSDepositCountComponent
-              businessId={auth.selectedBusinessId}
-              userId={auth.authUser?.id}
-              businessSettings={businessSettings}
-              onDepositComplete={() => {
-                // Refresh settings and switch to history tab to show new deposit
-                loadBusinessSettings();
-                setActiveTab('history');
-              }}
-            />
-          )}
-          
-          {activeTab === 'history' && (
-            <POSDepositHistoryComponent
-              businessId={auth.selectedBusinessId}
-              userId={auth.authUser?.id}
-              businessSettings={businessSettings}
-            />
-          )}
-        </div>
-      </div>
-    </POSAuthWrapper>
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 
@@ -296,6 +415,17 @@ const styles = {
     color: TavariStyles.colors.gray600,
     marginBottom: TavariStyles.spacing.xl,
     lineHeight: TavariStyles.typography.lineHeight.relaxed
+  },
+
+  noAccessContainer: {
+    padding: TavariStyles.spacing['3xl'],
+    textAlign: 'center'
+  },
+
+  noAccessText: {
+    fontSize: TavariStyles.typography.fontSize.lg,
+    color: TavariStyles.colors.gray600,
+    margin: 0
   }
 };
 

@@ -1,4 +1,4 @@
-// src/screens/EmployeeScreen.jsx - Updated to use same data structure as EmployeeProfiles
+// src/screens/EmployeeScreen.jsx - WITH PERMISSION SYSTEM
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
@@ -8,11 +8,21 @@ import { SecurityWrapper } from '../Security';
 import { useSecurityContext } from '../Security';
 import { usePOSAuth } from '../hooks/usePOSAuth';
 import { useTaxCalculations } from '../hooks/useTaxCalculations';
+import { usePermissions } from '../hooks/usePermissions';
 import POSAuthWrapper from '../components/Auth/POSAuthWrapper';
+import PermissionGate from '../components/Auth/PermissionGate';
 import TavariCheckbox from '../components/UI/TavariCheckbox';
 import { TavariStyles } from '../utils/TavariStyles';
+import toast from 'react-hot-toast';
+
+// Modals
+import AddEmployeeModal from '../components/HR/AddEmployeeModal';
+import FixEmployeeAuthModal from '../components/HR/FixEmployeeAuthModal';
 
 import SessionManager from '../components/SessionManager';
+import PositionsTab from '../components/HR/PositionsTab';
+import RoleManagementTab from '../components/Settings/RoleManagementTab';
+import HierarchyChartTab from '../components/HR/HierarchyChartTab';
 
 const EmployeeScreen = () => {
   const navigate = useNavigate();
@@ -20,6 +30,12 @@ const EmployeeScreen = () => {
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [activeTab, setActiveTab] = useState('directory'); // 'directory', 'positions', 'roles', or 'hierarchy'
+
+  // Modal state
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showFixAuthModal, setShowFixAuthModal] = useState(false);
+  const [selectedEmployeeForFix, setSelectedEmployeeForFix] = useState(null);
 
   // Security context for sensitive employee data
   const {
@@ -54,24 +70,50 @@ const EmployeeScreen = () => {
   // Tax calculations for formatting
   const { formatTaxAmount } = useTaxCalculations(selectedBusinessId);
 
-  // Load employees using the same structure as EmployeeProfiles
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewEmployees = hasPermission('hr.employees.view') || hasElevatedPrivileges();
+  const canAddEmployees = hasPermission('hr.employees.add') || hasElevatedPrivileges();
+  const canEditEmployees = hasPermission('hr.employees.edit') || hasElevatedPrivileges();
+  const canViewWages = hasPermission('hr.wages.view') || isOwner();
+  const canFixAuth = hasPermission('hr.employees.fix_auth') || hasElevatedPrivileges();
+  const canManageRoles = hasPermission('admin.roles.view') || hasElevatedPrivileges();
+
+  // Check permissions on mount
   useEffect(() => {
-    if (selectedBusinessId && !authLoading) {
+    if (!permissionsLoading && !canViewEmployees) {
+      toast.error('You do not have permission to view employees');
+      navigate('/dashboard');
+    }
+  }, [permissionsLoading, canViewEmployees]);
+
+  // Load employees
+  useEffect(() => {
+    if (selectedBusinessId && !authLoading && !permissionsLoading && canViewEmployees) {
       fetchEmployees();
     }
-  }, [selectedBusinessId, authLoading]);
+  }, [selectedBusinessId, authLoading, permissionsLoading, canViewEmployees]);
 
   const fetchEmployees = async () => {
     try {
       setLoading(true);
       setError(null);
       
-      logSecurityEvent('employee_data_access', {
+      await recordAction('employee_list_view', selectedBusinessId, true);
+      
+      await logSecurityEvent('employee_data_access', {
         action: 'load_employee_list',
-        business_id: selectedBusinessId
+        business_id: selectedBusinessId,
+        viewer_role: userRole
       }, 'low');
       
-      // Use the same query structure as EmployeeProfiles for consistency
       const { data: userData, error: userError } = await supabase
         .from('users')
         .select(`
@@ -113,23 +155,27 @@ const EmployeeScreen = () => {
           wage: user.wage,
           employee_number: user.employee_number,
           created_at: user.created_at,
-          role: user.business_users?.role || 'employee', // Get role from business_users
+          role: user.business_users?.role || 'employee',
           business_name: businessData?.name || 'Current Business',
           tenure: user.hire_date ? calculateTenure(user.hire_date) : null
         };
       });
       
       setEmployees(transformedEmployees);
-      console.log('Loaded employees with complete data:', transformedEmployees);
+      
+      await logSecurityEvent('employee_list_loaded', {
+        business_id: selectedBusinessId,
+        employee_count: transformedEmployees.length
+      }, 'low');
       
     } catch (error) {
-      console.error('Error loading employees:', error);
-      logSecurityEvent('employee_data_access_failed', {
+      await logSecurityEvent('employee_data_access_failed', {
         error_message: error.message,
         business_id: selectedBusinessId
       }, 'medium');
       setError('Failed to load employees: ' + error.message);
       setEmployees([]);
+      toast.error('Failed to load employees');
     } finally {
       setLoading(false);
     }
@@ -166,14 +212,138 @@ const EmployeeScreen = () => {
     }
   };
 
-  const handleEmployeeClick = (employee) => {
-    recordAction('view_employee_details', employee.id);
+  const handleEmployeeClick = async (employee) => {
+    if (!canEditEmployees) {
+      toast.error('You do not have permission to view employee details');
+      return;
+    }
+
+    const rateLimitOk = await checkRateLimit('employee_view', 30, 60000);
+    if (!rateLimitOk) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
+    await recordAction('view_employee_details', employee.id, true);
+    
+    await logSecurityEvent('employee_details_navigation', {
+      employee_id: employee.id,
+      employee_name: employee.full_name,
+      business_id: selectedBusinessId
+    }, 'low');
+
     navigate(`/dashboard/employee/${employee.id}`);
   };
 
-  const handleAddEmployee = () => {
-    recordAction('navigate_add_employee');
-    navigate('/dashboard/add-user');
+  const handleAddEmployee = async () => {
+    if (!canAddEmployees) {
+      toast.error('You do not have permission to add employees');
+      return;
+    }
+
+    const rateLimitOk = await checkRateLimit('add_employee_modal', 10, 60000);
+    if (!rateLimitOk) {
+      toast.error('Too many requests. Please wait a moment.');
+      return;
+    }
+
+    await recordAction('open_add_employee_modal', null, true);
+    
+    await logSecurityEvent('add_employee_modal_opened', {
+      business_id: selectedBusinessId,
+      opened_by: authUser?.id
+    }, 'low');
+
+    setShowAddModal(true);
+  };
+
+  const handleEmployeeCreated = async (newEmployeeId) => {
+    setShowAddModal(false);
+    
+    await logSecurityEvent('employee_created_from_screen', {
+      new_employee_id: newEmployeeId,
+      business_id: selectedBusinessId,
+      created_by: authUser?.id
+    }, 'medium');
+
+    await recordAction('employee_created_success', newEmployeeId, true);
+    
+    toast.success('Employee created successfully');
+    fetchEmployees(); // Reload the list
+  };
+  
+  const handleFixAuth = async (employee) => {
+    if (!canFixAuth) {
+      toast.error('You do not have permission to fix authentication');
+      return;
+    }
+
+    const rateLimitOk = await checkRateLimit('fix_auth_modal', 5, 300000);
+    if (!rateLimitOk) {
+      toast.error('Too many requests. Please wait.');
+      return;
+    }
+
+    await recordAction('fix_employee_auth', employee.id, true);
+    
+    await logSecurityEvent('fix_auth_modal_opened', {
+      employee_id: employee.id,
+      employee_email: employee.email,
+      business_id: selectedBusinessId,
+      initiated_by: authUser?.id
+    }, 'high');
+
+    setSelectedEmployeeForFix(employee);
+    setShowFixAuthModal(true);
+  };
+
+  const handleFixAuthSuccess = async () => {
+    await logSecurityEvent('fix_auth_completed', {
+      employee_id: selectedEmployeeForFix?.id,
+      business_id: selectedBusinessId,
+      fixed_by: authUser?.id
+    }, 'high');
+
+    setShowFixAuthModal(false);
+    setSelectedEmployeeForFix(null);
+    toast.success('Authentication fixed successfully');
+    fetchEmployees(); // Refresh the employee list
+  };
+
+  const handleViewContract = async (employee) => {
+    if (!canEditEmployees) {
+      toast.error('You do not have permission to view contracts');
+      return;
+    }
+
+    try {
+      // Find the signed contract for this employee
+      const { data: contracts, error: contractError } = await supabase
+        .from('hr_contracts')
+        .select('id, signing_token, status, employee_email, employee_first_name, employee_last_name')
+        .eq('employee_email', employee.email)
+        .eq('status', 'signed')
+        .order('signed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (contractError) {
+        console.error('Error fetching contract:', contractError);
+        toast.error('Failed to load contract: ' + contractError.message);
+        return;
+      }
+
+      if (!contracts || !contracts.signing_token) {
+        toast.error('No signed contract found for this employee');
+        return;
+      }
+
+      // Navigate to contract view page
+      window.open(`/contract/view/${contracts.signing_token}`, '_blank');
+    } catch (error) {
+      console.error('Error viewing contract:', error);
+      toast.error('Failed to open contract: ' + error.message);
+    }
   };
 
   // Filter employees based on search
@@ -191,7 +361,7 @@ const EmployeeScreen = () => {
       minHeight: '100vh',
       backgroundColor: TavariStyles.colors.gray50,
       padding: TavariStyles.spacing['3xl'],
-      paddingTop: '100px', // Account for header
+      paddingTop: '80px',
       boxSizing: 'border-box'
     },
     header: {
@@ -249,7 +419,7 @@ const EmployeeScreen = () => {
     },
     gridHeader: {
       display: 'grid',
-      gridTemplateColumns: '2fr 2fr 1.5fr 1.5fr 1fr 1fr 1fr',
+      gridTemplateColumns: '2fr 2fr 1.5fr 1.5fr 1fr 1fr 1fr 1fr',
       backgroundColor: TavariStyles.colors.gray100,
       padding: TavariStyles.spacing.lg,
       borderBottom: `2px solid ${TavariStyles.colors.gray200}`,
@@ -261,7 +431,7 @@ const EmployeeScreen = () => {
     },
     gridRow: {
       display: 'grid',
-      gridTemplateColumns: '2fr 2fr 1.5fr 1.5fr 1fr 1fr 1fr',
+      gridTemplateColumns: '2fr 2fr 1.5fr 1.5fr 1fr 1fr 1fr 1fr',
       padding: TavariStyles.spacing.lg,
       borderBottom: `1px solid ${TavariStyles.colors.gray100}`,
       cursor: 'pointer',
@@ -297,6 +467,17 @@ const EmployeeScreen = () => {
       fontWeight: TavariStyles.typography.fontWeight.semibold,
       color: TavariStyles.colors.primary
     },
+    fixAuthButton: {
+      backgroundColor: '#ff9800',
+      color: 'white',
+      border: 'none',
+      padding: '6px 12px',
+      borderRadius: '4px',
+      cursor: 'pointer',
+      fontSize: '11px',
+      fontWeight: 'bold',
+      transition: 'background-color 0.2s ease'
+    },
     emptyState: {
       textAlign: 'center',
       padding: '60px 20px',
@@ -322,6 +503,25 @@ const EmployeeScreen = () => {
     }
   };
 
+  if (!canViewEmployees && !permissionsLoading) {
+    return (
+      <SessionManager>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: '100vh',
+          backgroundColor: '#f9fafb'
+        }}>
+          <div style={{ textAlign: 'center' }}>
+            <h2 style={{ color: '#374151', marginBottom: '16px' }}>Access Denied</h2>
+            <p style={{ color: '#6b7280' }}>You do not have permission to view employees</p>
+          </div>
+        </div>
+      </SessionManager>
+    );
+  }
+
   return (
     <POSAuthWrapper
       requiredRoles={['owner', 'manager', 'admin']}
@@ -332,20 +532,133 @@ const EmployeeScreen = () => {
         <SessionManager>
           <div style={styles.container}>
             {/* Header */}
-            <div style={styles.header}>
-              <h1 style={styles.title}>Employee Directory</h1>
-              <p style={styles.subtitle}>View and manage your team members</p>
+            <div style={{ ...styles.header, marginBottom: '12px' }}>
+              <h1 style={{ ...styles.title, fontSize: '28px', marginBottom: '4px' }}>Employee Management</h1>
+              <p style={{ ...styles.subtitle, fontSize: '14px' }}>Manage employees and positions</p>
+            </div>
+
+            {/* Tab Navigation */}
+            <div style={{
+              display: 'flex',
+              gap: '2px',
+              marginBottom: '20px',
+              backgroundColor: '#e5e7eb',
+              borderRadius: '8px',
+              padding: '4px'
+            }}>
+              <button
+                onClick={() => setActiveTab('directory')}
+                style={{
+                  flex: 1,
+                  padding: '12px 20px',
+                  backgroundColor: activeTab === 'directory' ? 'white' : 'transparent',
+                  color: activeTab === 'directory' ? '#008080' : '#6b7280',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  boxShadow: activeTab === 'directory' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
+                }}
+              >
+                👥 Employee Directory
+              </button>
+              <button
+                onClick={() => setActiveTab('positions')}
+                style={{
+                  flex: 1,
+                  padding: '12px 20px',
+                  backgroundColor: activeTab === 'positions' ? 'white' : 'transparent',
+                  color: activeTab === 'positions' ? '#008080' : '#6b7280',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  boxShadow: activeTab === 'positions' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
+                }}
+              >
+                💼 Positions
+              </button>
+              {canManageRoles && (
+                <button
+                  onClick={() => setActiveTab('roles')}
+                  style={{
+                    flex: 1,
+                    padding: '12px 20px',
+                    backgroundColor: activeTab === 'roles' ? 'white' : 'transparent',
+                    color: activeTab === 'roles' ? '#008080' : '#6b7280',
+                    border: 'none',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease',
+                    boxShadow: activeTab === 'roles' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
+                  }}
+                >
+                  🔑 Roles & Access
+                </button>
+              )}
+              <button
+                onClick={() => setActiveTab('hierarchy')}
+                style={{
+                  flex: 1,
+                  padding: '12px 20px',
+                  backgroundColor: activeTab === 'hierarchy' ? 'white' : 'transparent',
+                  color: activeTab === 'hierarchy' ? '#008080' : '#6b7280',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  boxShadow: activeTab === 'hierarchy' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
+                }}
+              >
+                📊 Hierarchy Chart
+              </button>
             </div>
 
             {/* Error Message */}
-            {error && (
+            {error && activeTab === 'directory' && (
               <div style={styles.errorBanner}>
                 {error}
               </div>
             )}
 
-            {/* Search and Add Controls */}
-            <div style={styles.headerRow}>
+            {/* Tab Content */}
+            {activeTab === 'positions' ? (
+              <PositionsTab businessId={selectedBusinessId} />
+            ) : activeTab === 'roles' ? (
+              <RoleManagementTab 
+                businessId={selectedBusinessId}
+                styles={{
+                  section: {
+                    backgroundColor: 'white',
+                    borderRadius: '8px',
+                    padding: '25px',
+                    marginBottom: '20px',
+                    border: '1px solid #e5e7eb'
+                  },
+                  sectionTitle: {
+                    margin: '0 0 20px 0',
+                    fontSize: '18px',
+                    fontWeight: 'bold',
+                    color: '#1f2937',
+                    borderBottom: '2px solid #008080',
+                    paddingBottom: '8px'
+                  }
+                }}
+              />
+            ) : activeTab === 'hierarchy' ? (
+              <HierarchyChartTab businessId={selectedBusinessId} />
+            ) : (
+              <>
+                {/* Search and Add Controls */}
+                <div style={styles.headerRow}>
               <input
                 type="text"
                 placeholder="Search employees by name, email, position, department, or employee #..."
@@ -353,10 +666,12 @@ const EmployeeScreen = () => {
                 onChange={(e) => setSearch(e.target.value)}
                 style={styles.searchInput}
               />
-              <button style={styles.addButton} onClick={handleAddEmployee}>
-                <span>+</span>
-                Add Employee
-              </button>
+              <PermissionGate permission="hr.employees.add" fallback={null}>
+                <button style={styles.addButton} onClick={handleAddEmployee}>
+                  <span>+</span>
+                  Add Employee
+                </button>
+              </PermissionGate>
             </div>
 
             {/* Employee Grid */}
@@ -368,7 +683,8 @@ const EmployeeScreen = () => {
                 <span>Department</span>
                 <span>Status</span>
                 <span>Employee #</span>
-                <span>Wage</span>
+                {canViewWages ? <span>Wage</span> : <span>-</span>}
+                {(canFixAuth || canEditEmployees) && <span>Actions</span>}
               </div>
 
               {loading ? (
@@ -384,7 +700,7 @@ const EmployeeScreen = () => {
                       : 'Get started by adding your first employee.'
                     }
                   </p>
-                  {!search && (
+                  {!search && canAddEmployees && (
                     <button style={styles.addButton} onClick={handleAddEmployee}>
                       Add First Employee
                     </button>
@@ -454,14 +770,88 @@ const EmployeeScreen = () => {
                       )}
                     </span>
                     
-                    <span style={styles.wage}>
-                      {emp.wage ? `$${formatTaxAmount(emp.wage)}/hr` : '-'}
-                    </span>
+                    {canViewWages ? (
+                      <span style={styles.wage}>
+                        {emp.wage ? `$${formatTaxAmount(emp.wage)}/hr` : '-'}
+                      </span>
+                    ) : (
+                      <span style={{color: TavariStyles.colors.gray400}}>***</span>
+                    )}
+                    
+                    {(canFixAuth || canEditEmployees) && (
+                      <span style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        {canEditEmployees && (
+                          <button
+                            style={{
+                              ...styles.fixAuthButton,
+                              backgroundColor: TavariStyles.colors.primary,
+                              fontSize: '11px'
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleViewContract(emp);
+                            }}
+                            onMouseOver={(e) => {
+                              e.target.style.backgroundColor = '#006666';
+                            }}
+                            onMouseOut={(e) => {
+                              e.target.style.backgroundColor = TavariStyles.colors.primary;
+                            }}
+                            title="View employee contract"
+                          >
+                            📄 Contract
+                          </button>
+                        )}
+                        {canFixAuth && (
+                          <button
+                            style={styles.fixAuthButton}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleFixAuth(emp);
+                            }}
+                            onMouseOver={(e) => {
+                              e.target.style.backgroundColor = '#f57c00';
+                            }}
+                            onMouseOut={(e) => {
+                              e.target.style.backgroundColor = '#ff9800';
+                            }}
+                            title="Fix authentication for this employee"
+                          >
+                            🔧 Fix Auth
+                          </button>
+                        )}
+                      </span>
+                    )}
                   </div>
                 ))
               )}
             </div>
+              </>
+            )}
           </div>
+
+          {/* Add Employee Modal */}
+          {canAddEmployees && (
+            <AddEmployeeModal
+              isOpen={showAddModal}
+              onClose={() => setShowAddModal(false)}
+              businessId={selectedBusinessId}
+              onEmployeeCreated={handleEmployeeCreated}
+            />
+          )}
+
+          {/* Fix Employee Auth Modal */}
+          {canFixAuth && (
+            <FixEmployeeAuthModal
+              isOpen={showFixAuthModal}
+              onClose={() => {
+                setShowFixAuthModal(false);
+                setSelectedEmployeeForFix(null);
+              }}
+              employee={selectedEmployeeForFix}
+              onSuccess={handleFixAuthSuccess}
+            />
+          )}
         </SessionManager>
       </SecurityWrapper>
     </POSAuthWrapper>

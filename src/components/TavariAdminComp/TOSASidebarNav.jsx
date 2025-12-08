@@ -4,7 +4,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { 
   FiHome, FiUsers, FiShield, FiHeadphones, FiTrendingUp, 
   FiSettings, FiBarChart, FiEdit, FiChevronDown, FiChevronRight,
-  FiMonitor, FiDatabase, FiAlertTriangle 
+  FiMonitor, FiDatabase, FiAlertTriangle, FiPackage
 } from 'react-icons/fi';
 import { TavariStyles } from '../../utils/TavariStyles';
 
@@ -67,6 +67,12 @@ const TOSASidebarNav = () => {
         { title: 'Database Status', path: '/tosa/system-health?tab=database' },
         { title: 'Performance Metrics', path: '/tosa/system-health?tab=performance' }
       ]
+    },
+    {
+      title: 'Module Management',
+      icon: <FiPackage />,
+      path: '/tosa/module-management',
+      active: isActive('/tosa/module-management')
     }
   ];
 
@@ -81,11 +87,7 @@ const TOSASidebarNav = () => {
       left: 0,
       top: 0,
       zIndex: 10,
-      overflowY: 'auto',
-      '@media (max-width: 768px)': {
-        transform: 'translateX(-100%)',
-        transition: 'transform 0.3s ease'
-      }
+      overflowY: 'auto'
     },
     
     menuItem: {

@@ -1,213 +1,386 @@
-// src/screens/Dashboard.jsx
-import React from 'react';
+// Dashboard.jsx - Module Marketplace (Clover-style)
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../supabaseClient';
-import { useUserProfile } from '../hooks/useUserProfile';
-import { useBusiness } from "../contexts/BusinessContext";
-import useAccessProtection from '../hooks/useAccessProtection';
+import { FiSettings } from 'react-icons/fi';
+import { TavariStyles } from '../utils/TavariStyles';
 import SessionManager from '../components/SessionManager';
-import HelcimTerminalWorkflow from '../components/POS/HelcimTerminalWorkflow';
-import HelcimBackendIntegration from '../components/POS/HelcimBackendIntegration';
+import POSAuthWrapper from '../components/Auth/POSAuthWrapper';
+import { usePOSAuth } from '../hooks/usePOSAuth';
+import { usePermissions } from '../hooks/usePermissions';
+import { useBusiness } from '../contexts/BusinessContext';
+import { SecurityWrapper, useSecurityContext } from '../Security';
+import PermissionGate from '../components/Auth/PermissionGate';
+import { useModuleCatalog } from '../hooks/useModuleCatalog';
+import ModuleCatalogService from '../services/ModuleCatalogService';
+import toast from 'react-hot-toast';
+
+// Icon mapping for modules
+const iconMap = {
+  'FiMail': '📧',
+  'FiMusic': '🎵',
+  'FiMonitor': '🖥️',
+  'FiUsers': '👥',
+  'FiShoppingCart': '🛒',
+  'FiPackage': '📦',
+  'FiStar': '⭐',
+  'FiCalendar': '📅',
+  'FiShoppingBag': '🛍️',
+  'FiInbox': '📥',
+  'FiSmartphone': '📱',
+  'FiFileText': '📄'
+};
 
 const Dashboard = () => {
   const navigate = useNavigate();
-  const { profile, roleInfo, loading } = useUserProfile();
+  const [isReady, setIsReady] = useState(false);
+
+  // Get business context first
   const { business } = useBusiness();
-  useAccessProtection(profile);
 
-  React.useEffect(() => {
-    const logProfileAccess = async () => {
-      try {
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+  // Security context for dashboard access
+  const {
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'Dashboard',
+    sensitiveComponent: false,
+    enableRateLimiting: false,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
 
-        if (sessionError) {
-          console.warn('Session error:', sessionError.message);
-        }
+  // Authentication - only after business is set
+  const {
+    selectedBusinessId,
+    authUser,
+    userRole,
+    businessData,
+    authLoading,
+    authError,
+    isManager,
+    isOwner
+  } = usePOSAuth({
+    requiredRoles: ['employee', 'cashier', 'manager', 'owner', 'admin'],
+    requireBusiness: true,
+    componentName: 'Dashboard'
+  });
 
-        const authUserId = session?.user?.id;
-        if (!authUserId) {
-          console.warn('No auth user found for logging.');
-          return;
-        }
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
 
-        const { error } = await supabase.from('audit_logs').insert({
-          user_id: authUserId,
-          event_type: 'user_profile_access',
-          timestamp: new Date().toISOString(),
-          details: JSON.stringify({
-            page: 'dashboard',
-          }),
-        });
+  // Module catalog
+  const { 
+    activatedModules, 
+    nonActivatedModules, 
+    loading: modulesLoading,
+    refresh: refreshModules
+  } = useModuleCatalog();
 
-        if (error) {
-          console.error('Audit log insert failed:', error.message);
-        } else {
-          console.log('Logged /me access from Dashboard.');
-        }
-      } catch (err) {
-        console.error('Unexpected error in audit logging:', err.message);
-      }
-    };
-
-    setTimeout(() => {
-      logProfileAccess();
-    }, 500);
-  }, []);
-
-  const handleLogout = async () => {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
-    const fallbackId = session?.user?.id;
-    const userId = profile?.id || fallbackId;
-
-    if (userId) {
-      const { error } = await supabase.from('audit_logs').insert({
-        user_id: userId,
-        event_type: 'logout',
-        details: JSON.stringify({
-          reason: 'user clicked logout',
-        }),
-      });
-
-      if (error) {
-        console.error('Audit log insert failed:', error.message);
-      } else {
-        console.log('Logout event logged successfully.');
-      }
-    } else {
-      console.warn('Could not determine user ID for logout log.');
+  // Wait for business context and auth to be ready
+  useEffect(() => {
+    if (business?.id && !authLoading && selectedBusinessId && !permissionsLoading && !modulesLoading) {
+      setIsReady(true);
     }
+  }, [business?.id, authLoading, selectedBusinessId, permissionsLoading, modulesLoading]);
 
-    await supabase.auth.signOut();
-    navigate('/login');
+  // Log dashboard access - only when ready
+  useEffect(() => {
+    if (isReady && authUser && selectedBusinessId) {
+      const logAccess = async () => {
+        await recordAction('dashboard_access', selectedBusinessId, true);
+        await logSecurityEvent('dashboard_viewed', {
+          business_id: selectedBusinessId,
+          user_role: userRole
+        }, 'low');
+      };
+      logAccess();
+    }
+  }, [isReady, authUser, selectedBusinessId]);
+
+  // Handle module click
+  const handleModuleClick = async (module) => {
+    if (module.isEnabled) {
+      // Track usage for activated modules
+      await ModuleCatalogService.trackModuleUsage(module.module_key);
+      
+      // Navigate to module dashboard
+      const dashboardRoute = ModuleCatalogService.getModuleDashboardRoute(module.module_key);
+      
+      await recordAction('module_access', module.module_key, true);
+      await logSecurityEvent('module_navigation', {
+        module_key: module.module_key,
+        module_name: module.module_name,
+        destination: dashboardRoute,
+        user_role: userRole
+      }, 'low');
+      
+      navigate(dashboardRoute);
+    } else {
+      // Navigate to splash page for non-activated modules
+      await recordAction('module_splash_view', module.module_key, true);
+      navigate(`/dashboard/modules/${module.module_key}`);
+    }
   };
 
-  const handlePaymentComplete = (result) => {
-    console.log('Helcim payment completed:', result);
-    
-    // You can add additional handling here such as:
-    // - Update POS cart
-    // - Save transaction to database
-    // - Print receipt
-    // - Show success message
-    
-    if (result.success) {
-      alert(`Payment successful! Transaction ID: ${result.transactionId}`);
-    } else {
-      alert(`Payment failed: ${result.error}`);
+  const styles = {
+    container: {
+      padding: TavariStyles.spacing['2xl'],
+      paddingTop: '100px',
+      maxWidth: '1400px',
+      margin: '0 auto'
+    },
+    header: {
+      textAlign: 'center',
+      marginBottom: TavariStyles.spacing['3xl']
+    },
+    title: {
+      fontSize: '2.5rem',
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray800,
+      marginBottom: TavariStyles.spacing.md
+    },
+    subtitle: {
+      fontSize: TavariStyles.typography.fontSize.xl,
+      color: TavariStyles.colors.gray600
+    },
+    businessInfo: {
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray500,
+      marginTop: TavariStyles.spacing.sm,
+      fontStyle: 'italic'
+    },
+    section: {
+      marginBottom: TavariStyles.spacing['4xl']
+    },
+    sectionTitle: {
+      fontSize: TavariStyles.typography.fontSize['2xl'],
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray800,
+      marginBottom: TavariStyles.spacing.lg,
+      paddingBottom: TavariStyles.spacing.md,
+      borderBottom: `2px solid ${TavariStyles.colors.gray200}`
+    },
+    modulesGrid: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+      gap: TavariStyles.spacing.xl
+    },
+    moduleCard: {
+      ...TavariStyles.layout.card,
+      padding: TavariStyles.spacing.xl,
+      textAlign: 'center',
+      cursor: 'pointer',
+      transition: 'all 0.3s ease',
+      border: '2px solid',
+      backgroundColor: TavariStyles.colors.white,
+      position: 'relative',
+      overflow: 'hidden'
+    },
+    moduleCardActivated: {
+      borderColor: TavariStyles.colors.primary || '#008080',
+      boxShadow: `0 4px 12px ${TavariStyles.colors.primary || '#008080'}20`
+    },
+    moduleCardInactive: {
+      borderColor: TavariStyles.colors.gray300 || '#d1d5db',
+      opacity: 0.85
+    },
+    activatedBadge: {
+      position: 'absolute',
+      top: '12px',
+      right: '12px',
+      backgroundColor: TavariStyles.colors.success || '#10b981',
+      color: TavariStyles.colors.white,
+      padding: '4px 12px',
+      borderRadius: TavariStyles.borderRadius.full || '9999px',
+      fontSize: TavariStyles.typography.fontSize.xs || '12px',
+      fontWeight: TavariStyles.typography.fontWeight.medium || '500'
+    },
+    iconWrapper: {
+      width: '80px',
+      height: '80px',
+      borderRadius: '50%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      margin: '0 auto',
+      marginBottom: TavariStyles.spacing.lg,
+      fontSize: '48px',
+      backgroundColor: TavariStyles.colors.gray50 || '#f9fafb'
+    },
+    moduleTitle: {
+      fontSize: TavariStyles.typography.fontSize.xl,
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray800,
+      marginBottom: TavariStyles.spacing.sm
+    },
+    moduleDescription: {
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray600,
+      marginBottom: TavariStyles.spacing.md,
+      lineHeight: 1.5
+    },
+    moduleCategory: {
+      fontSize: TavariStyles.typography.fontSize.xs,
+      color: TavariStyles.colors.gray500,
+      textTransform: 'uppercase',
+      letterSpacing: '0.5px'
+    },
+    loadingContainer: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: '400px',
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600
+    },
+    emptyState: {
+      textAlign: 'center',
+      padding: TavariStyles.spacing['3xl'],
+      color: TavariStyles.colors.gray600
+    },
+    emptyStateTitle: {
+      fontSize: TavariStyles.typography.fontSize.xl,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      marginBottom: TavariStyles.spacing.md
+    },
+    emptyStateText: {
+      fontSize: TavariStyles.typography.fontSize.base,
+      color: TavariStyles.colors.gray500
     }
   };
+
+  // Show loading state until everything is ready
+  if (!isReady || authLoading || permissionsLoading || modulesLoading) {
+    return (
+      <SessionManager>
+        <div style={styles.loadingContainer}>
+          Loading modules...
+        </div>
+      </SessionManager>
+    );
+  }
+
+  const ModuleCard = ({ module }) => (
+    <div
+      style={{
+        ...styles.moduleCard,
+        ...(module.isEnabled ? styles.moduleCardActivated : styles.moduleCardInactive)
+      }}
+      onClick={() => handleModuleClick(module)}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.transform = 'translateY(-4px)';
+        e.currentTarget.style.boxShadow = module.isEnabled 
+          ? `0 8px 24px ${TavariStyles.colors.primary || '#008080'}30`
+          : '0 8px 24px rgba(0, 0, 0, 0.1)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = 'translateY(0)';
+        e.currentTarget.style.boxShadow = module.isEnabled
+          ? `0 4px 12px ${TavariStyles.colors.primary || '#008080'}20`
+          : 'none';
+      }}
+    >
+      {module.isEnabled && (
+        <div style={styles.activatedBadge}>Active</div>
+      )}
+      <div style={styles.iconWrapper}>
+        {iconMap[module.icon] || '📦'}
+      </div>
+      <h3 style={styles.moduleTitle}>{module.module_name}</h3>
+      <p style={styles.moduleDescription}>{module.description}</p>
+      <div style={styles.moduleCategory}>{module.module_category}</div>
+    </div>
+  );
 
   return (
-    <SessionManager>
-      <div style={styles.container}>
-        <h2>Dashboard</h2>
-          {profile && business?.id ? (
-            <>
-              <p><strong>Name:</strong> {profile.full_name}</p>
-              <p><strong>Email:</strong> {profile.email}</p>
-              <p><strong>Live Role:</strong> {roleInfo?.role || 'None'}</p>
-              <p><strong>Business:</strong> {roleInfo?.business_name || 'Unknown'}</p>
-
-            {roleInfo?.role === 'manager' && (
-              <p style={{ color: 'green', fontWeight: 'bold' }}>Manager Access Enabled</p>
+    <POSAuthWrapper
+      requiredRoles={['employee', 'cashier', 'manager', 'owner', 'admin']}
+      requireBusiness={true}
+      componentName="Dashboard"
+    >
+      <SessionManager>
+        <div style={styles.container}>
+          <div style={styles.header}>
+            <h1 style={styles.title}>Welcome to Tavari OS</h1>
+            <p style={styles.subtitle}>Your complete business management platform</p>
+            {businessData && (
+              <p style={styles.businessInfo}>
+                {businessData.name} • {userRole?.toUpperCase()}
+              </p>
             )}
-          </>
-        ) : (
-          <p>Loading user info...</p>
-        )}
-        
-        <div style={styles.buttonContainer}>
-          {(profile?.roles?.includes('owner') || profile?.roles?.includes('admin')) && (
-            <>
-              <div style={styles.kpiSection}>
-                <div style={styles.kpiCard}>
-                  <h3>Total Sales</h3>
-                  <p>$12,345</p>
-                </div>
-                <div style={styles.kpiCard}>
-                  <h3>Active Users</h3>
-                  <p>87</p>
-                </div>
-                <div style={styles.kpiCard}>
-                  <h3>Conversion Rate</h3>
-                  <p>5.3%</p>
+          </div>
+
+          {/* Activated Modules Section */}
+          {activatedModules && activatedModules.length > 0 && (
+            <div style={styles.section}>
+              <h2 style={styles.sectionTitle}>Your Modules</h2>
+              <div style={styles.modulesGrid}>
+                {activatedModules.map((module) => (
+                  <ModuleCard key={module.module_key} module={module} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Non-Activated Modules Section */}
+          {nonActivatedModules && nonActivatedModules.length > 0 && (
+            <div style={styles.section}>
+              <h2 style={styles.sectionTitle}>Available Modules</h2>
+              <div style={styles.modulesGrid}>
+                {nonActivatedModules.map((module) => (
+                  <ModuleCard key={module.module_key} module={module} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Settings Card (always visible) */}
+          {hasElevatedPrivileges() && (
+            <div style={styles.section}>
+              <div style={styles.modulesGrid}>
+                <div
+                  style={{
+                    ...styles.moduleCard,
+                    ...styles.moduleCardActivated
+                  }}
+                  onClick={() => navigate('/dashboard/settings')}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'translateY(-4px)';
+                    e.currentTarget.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.15)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.1)';
+                  }}
+                >
+                  <div style={styles.iconWrapper}>⚙️</div>
+                  <h3 style={styles.moduleTitle}>Settings</h3>
+                  <p style={styles.moduleDescription}>Business configuration and preferences</p>
+                  <div style={styles.moduleCategory}>System</div>
                 </div>
               </div>
-            </>
+            </div>
+          )}
+
+          {/* Empty State */}
+          {(!activatedModules || activatedModules.length === 0) && 
+           (!nonActivatedModules || nonActivatedModules.length === 0) && (
+            <div style={styles.emptyState}>
+              <div style={styles.emptyStateTitle}>No Modules Available</div>
+              <div style={styles.emptyStateText}>
+                Modules are being loaded. Please refresh if this persists.
+              </div>
+            </div>
           )}
         </div>
-
-        {/* Helcim Terminal Integration Section */}
-        {business?.id && (
-          <div style={styles.helcimSection}>
-            <HelcimTerminalWorkflow 
-              businessId={business.id} 
-              onPaymentComplete={handlePaymentComplete}
-            />
-            
-            {/* Integration Guide - can be hidden after setup */}
-            <div style={styles.integrationGuide}>
-              <HelcimBackendIntegration />
-            </div>
-          </div>
-        )}
-      </div>
-    </SessionManager>
+      </SessionManager>
+    </POSAuthWrapper>
   );
-};
-
-const styles = {
-  container: {
-    textAlign: 'center',
-    marginTop: '100px',
-  },
-  buttonContainer: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: '16px',
-    marginTop: '20px',
-  },
-  button: {
-    padding: '12px 24px',
-    fontSize: '16px',
-    fontWeight: 'bold',
-    backgroundColor: '#FF4C4C',
-    color: '#fff',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer',
-  },
-  kpiSection: {
-    display: 'flex',
-    justifyContent: 'center',
-    gap: '24px',
-    marginTop: '40px',
-    flexWrap: 'wrap',
-  },
-  kpiCard: {
-    backgroundColor: '#f0f0f0',
-    padding: '20px',
-    borderRadius: '8px',
-    width: '200px',
-    textAlign: 'center',
-    boxShadow: '0 2px 6px rgba(0, 0, 0, 0.1)',
-  },
-  helcimSection: {
-    marginTop: '40px',
-    maxWidth: '1200px',
-    margin: '40px auto',
-  },
-  integrationGuide: {
-    marginTop: '40px',
-    padding: '20px',
-    backgroundColor: '#f9f9f9',
-    borderRadius: '8px',
-    border: '2px solid #e5e7eb'
-  }
 };
 
 export default Dashboard;

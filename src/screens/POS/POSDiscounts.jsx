@@ -1,15 +1,54 @@
 // src/screens/POS/POSDiscounts.jsx
-// Updated with properly working standardized components
+// Updated with permissions system and removed console logging
 import React, { useEffect, useState } from 'react';
 import { supabase } from '../../supabaseClient';
 import { logAction } from '../../helpers/posAudit';
 import { TavariStyles } from '../../utils/TavariStyles';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
+import { SecurityWrapper } from '../../Security';
+import { useSecurityContext } from '../../Security';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
 
 const POSDiscountsContent = ({ authState }) => {
   const { selectedBusinessId, authUser } = authState;
+  
+  // Security context for discount operations
+  const {
+    validateInput,
+    checkRateLimit,
+    recordAction,
+    logSecurityEvent
+  } = useSecurityContext({
+    componentName: 'POSDiscounts',
+    sensitiveComponent: true,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'medium'
+  });
+
+  // Permission system
+  const {
+    hasPermission,
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading
+  } = usePermissions();
+
+  // Permission checks
+  const canViewDiscounts = hasAnyPermission([
+    'pos.discounts.view',
+    'pos.discounts.create',
+    'pos.discounts.edit'
+  ]) || hasElevatedPrivileges();
+
+  const canCreateDiscounts = hasPermission('pos.discounts.create') || hasElevatedPrivileges();
+  const canEditDiscounts = hasPermission('pos.discounts.edit') || hasElevatedPrivileges();
+  const canDeleteDiscounts = hasPermission('pos.discounts.delete') || hasElevatedPrivileges();
+  const canToggleStatus = hasPermission('pos.discounts.toggle_status') || hasElevatedPrivileges();
   
   // Tax calculations hook for discount validation and preview
   const {
@@ -28,7 +67,7 @@ const POSDiscountsContent = ({ authState }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [previewMode, setPreviewMode] = useState(false);
-  const [previewCart, setPreviewCart] = useState([]); // For testing discount calculations
+  const [previewCart, setPreviewCart] = useState([]);
 
   // New discount form
   const [newName, setNewName] = useState('');
@@ -65,15 +104,20 @@ const POSDiscountsContent = ({ authState }) => {
   const [editApplyBeforeTax, setEditApplyBeforeTax] = useState(true);
 
   useEffect(() => {
-    if (selectedBusinessId) {
+    if (selectedBusinessId && canViewDiscounts) {
       fetchDiscounts();
       loadPreviewCart();
     }
-  }, [selectedBusinessId]);
+  }, [selectedBusinessId, canViewDiscounts]);
 
   // Load sample cart items for discount preview calculations
   const loadPreviewCart = async () => {
     try {
+      await logSecurityEvent('discount_preview_loaded', {
+        action: 'load_preview_cart',
+        business_id: selectedBusinessId
+      }, 'low');
+
       const { data: products, error } = await supabase
         .from('pos_products')
         .select('id, name, price, category_id')
@@ -94,7 +138,11 @@ const POSDiscountsContent = ({ authState }) => {
 
       setPreviewCart(sampleCart);
     } catch (err) {
-      console.error('Error loading preview cart:', err);
+      await logSecurityEvent('discount_preview_error', {
+        error: err.message,
+        business_id: selectedBusinessId
+      }, 'low');
+      
       // Set a fallback sample cart for preview
       setPreviewCart([
         { id: 'sample1', name: 'Sample Item 1', price: 10.00, quantity: 1, category_id: null, modifiers: [] },
@@ -110,6 +158,11 @@ const POSDiscountsContent = ({ authState }) => {
     setLoading(true);
     setError(null);
     try {
+      await logSecurityEvent('discounts_accessed', {
+        action: 'fetch_discounts',
+        business_id: selectedBusinessId
+      }, 'low');
+
       const { data, error } = await supabase
         .from('pos_discounts')
         .select('*')
@@ -126,7 +179,11 @@ const POSDiscountsContent = ({ authState }) => {
       });
 
     } catch (err) {
-      console.error('Error fetching discounts:', err);
+      await logSecurityEvent('discounts_fetch_error', {
+        error: err.message,
+        business_id: selectedBusinessId
+      }, 'medium');
+      
       setError('Error fetching discounts: ' + err.message);
     } finally {
       setLoading(false);
@@ -188,6 +245,12 @@ const POSDiscountsContent = ({ authState }) => {
   };
 
   const validateDiscountForm = (name, type, value, validFrom, validTo, minPurchase) => {
+    // Validate input using security context
+    const nameValidation = validateInput(name, 'text', 'discount_name');
+    if (!nameValidation.valid) {
+      return 'Invalid discount name';
+    }
+    
     if (!name.trim()) return 'Discount name is required';
     if (!value || parseFloat(value) <= 0) return 'Valid discount value is required';
     
@@ -207,6 +270,18 @@ const POSDiscountsContent = ({ authState }) => {
   };
 
   const addDiscount = async () => {
+    if (!canCreateDiscounts) {
+      setError('You do not have permission to create discounts');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('discount_create', 5, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many discount creation attempts. Please wait a moment.');
+      return;
+    }
+
     const validationError = validateDiscountForm(
       newName, newType, newValue, newValidFrom, newValidTo, newMinPurchase
     );
@@ -247,6 +322,18 @@ const POSDiscountsContent = ({ authState }) => {
       const { error } = await supabase.from('pos_discounts').insert([discountData]);
       if (error) throw error;
 
+      await logSecurityEvent('discount_created', {
+        discount_name: newName.trim(),
+        type: newType,
+        value: parseFloat(newValue),
+        auto_apply: newAutoApply,
+        manager_required: newManagerRequired,
+        tax_exempt: newTaxExempt,
+        apply_before_tax: newApplyBeforeTax,
+        business_id: selectedBusinessId,
+        created_by: authUser?.id
+      }, 'low');
+
       await logAction({
         action: 'pos_discount_created',
         context: 'POSDiscounts',
@@ -277,14 +364,25 @@ const POSDiscountsContent = ({ authState }) => {
       setNewCombineWithOthers(true);
       setNewApplyBeforeTax(true);
 
+      await recordAction('discount_added', { discount_name: newName.trim() }, true);
       fetchDiscounts();
     } catch (err) {
-      console.error('Error adding discount:', err);
+      await logSecurityEvent('discount_create_error', {
+        error: err.message,
+        discount_name: newName.trim(),
+        business_id: selectedBusinessId
+      }, 'medium');
+      
       setError('Error adding discount: ' + err.message);
     }
   };
 
   const startEdit = (discount) => {
+    if (!canEditDiscounts) {
+      setError('You do not have permission to edit discounts');
+      return;
+    }
+
     setEditId(discount.id);
     setEditName(discount.name);
     setEditType(discount.type);
@@ -323,6 +421,18 @@ const POSDiscountsContent = ({ authState }) => {
   };
 
   const saveEdit = async () => {
+    if (!canEditDiscounts) {
+      setError('You do not have permission to edit discounts');
+      return;
+    }
+
+    // Rate limiting check
+    const rateLimitCheck = await checkRateLimit('discount_edit', 10, 60000);
+    if (!rateLimitCheck.allowed) {
+      setError('Too many edit attempts. Please wait a moment.');
+      return;
+    }
+
     const validationError = validateDiscountForm(
       editName, editType, editValue, editValidFrom, editValidTo, editMinPurchase
     );
@@ -360,6 +470,16 @@ const POSDiscountsContent = ({ authState }) => {
 
       if (error) throw error;
 
+      await logSecurityEvent('discount_updated', {
+        discount_id: editId,
+        discount_name: editName.trim(),
+        is_active: editIsActive,
+        tax_exempt: editTaxExempt,
+        apply_before_tax: editApplyBeforeTax,
+        business_id: selectedBusinessId,
+        updated_by: authUser?.id
+      }, 'low');
+
       await logAction({
         action: 'pos_discount_updated',
         context: 'POSDiscounts',
@@ -372,15 +492,26 @@ const POSDiscountsContent = ({ authState }) => {
         }
       });
 
+      await recordAction('discount_updated', { discount_id: editId, discount_name: editName.trim() }, true);
       cancelEdit();
       fetchDiscounts();
     } catch (err) {
-      console.error('Error updating discount:', err);
+      await logSecurityEvent('discount_update_error', {
+        error: err.message,
+        discount_id: editId,
+        business_id: selectedBusinessId
+      }, 'medium');
+      
       setError('Error updating discount: ' + err.message);
     }
   };
 
   const deleteDiscount = async (id, name) => {
+    if (!canDeleteDiscounts) {
+      setError('You do not have permission to delete discounts');
+      return;
+    }
+
     if (!window.confirm(`Delete discount "${name}"? This action cannot be undone.`)) return;
     
     setError(null);
@@ -388,20 +519,38 @@ const POSDiscountsContent = ({ authState }) => {
       const { error } = await supabase.from('pos_discounts').delete().eq('id', id);
       if (error) throw error;
 
+      await logSecurityEvent('discount_deleted', {
+        discount_id: id,
+        discount_name: name,
+        business_id: selectedBusinessId,
+        deleted_by: authUser?.id
+      }, 'medium');
+
       await logAction({
         action: 'pos_discount_deleted',
         context: 'POSDiscounts',
         metadata: { discount_id: id, discount_name: name }
       });
 
+      await recordAction('discount_deleted', { discount_id: id, discount_name: name }, true);
       fetchDiscounts();
     } catch (err) {
-      console.error('Error deleting discount:', err);
+      await logSecurityEvent('discount_delete_error', {
+        error: err.message,
+        discount_id: id,
+        business_id: selectedBusinessId
+      }, 'medium');
+      
       setError('Error deleting discount: ' + err.message);
     }
   };
 
   const toggleDiscountStatus = async (id, currentStatus, name) => {
+    if (!canToggleStatus) {
+      setError('You do not have permission to toggle discount status');
+      return;
+    }
+
     const newStatus = !currentStatus;
     
     setError(null);
@@ -416,6 +565,15 @@ const POSDiscountsContent = ({ authState }) => {
 
       if (error) throw error;
 
+      await logSecurityEvent('discount_status_changed', {
+        discount_id: id,
+        discount_name: name,
+        old_status: currentStatus,
+        new_status: newStatus,
+        business_id: selectedBusinessId,
+        changed_by: authUser?.id
+      }, 'low');
+
       await logAction({
         action: 'pos_discount_status_changed',
         context: 'POSDiscounts',
@@ -427,9 +585,15 @@ const POSDiscountsContent = ({ authState }) => {
         }
       });
 
+      await recordAction('discount_status_toggled', { discount_id: id, new_status: newStatus }, true);
       fetchDiscounts();
     } catch (err) {
-      console.error('Error updating discount status:', err);
+      await logSecurityEvent('discount_status_change_error', {
+        error: err.message,
+        discount_id: id,
+        business_id: selectedBusinessId
+      }, 'medium');
+      
       setError('Error updating discount status: ' + err.message);
     }
   };
@@ -518,6 +682,17 @@ const POSDiscountsContent = ({ authState }) => {
     },
     
     loading: TavariStyles.components.loading.container,
+    
+    noAccessContainer: {
+      padding: TavariStyles.spacing['3xl'],
+      textAlign: 'center'
+    },
+
+    noAccessText: {
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600,
+      margin: 0
+    },
     
     previewToggle: {
       ...TavariStyles.layout.card,
@@ -885,10 +1060,24 @@ const POSDiscountsContent = ({ authState }) => {
     }
   };
 
-  if (loading) {
+  if (loading || permissionsLoading) {
     return (
       <div style={styles.container}>
         <div style={styles.loading}>Loading discounts...</div>
+      </div>
+    );
+  }
+
+  // Check overall access permission
+  if (!canViewDiscounts) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.noAccessContainer}>
+          <h3 style={styles.errorBanner}>Access Denied</h3>
+          <p style={styles.noAccessText}>
+            You do not have permission to view discounts.
+          </p>
+        </div>
       </div>
     );
   }
@@ -949,173 +1138,187 @@ const POSDiscountsContent = ({ authState }) => {
       </div>
 
       {/* Add New Discount */}
-      <div style={styles.addSection}>
-        <h3 style={styles.sectionTitle}>Add New Discount</h3>
-        <div style={styles.form}>
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Discount Name *</label>
-              <input
-                type="text"
-                placeholder="e.g., Senior Discount, Happy Hour"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                style={styles.input}
-              />
+      {canCreateDiscounts && (
+        <PermissionGate
+          permissions={['pos.discounts.create']}
+          requireElevated
+          fallback={
+            <div style={styles.noAccessContainer}>
+              <p style={styles.noAccessText}>
+                ⚠️ You do not have permission to create discounts (requires manager/owner)
+              </p>
             </div>
+          }
+        >
+          <div style={styles.addSection}>
+            <h3 style={styles.sectionTitle}>Add New Discount</h3>
+            <div style={styles.form}>
+              <div style={styles.formRow}>
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Discount Name *</label>
+                  <input
+                    type="text"
+                    placeholder="e.g., Senior Discount, Happy Hour"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    style={styles.input}
+                  />
+                </div>
 
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Type *</label>
-              <select
-                value={newType}
-                onChange={(e) => setNewType(e.target.value)}
-                style={styles.select}
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Type *</label>
+                  <select
+                    value={newType}
+                    onChange={(e) => setNewType(e.target.value)}
+                    style={styles.select}
+                  >
+                    <option value="percentage">Percentage</option>
+                    <option value="fixed">Fixed Amount</option>
+                  </select>
+                </div>
+
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>
+                    Value * {newType === 'percentage' ? '(%)' : '($)'}
+                  </label>
+                  <input
+                    type="number"
+                    placeholder={newType === 'percentage' ? '10' : '5.00'}
+                    value={newValue}
+                    onChange={(e) => setNewValue(e.target.value)}
+                    style={styles.input}
+                    step={newType === 'percentage' ? '1' : '0.01'}
+                    min="0"
+                    max={newType === 'percentage' ? '100' : undefined}
+                  />
+                </div>
+              </div>
+
+              <div style={styles.formRow}>
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Apply To</label>
+                  <select
+                    value={newApplicationType}
+                    onChange={(e) => setNewApplicationType(e.target.value)}
+                    style={styles.select}
+                  >
+                    <option value="transaction">Entire Transaction</option>
+                    <option value="item">Per Item</option>
+                  </select>
+                </div>
+
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Minimum Purchase ($)</label>
+                  <input
+                    type="number"
+                    placeholder="0.00 = no minimum"
+                    value={newMinPurchase}
+                    onChange={(e) => setNewMinPurchase(e.target.value)}
+                    style={styles.input}
+                    step="0.01"
+                    min="0"
+                  />
+                </div>
+
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Maximum Uses</label>
+                  <input
+                    type="number"
+                    placeholder="Leave blank = unlimited"
+                    value={newMaxUses}
+                    onChange={(e) => setNewMaxUses(e.target.value)}
+                    style={styles.input}
+                    min="1"
+                  />
+                </div>
+              </div>
+
+              <div style={styles.formRow}>
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Valid From (Optional)</label>
+                  <input
+                    type="date"
+                    value={newValidFrom}
+                    onChange={(e) => setNewValidFrom(e.target.value)}
+                    style={styles.input}
+                  />
+                </div>
+
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Valid To (Optional)</label>
+                  <input
+                    type="date"
+                    value={newValidTo}
+                    onChange={(e) => setNewValidTo(e.target.value)}
+                    style={styles.input}
+                  />
+                </div>
+              </div>
+
+              <div style={styles.formRow}>
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>Description (Optional)</label>
+                  <textarea
+                    placeholder="Additional details about this discount..."
+                    value={newDescription}
+                    onChange={(e) => setNewDescription(e.target.value)}
+                    style={styles.textarea}
+                    rows="2"
+                  />
+                </div>
+              </div>
+
+              <div style={styles.checkboxGrid}>
+                <div style={styles.checkboxGroup}>
+                  <div style={styles.checkboxGroupTitle}>Application Rules</div>
+                  <TavariCheckbox
+                    checked={newAutoApply}
+                    onChange={(checked) => setNewAutoApply(checked)}
+                    label="Auto-apply when conditions are met"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={newManagerRequired}
+                    onChange={(checked) => setNewManagerRequired(checked)}
+                    label="Require manager approval"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={newCombineWithOthers}
+                    onChange={(checked) => setNewCombineWithOthers(checked)}
+                    label="Can combine with other discounts"
+                    size="md"
+                  />
+                </div>
+
+                <div style={styles.checkboxGroup}>
+                  <div style={styles.checkboxGroupTitle}>Tax Behavior</div>
+                  <TavariCheckbox
+                    checked={newApplyBeforeTax}
+                    onChange={(checked) => setNewApplyBeforeTax(checked)}
+                    label="Apply discount before tax calculation"
+                    size="md"
+                  />
+                  <TavariCheckbox
+                    checked={newTaxExempt}
+                    onChange={(checked) => setNewTaxExempt(checked)}
+                    label="Discount is tax exempt (reduces taxable amount)"
+                    size="md"
+                  />
+                </div>
+              </div>
+
+              <button 
+                onClick={addDiscount}
+                style={styles.addButton}
+                disabled={!newName.trim() || !newValue}
               >
-                <option value="percentage">Percentage</option>
-                <option value="fixed">Fixed Amount</option>
-              </select>
-            </div>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>
-                Value * {newType === 'percentage' ? '(%)' : '($)'}
-              </label>
-              <input
-                type="number"
-                placeholder={newType === 'percentage' ? '10' : '5.00'}
-                value={newValue}
-                onChange={(e) => setNewValue(e.target.value)}
-                style={styles.input}
-                step={newType === 'percentage' ? '1' : '0.01'}
-                min="0"
-                max={newType === 'percentage' ? '100' : undefined}
-              />
+                Add Discount
+              </button>
             </div>
           </div>
-
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Apply To</label>
-              <select
-                value={newApplicationType}
-                onChange={(e) => setNewApplicationType(e.target.value)}
-                style={styles.select}
-              >
-                <option value="transaction">Entire Transaction</option>
-                <option value="item">Per Item</option>
-              </select>
-            </div>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Minimum Purchase ($)</label>
-              <input
-                type="number"
-                placeholder="0.00 = no minimum"
-                value={newMinPurchase}
-                onChange={(e) => setNewMinPurchase(e.target.value)}
-                style={styles.input}
-                step="0.01"
-                min="0"
-              />
-            </div>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Maximum Uses</label>
-              <input
-                type="number"
-                placeholder="Leave blank = unlimited"
-                value={newMaxUses}
-                onChange={(e) => setNewMaxUses(e.target.value)}
-                style={styles.input}
-                min="1"
-              />
-            </div>
-          </div>
-
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Valid From (Optional)</label>
-              <input
-                type="date"
-                value={newValidFrom}
-                onChange={(e) => setNewValidFrom(e.target.value)}
-                style={styles.input}
-              />
-            </div>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Valid To (Optional)</label>
-              <input
-                type="date"
-                value={newValidTo}
-                onChange={(e) => setNewValidTo(e.target.value)}
-                style={styles.input}
-              />
-            </div>
-          </div>
-
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Description (Optional)</label>
-              <textarea
-                placeholder="Additional details about this discount..."
-                value={newDescription}
-                onChange={(e) => setNewDescription(e.target.value)}
-                style={styles.textarea}
-                rows="2"
-              />
-            </div>
-          </div>
-
-          <div style={styles.checkboxGrid}>
-            <div style={styles.checkboxGroup}>
-              <div style={styles.checkboxGroupTitle}>Application Rules</div>
-              <TavariCheckbox
-                checked={newAutoApply}
-                onChange={(checked) => setNewAutoApply(checked)}
-                label="Auto-apply when conditions are met"
-                size="md"
-              />
-              <TavariCheckbox
-                checked={newManagerRequired}
-                onChange={(checked) => setNewManagerRequired(checked)}
-                label="Require manager approval"
-                size="md"
-              />
-              <TavariCheckbox
-                checked={newCombineWithOthers}
-                onChange={(checked) => setNewCombineWithOthers(checked)}
-                label="Can combine with other discounts"
-                size="md"
-              />
-            </div>
-
-            <div style={styles.checkboxGroup}>
-              <div style={styles.checkboxGroupTitle}>Tax Behavior</div>
-              <TavariCheckbox
-                checked={newApplyBeforeTax}
-                onChange={(checked) => setNewApplyBeforeTax(checked)}
-                label="Apply discount before tax calculation"
-                size="md"
-              />
-              <TavariCheckbox
-                checked={newTaxExempt}
-                onChange={(checked) => setNewTaxExempt(checked)}
-                label="Discount is tax exempt (reduces taxable amount)"
-                size="md"
-              />
-            </div>
-          </div>
-
-          <button 
-            onClick={addDiscount}
-            style={styles.addButton}
-            disabled={!newName.trim() || !newValue}
-          >
-            Add Discount
-          </button>
-        </div>
-      </div>
+        </PermissionGate>
+      )}
 
       {/* Discounts Table */}
       <div style={styles.tableContainer}>
@@ -1134,7 +1337,7 @@ const POSDiscountsContent = ({ authState }) => {
             {discounts.length === 0 && (
               <tr>
                 <td colSpan="6" style={styles.emptyCell}>
-                  No discounts found. Create your first discount above.
+                  No discounts found. {canCreateDiscounts ? 'Create your first discount above.' : 'No discounts available.'}
                 </td>
               </tr>
             )}
@@ -1249,7 +1452,7 @@ const POSDiscountsContent = ({ authState }) => {
                         <div style={styles.discountValue}>
                           {discount.type === 'percentage' 
                             ? `${discount.value}%` 
-                            : `${discount.value?.toFixed(2) || '0.00'}`
+                            : `$${discount.value?.toFixed(2) || '0.00'}`
                           }
                         </div>
                         <div style={styles.applicationType}>
@@ -1402,27 +1605,33 @@ const POSDiscountsContent = ({ authState }) => {
                       </div>
                     ) : (
                       <div style={styles.actions}>
-                        <button 
-                          onClick={() => startEdit(discount)} 
-                          style={styles.editButton}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => toggleDiscountStatus(discount.id, discount.is_active, discount.name)}
-                          style={{
-                            ...styles.toggleButton,
-                            backgroundColor: discount.is_active ? TavariStyles.colors.warning : TavariStyles.colors.success
-                          }}
-                        >
-                          {discount.is_active ? 'Disable' : 'Enable'}
-                        </button>
-                        <button 
-                          onClick={() => deleteDiscount(discount.id, discount.name)} 
-                          style={styles.deleteButton}
-                        >
-                          Delete
-                        </button>
+                        {canEditDiscounts && (
+                          <button 
+                            onClick={() => startEdit(discount)} 
+                            style={styles.editButton}
+                          >
+                            Edit
+                          </button>
+                        )}
+                        {canToggleStatus && (
+                          <button
+                            onClick={() => toggleDiscountStatus(discount.id, discount.is_active, discount.name)}
+                            style={{
+                              ...styles.toggleButton,
+                              backgroundColor: discount.is_active ? TavariStyles.colors.warning : TavariStyles.colors.success
+                            }}
+                          >
+                            {discount.is_active ? 'Disable' : 'Enable'}
+                          </button>
+                        )}
+                        {canDeleteDiscounts && (
+                          <button 
+                            onClick={() => deleteDiscount(discount.id, discount.name)} 
+                            style={styles.deleteButton}
+                          >
+                            Delete
+                          </button>
+                        )}
                       </div>
                     )}
                   </td>
@@ -1507,14 +1716,16 @@ const POSDiscounts = () => {
   const [authState, setAuthState] = useState(null);
 
   return (
-    <POSAuthWrapper
-      componentName="POS Discounts"
-      requiredRoles={['owner', 'manager', 'employee']}
-      requireBusiness={true}
-      onAuthReady={setAuthState}
-    >
-      {authState && <POSDiscountsContent authState={authState} />}
-    </POSAuthWrapper>
+    <SecurityWrapper>
+      <POSAuthWrapper
+        componentName="POS Discounts"
+        requiredRoles={['owner', 'manager', 'employee']}
+        requireBusiness={true}
+        onAuthReady={setAuthState}
+      >
+        {authState && <POSDiscountsContent authState={authState} />}
+      </POSAuthWrapper>
+    </SecurityWrapper>
   );
 };
 

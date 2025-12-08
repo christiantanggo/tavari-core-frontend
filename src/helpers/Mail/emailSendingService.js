@@ -2,6 +2,26 @@
 import { supabase } from '../../supabaseClient';
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
+const TEST_MODE_STORAGE_KEY = 'EMAIL_TESTING_MODE_OVERRIDE';
+
+const getInitialTestMode = () => {
+  const envFlag = import.meta.env.VITE_EMAIL_TESTING_MODE;
+  let defaultMode = envFlag === undefined || envFlag === null || envFlag === '' || envFlag === 'true';
+
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = window.localStorage.getItem(TEST_MODE_STORAGE_KEY);
+      if (stored !== null) {
+        return stored === 'true';
+      }
+    } catch (error) {
+      console.warn('Unable to read email testing mode from localStorage:', error);
+    }
+  }
+
+  return defaultMode;
+};
+
 class EmailSendingService {
   constructor() {
     this.sesConfig = {
@@ -29,22 +49,11 @@ class EmailSendingService {
         region: this.sesConfig.region,
         credentials: this.sesConfig.credentials
       });
-      console.log('🚀 AWS SES Client initialized for REAL email sending');
-      console.log('Region:', this.sesConfig.region);
-      console.log('Access Key ID:', this.sesConfig.credentials.accessKeyId?.substring(0, 8) + '...');
-      console.log('Credentials configured:', !!this.sesConfig.credentials.accessKeyId);
     } else {
-      console.warn('⚠️ AWS credentials not found in environment variables');
-      console.log('Available env vars:', {
-        VITE_AWS_ACCESS_KEY_ID: !!import.meta.env.VITE_AWS_ACCESS_KEY_ID,
-        VITE_AWS_SECRET_ACCESS_KEY: !!import.meta.env.VITE_AWS_SECRET_ACCESS_KEY,
-        VITE_AWS_REGION: import.meta.env.VITE_AWS_REGION,
-        region: this.sesConfig.region
-      });
       this.sesClient = null;
     }
 
-    this.testMode = import.meta.env.VITE_EMAIL_TESTING_MODE === 'true';
+    this.testMode = getInitialTestMode();
     
     // Step 134: Quota tracking
     this.quotaCache = {
@@ -55,16 +64,35 @@ class EmailSendingService {
     };
   }
 
+  getTestMode() {
+    return this.testMode;
+  }
+
+  setTestMode(enabled) {
+    this.testMode = !!enabled;
+
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(TEST_MODE_STORAGE_KEY, String(this.testMode));
+      } catch (error) {
+        console.warn('Unable to persist email testing mode:', error);
+      }
+
+      try {
+        window.dispatchEvent(new CustomEvent('emailTestingModeChanged', {
+          detail: { enabled: this.testMode }
+        }));
+      } catch (error) {
+        console.warn('Failed to dispatch emailTestingModeChanged event:', error);
+      }
+    }
+  }
+
   // Step 111: Real AWS SES initialization
   async initializeSES() {
     try {
-      console.log('Initializing AWS SES configuration...');
-      console.log('Region:', this.sesConfig.region);
-      console.log('Has Access Key:', !!this.sesConfig.credentials.accessKeyId);
-      console.log('Test Mode:', this.testMode);
       
       if (this.sesClient) {
-        console.log('✅ AWS SES Client ready for real email sending');
         
         return {
           success: true,
@@ -74,7 +102,6 @@ class EmailSendingService {
           sendingQuota: { Max24HourSend: 50000, SentLast24Hours: 0, MaxSendRate: 14 }
         };
       } else {
-        console.log('❌ AWS SES Client not initialized - missing credentials');
         return {
           success: false,
           region: this.sesConfig.region,
@@ -98,7 +125,6 @@ class EmailSendingService {
   // FIXED: Always allow sending - removed all false positive quota checks
   async checkSESQuota(forceRefresh = false) {
     try {
-      console.log('✅ QUOTA CHECK BYPASSED - ALWAYS ALLOWING SENDS');
 
       return {
         sendQuota: 50000,
@@ -130,7 +156,6 @@ class EmailSendingService {
   // FIXED: Always return good reputation
   async checkIPReputation() {
     try {
-      console.log('✅ REPUTATION CHECK BYPASSED - ALWAYS GOOD REPUTATION');
       
       return {
         reputation: 'good',
@@ -170,7 +195,6 @@ class EmailSendingService {
         };
       }
 
-      console.log('✅ DOMAIN VALIDATION BYPASSED - ALWAYS ALLOWING SEND');
 
       return {
         authenticated: true,
@@ -194,7 +218,6 @@ class EmailSendingService {
   // FIXED: Always allow campaign compliance
   async validateCampaignCompliance(campaign, businessId) {
     try {
-      console.log('✅ COMPLIANCE VALIDATION BYPASSED - ALWAYS ALLOWING SEND');
       
       const issues = [];
       const warnings = [];
@@ -216,7 +239,6 @@ class EmailSendingService {
       // Always allow sending unless basic validation fails
       const canSend = issues.length === 0;
       
-      console.log('🎯 Final canSend decision:', canSend, 'Issues:', issues);
 
       return {
         canSend: canSend,
@@ -316,12 +338,9 @@ class EmailSendingService {
         throw new Error('Missing campaign or contact data');
       }
 
-      console.log('📧 Preparing to send email to:', contact.email);
-      console.log('Test Mode:', this.testMode);
 
       // **TEST MODE CHECK**
       if (this.testMode) {
-        console.log('🧪 TEST MODE: Simulating email send (no real SES call)');
         
         await new Promise(resolve => setTimeout(resolve, 100));
         
@@ -340,6 +359,12 @@ class EmailSendingService {
       if (!this.sesClient) {
         throw new Error('AWS SES client not initialized - check credentials in .env file');
       }
+
+      const configurationSet =
+        queueItem.configuration_set ||
+        campaign.configuration_set ||
+        import.meta.env.VITE_SES_CONFIGURATION_SET ||
+        undefined;
 
       // Get business settings
       const { data: settings, error: settingsError } = await supabase
@@ -381,20 +406,23 @@ class EmailSendingService {
               Charset: 'UTF-8'
             }
           }
-        }
+        },
+        ...(configurationSet ? { ConfigurationSetName: configurationSet } : {}),
+        EmailTags: [
+          ...(queueItem.business_id
+            ? [{ Name: 'business_id', Value: queueItem.business_id }]
+            : []),
+          {
+            Name: 'campaign_id',
+            Value: queueItem.campaign_id || campaign.id || 'unknown'
+          }
+        ]
       });
 
       // 🔥 SEND REAL EMAIL via AWS SES
-      console.log('🔥 SENDING REAL EMAIL via AWS SES...');
-      console.log('Region:', this.sesConfig.region);
-      console.log('From:', `${settings.from_name} <${settings.from_email}>`);
-      console.log('To:', contact.email);
-      console.log('Subject:', campaign.subject_line);
       
       const result = await this.sesClient.send(sendCommand);
       
-      console.log('✅ REAL EMAIL SENT SUCCESSFULLY!');
-      console.log('SES Message ID:', result.MessageId);
 
       return {
         success: true,
@@ -495,7 +523,6 @@ class EmailSendingService {
       // Validate compliance (but allow sending)
       const compliance = await this.validateCampaignCompliance(campaign, campaign.business_id);
       
-      console.log('Campaign compliance result:', compliance);
 
       if (!compliance.canSend) {
         console.warn('Compliance issues found:', compliance.issues);
@@ -610,7 +637,6 @@ class EmailSendingService {
             await this.recordSuccessfulSend(item, sendResult);
             sent++;
             campaignsAffected.add(item.campaign_id);
-            console.log(`✅ Email sent successfully to ${sendResult.email_address}`);
           } else {
             await this.handleSendFailure(item, sendResult.error);
             failed++;

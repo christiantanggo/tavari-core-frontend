@@ -13,17 +13,59 @@ const PinModal = ({
   onPinUnlock
 }) => {
   const pinInputRef = useRef(null);
+  const modalRef = useRef(null);
 
-  // Keep focus on PIN input when modal is shown
+  // Keep focus on PIN input when modal is shown and trap focus
   useEffect(() => {
     if (showPinModal && pinInputRef.current) {
-      setTimeout(() => {
-        if (pinInputRef.current) {
+      // Focus immediately
+      pinInputRef.current.focus();
+      
+      // Also set focus after a short delay to ensure it takes
+      const focusTimeout = setTimeout(() => {
+        if (pinInputRef.current && showPinModal) {
           pinInputRef.current.focus();
         }
-      }, 100);
+      }, 50);
+
+      // Trap focus within modal - prevent tabbing to other elements
+      const handleTabKey = (e) => {
+        if (e.key === 'Tab' && showPinModal) {
+          e.preventDefault();
+          if (pinInputRef.current) {
+            pinInputRef.current.focus();
+          }
+        }
+      };
+
+      // Intercept number keys globally when modal is open
+      const handleKeyDown = (e) => {
+        if (!showPinModal) return;
+        
+        // If a number key is pressed and focus is not on the PIN input, redirect it
+        if (/^[0-9]$/.test(e.key) && document.activeElement !== pinInputRef.current) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (pinInputRef.current) {
+            pinInputRef.current.focus();
+            // Manually add the digit to the input
+            const value = (pinInput + e.key).slice(0, 4).replace(/\D/g, '');
+            setPinInput(value);
+            setPinError('');
+          }
+        }
+      };
+
+      document.addEventListener('keydown', handleKeyDown);
+      document.addEventListener('keydown', handleTabKey);
+
+      return () => {
+        clearTimeout(focusTimeout);
+        document.removeEventListener('keydown', handleKeyDown);
+        document.removeEventListener('keydown', handleTabKey);
+      };
     }
-  }, [showPinModal]);
+  }, [showPinModal, pinInput, setPinInput, setPinError]);
 
   if (!showPinModal) return null;
 
@@ -107,11 +149,22 @@ const PinModal = ({
 
   return (
     <div 
+      ref={modalRef}
       style={styles.modal}
       onClick={(e) => {
         e.stopPropagation();
+        e.preventDefault();
         if (pinInputRef.current) {
           pinInputRef.current.focus();
+        }
+      }}
+      onKeyDown={(e) => {
+        // Trap all keyboard events within modal
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          if (pinInputRef.current) {
+            pinInputRef.current.focus();
+          }
         }
       }}
     >
@@ -149,12 +202,20 @@ const PinModal = ({
               }
             }}
             onBlur={(e) => {
-              e.preventDefault();
-              setTimeout(() => {
-                if (showPinModal && pinInputRef.current) {
-                  pinInputRef.current.focus();
-                }
-              }, 10);
+              // Aggressively prevent blur - refocus immediately
+              if (showPinModal) {
+                e.preventDefault();
+                // Use requestAnimationFrame for immediate refocus
+                requestAnimationFrame(() => {
+                  if (showPinModal && pinInputRef.current) {
+                    pinInputRef.current.focus();
+                  }
+                });
+              }
+            }}
+            onFocus={(e) => {
+              // Ensure input stays focused
+              e.target.select();
             }}
             placeholder="••••"
             style={styles.pinInput}
@@ -192,7 +253,7 @@ const PinModal = ({
         
         {currentUnlockingUser && (
           <div style={styles.userInfo}>
-            Last unlocked by: {currentUnlockingUser.full_name || currentUnlockingUser.email}
+            Last unlocked by: {currentUnlockingUser.name || currentUnlockingUser.full_name || currentUnlockingUser.email}
           </div>
         )}
       </div>

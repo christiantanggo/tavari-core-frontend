@@ -1,4 +1,4 @@
-// screens/POS/POSCustomersScreen.jsx - Customer/Loyalty Account Management with Manual Points Adjustment
+// screens/POS/POSCustomersScreen.jsx - With Permissions and Clean Logging
 import React, { useState, useEffect, useCallback } from 'react';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
@@ -6,7 +6,12 @@ import { TavariStyles } from '../../utils/TavariStyles';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { supabase } from '../../supabaseClient';
-import { X, History, CreditCard, Plus, Minus } from 'lucide-react';
+import { X, History, CreditCard, Plus, Minus, Lock, AlertCircle } from 'lucide-react';
+
+// Permission system integration
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
+import toast from 'react-hot-toast';
 
 const POSCustomersScreen = () => {
   const [customers, setCustomers] = useState([]);
@@ -51,7 +56,32 @@ const POSCustomersScreen = () => {
     componentName: 'POSCustomersScreen'
   });
 
+  // Permission system integration
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Permission checks
+  const canViewCustomers = hasAnyPermission(['pos.customers.view', 'pos.loyalty.manage']) || hasElevatedPrivileges();
+  const canManageCustomers = hasPermission('pos.customers.manage') || hasElevatedPrivileges();
+  const canViewLoyalty = hasPermission('pos.loyalty.use') || hasElevatedPrivileges();
+  const canManageLoyalty = hasPermission('pos.loyalty.manage') || hasElevatedPrivileges();
+  const canAdjustPoints = hasPermission('pos.loyalty.adjust') || isOwner();
+  const canDeleteCustomers = hasPermission('pos.customers.manage') || isOwner();
+
   const { formatTaxAmount } = useTaxCalculations(auth.selectedBusinessId);
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewCustomers) {
+      toast.error('You do not have permission to view customers');
+    }
+  }, [permissionsLoading, canViewCustomers]);
 
   // Load loyalty settings
   useEffect(() => {
@@ -66,7 +96,6 @@ const POSCustomersScreen = () => {
           .single();
 
         if (error && error.code !== 'PGRST116') {
-          console.error('Error loading loyalty settings:', error);
           return;
         }
 
@@ -74,7 +103,7 @@ const POSCustomersScreen = () => {
           setLoyaltySettings(settings);
         }
       } catch (err) {
-        console.error('Failed to load loyalty settings:', err);
+        // Silent fail
       }
     };
 
@@ -85,7 +114,7 @@ const POSCustomersScreen = () => {
 
   // Load customers
   const loadCustomers = useCallback(async () => {
-    if (!auth.selectedBusinessId) return;
+    if (!auth.selectedBusinessId || !canViewCustomers) return;
     
     setLoading(true);
     try {
@@ -98,16 +127,16 @@ const POSCustomersScreen = () => {
       if (fetchError) throw fetchError;
       setCustomers(data || []);
     } catch (err) {
-      console.error('Error loading customers:', err);
       setError('Failed to load customers: ' + err.message);
+      toast.error('Failed to load customers');
     } finally {
       setLoading(false);
     }
-  }, [auth.selectedBusinessId, sortBy, sortOrder]);
+  }, [auth.selectedBusinessId, sortBy, sortOrder, canViewCustomers]);
 
   // Load customer POS sales transactions
   const loadCustomerTransactions = useCallback(async (customerId) => {
-    if (!customerId) return;
+    if (!customerId || !canViewCustomers) return;
     
     try {
       const { data, error: fetchError } = await supabase
@@ -128,18 +157,18 @@ const POSCustomersScreen = () => {
       if (fetchError) throw fetchError;
       setCustomerTransactions(data || []);
     } catch (err) {
-      console.error('Error loading customer transactions:', err);
+      toast.error('Failed to load customer transactions');
     }
-  }, []);
+  }, [canViewCustomers]);
 
   // Load customer loyalty transaction history
   const loadLoyaltyHistory = useCallback(async (customer) => {
-    if (!customer || !auth.selectedBusinessId) {
-      console.warn('Cannot load loyalty history - missing data');
+    if (!customer || !auth.selectedBusinessId || !canViewLoyalty) {
+      if (!canViewLoyalty) {
+        toast.error('You do not have permission to view loyalty history');
+      }
       return;
     }
-
-    console.log('Loading complete loyalty history for customer:', customer.id);
     
     setSelectedCustomer(customer);
     setShowLoyaltyHistory(true);
@@ -155,31 +184,27 @@ const POSCustomersScreen = () => {
         .order('created_at', { ascending: false });
 
       if (error) {
-        console.error('Error loading loyalty history:', error);
         setLoyaltyTransactions([]);
+        toast.error('Failed to load loyalty history');
       } else {
-        console.log('Complete loyalty history loaded:', data);
         setLoyaltyTransactions(data || []);
       }
 
     } catch (err) {
-      console.error('Error loading loyalty history:', err);
       setLoyaltyTransactions([]);
+      toast.error('Failed to load loyalty history');
     } finally {
       setLoyaltyHistoryLoading(false);
     }
-  }, [auth.selectedBusinessId]);
+  }, [auth.selectedBusinessId, canViewLoyalty]);
 
   // Validate manager PIN
   const validateManagerPin = async (pin) => {
     if (!auth.authUser || !auth.selectedBusinessId) {
-      console.log('No authenticated user or business for PIN validation');
       return false;
     }
 
     try {
-      console.log('Validating PIN for user:', auth.authUser.id);
-
       // Get user's PIN from database
       const { data: userData, error: userError } = await supabase
         .from('users')
@@ -188,7 +213,6 @@ const POSCustomersScreen = () => {
         .single();
 
       if (userError || !userData?.pin) {
-        console.error('PIN lookup error:', userError);
         return false;
       }
 
@@ -199,26 +223,28 @@ const POSCustomersScreen = () => {
         try {
           const bcrypt = await import('bcryptjs');
           const isValid = await bcrypt.compare(pin, storedPin);
-          console.log('Bcrypt PIN validation result:', isValid);
           return isValid;
         } catch (bcryptError) {
-          console.warn('Bcrypt not available, using plain comparison:', bcryptError);
           return String(pin) === String(storedPin);
         }
       } else {
         // Plain text PIN comparison
-        console.log('Using plain text PIN validation');
         return String(pin) === String(storedPin);
       }
       
     } catch (err) {
-      console.error('PIN validation error:', err);
       return false;
     }
   };
 
   // Handle manual points adjustment
   const handlePointsAdjustment = async (isAddition) => {
+    // Permission check
+    if (!canAdjustPoints) {
+      toast.error('You do not have permission to adjust loyalty points');
+      return;
+    }
+
     if (!selectedCustomer || !adjustmentAmount || !adjustmentReason.trim() || !managerPin) {
       setAdjustmentError('Please fill in all fields');
       return;
@@ -286,7 +312,7 @@ const POSCustomersScreen = () => {
           points: transactionPoints,
           balance_before: currentBalance,
           balance_after: newBalance,
-          points_before: 0, // We don't track running points total
+          points_before: 0,
           points_after: 0,
           description: `Manual ${isAddition ? 'addition' : 'subtraction'}: ${adjustmentReason}`,
           processed_by: auth.authUser.id,
@@ -309,11 +335,11 @@ const POSCustomersScreen = () => {
       setShowAddPoints(false);
       setShowRemovePoints(false);
 
-      alert(`Successfully ${isAddition ? 'added' : 'removed'} ${points} ${loyaltySettings?.loyalty_mode === 'points' ? 'points' : 'dollars'}`);
+      toast.success(`Successfully ${isAddition ? 'added' : 'removed'} ${points} ${loyaltySettings?.loyalty_mode === 'points' ? 'points' : 'dollars'}`);
 
     } catch (err) {
-      console.error('Error adjusting points:', err);
       setAdjustmentError('Failed to adjust points: ' + err.message);
+      toast.error('Failed to adjust points');
     } finally {
       setAdjustmentLoading(false);
     }
@@ -331,11 +357,14 @@ const POSCustomersScreen = () => {
 
   // Handle add points button click
   const handleAddPointsClick = () => {
-    console.log('Add points button clicked');
+    if (!canAdjustPoints) {
+      toast.error('You do not have permission to adjust loyalty points');
+      return;
+    }
+
     setShowAddPoints(!showAddPoints);
     setShowRemovePoints(false);
     if (!showAddPoints) {
-      // Reset form when opening
       setAdjustmentAmount('');
       setAdjustmentReason('');
       setManagerPin('');
@@ -345,11 +374,14 @@ const POSCustomersScreen = () => {
 
   // Handle remove points button click
   const handleRemovePointsClick = () => {
-    console.log('Remove points button clicked');
+    if (!canAdjustPoints) {
+      toast.error('You do not have permission to adjust loyalty points');
+      return;
+    }
+
     setShowRemovePoints(!showRemovePoints);
     setShowAddPoints(false);
     if (!showRemovePoints) {
-      // Reset form when opening
       setAdjustmentAmount('');
       setAdjustmentReason('');
       setManagerPin('');
@@ -358,10 +390,10 @@ const POSCustomersScreen = () => {
   };
 
   useEffect(() => {
-    if (auth.selectedBusinessId) {
+    if (auth.selectedBusinessId && !permissionsLoading) {
       loadCustomers();
     }
-  }, [loadCustomers]);
+  }, [loadCustomers, permissionsLoading]);
 
   // Filter customers based on search
   const filteredCustomers = customers.filter(customer => 
@@ -373,6 +405,13 @@ const POSCustomersScreen = () => {
   // Handle form submission
   const handleSubmit = async (e) => {
     e.preventDefault();
+    
+    // Permission check
+    if (!canManageCustomers) {
+      toast.error('You do not have permission to manage customers');
+      return;
+    }
+
     if (!auth.selectedBusinessId) return;
 
     try {
@@ -402,16 +441,23 @@ const POSCustomersScreen = () => {
 
       if (result.error) throw result.error;
 
+      toast.success(`Customer ${selectedCustomer ? 'updated' : 'created'} successfully`);
       await loadCustomers();
       handleCloseModal();
     } catch (err) {
-      console.error('Error saving customer:', err);
       setError('Failed to save customer: ' + err.message);
+      toast.error('Failed to save customer');
     }
   };
 
   // Handle delete customer
   const handleDeleteCustomer = async (customerId) => {
+    // Permission check
+    if (!canDeleteCustomers) {
+      toast.error('You do not have permission to delete customers');
+      return;
+    }
+
     if (!window.confirm('Are you sure you want to delete this customer? This action cannot be undone.')) {
       return;
     }
@@ -424,15 +470,22 @@ const POSCustomersScreen = () => {
         .eq('business_id', auth.selectedBusinessId);
 
       if (deleteError) throw deleteError;
+      
+      toast.success('Customer deleted successfully');
       await loadCustomers();
     } catch (err) {
-      console.error('Error deleting customer:', err);
       setError('Failed to delete customer: ' + err.message);
+      toast.error('Failed to delete customer');
     }
   };
 
   // Handle modal open/close
   const handleCreateCustomer = () => {
+    if (!canManageCustomers) {
+      toast.error('You do not have permission to create customers');
+      return;
+    }
+
     setFormData({
       customer_name: '',
       customer_email: '',
@@ -446,6 +499,11 @@ const POSCustomersScreen = () => {
   };
 
   const handleEditCustomer = (customer) => {
+    if (!canManageCustomers) {
+      toast.error('You do not have permission to edit customers');
+      return;
+    }
+
     setFormData({
       customer_name: customer.customer_name || '',
       customer_email: customer.customer_email || '',
@@ -466,6 +524,11 @@ const POSCustomersScreen = () => {
   };
 
   const handleViewTransactions = async (customer) => {
+    if (!canViewCustomers) {
+      toast.error('You do not have permission to view transactions');
+      return;
+    }
+
     setSelectedCustomer(customer);
     await loadCustomerTransactions(customer.id);
     setShowTransactions(true);
@@ -476,12 +539,10 @@ const POSCustomersScreen = () => {
     if (!loyaltySettings) return '$0.00';
     
     if (loyaltySettings.loyalty_mode === 'points') {
-      // Convert dollar balance to points using redemption rate
       const dollarBalance = customer.balance || 0;
       const points = Math.round(dollarBalance * (loyaltySettings.redemption_rate || 10000) / 10);
       return `${points.toLocaleString()} pts`;
     }
-    // Show dollar balance
     const balance = customer.balance || 0;
     return `$${balance.toFixed(2)}`;
   };
@@ -535,6 +596,45 @@ const POSCustomersScreen = () => {
       color: TavariStyles.colors.gray800,
       margin: 0
     },
+
+    readOnlyBadge: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.md}`,
+      backgroundColor: TavariStyles.colors.warningBg,
+      border: `2px solid ${TavariStyles.colors.warning}`,
+      borderRadius: TavariStyles.borderRadius.md,
+      color: TavariStyles.colors.warningText,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      fontWeight: TavariStyles.typography.fontWeight.medium,
+      marginBottom: TavariStyles.spacing.md
+    },
+
+    accessDenied: {
+      ...TavariStyles.layout.card,
+      padding: TavariStyles.spacing['4xl'],
+      textAlign: 'center',
+      marginTop: TavariStyles.spacing['4xl']
+    },
+
+    accessDeniedIcon: {
+      color: TavariStyles.colors.danger,
+      marginBottom: TavariStyles.spacing.lg
+    },
+
+    accessDeniedTitle: {
+      fontSize: TavariStyles.typography.fontSize['2xl'],
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray800,
+      marginBottom: TavariStyles.spacing.md
+    },
+
+    accessDeniedText: {
+      fontSize: TavariStyles.typography.fontSize.md,
+      color: TavariStyles.colors.gray600,
+      marginBottom: TavariStyles.spacing.xl
+    },
     
     searchSection: {
       display: 'flex',
@@ -558,6 +658,15 @@ const POSCustomersScreen = () => {
       ...TavariStyles.components.button.base,
       ...TavariStyles.components.button.variants.primary,
       ...TavariStyles.components.button.sizes.lg
+    },
+
+    disabledButton: {
+      ...TavariStyles.components.button.base,
+      ...TavariStyles.components.button.sizes.lg,
+      backgroundColor: TavariStyles.colors.gray300,
+      color: TavariStyles.colors.gray600,
+      cursor: 'not-allowed',
+      opacity: 0.6
     },
     
     tableContainer: {
@@ -603,7 +712,6 @@ const POSCustomersScreen = () => {
       color: TavariStyles.colors.white
     },
     
-    // Loyalty points button styles
     loyaltyButton: {
       ...TavariStyles.components.button.base,
       backgroundColor: TavariStyles.colors.success,
@@ -654,7 +762,6 @@ const POSCustomersScreen = () => {
       ...TavariStyles.components.modal.footer
     },
     
-    // Loyalty history modal styles
     loyaltyModal: {
       position: 'fixed',
       top: 0,
@@ -703,7 +810,6 @@ const POSCustomersScreen = () => {
       overflowY: 'auto'
     },
     
-    // Points adjustment button styles
     adjustmentButtonRow: {
       display: 'flex',
       gap: TavariStyles.spacing.sm,
@@ -997,23 +1103,33 @@ const POSCustomersScreen = () => {
               )}
             </div>
 
-            {/* Points adjustment buttons */}
-            <div style={styles.adjustmentButtonRow}>
-              <button
-                style={styles.addPointsButton}
-                onClick={handleAddPointsClick}
-              >
-                <Plus size={16} />
-                Add {loyaltySettings?.loyalty_mode === 'points' ? 'Points' : 'Credit'}
-              </button>
-              <button
-                style={styles.removePointsButton}
-                onClick={handleRemovePointsClick}
-              >
-                <Minus size={16} />
-                Remove {loyaltySettings?.loyalty_mode === 'points' ? 'Points' : 'Credit'}
-              </button>
-            </div>
+            {/* Points adjustment buttons - Protected by permission */}
+            <PermissionGate
+              requireOwner
+              fallback={
+                <div style={styles.readOnlyBadge}>
+                  <AlertCircle size={16} />
+                  <span>Only owners can adjust loyalty points</span>
+                </div>
+              }
+            >
+              <div style={styles.adjustmentButtonRow}>
+                <button
+                  style={styles.addPointsButton}
+                  onClick={handleAddPointsClick}
+                >
+                  <Plus size={16} />
+                  Add {loyaltySettings?.loyalty_mode === 'points' ? 'Points' : 'Credit'}
+                </button>
+                <button
+                  style={styles.removePointsButton}
+                  onClick={handleRemovePointsClick}
+                >
+                  <Minus size={16} />
+                  Remove {loyaltySettings?.loyalty_mode === 'points' ? 'Points' : 'Credit'}
+                </button>
+              </div>
+            </PermissionGate>
 
             {/* Add points section */}
             {showAddPoints && (
@@ -1197,6 +1313,45 @@ const POSCustomersScreen = () => {
     );
   };
 
+  // Show loading while permissions are being checked
+  if (permissionsLoading || loading) {
+    return (
+      <POSAuthWrapper 
+        requireBusiness={true}
+        componentName="POSCustomersScreen"
+      >
+        <div style={styles.container}>
+          <div style={styles.loadingState}>
+            {permissionsLoading ? 'Loading permissions...' : 'Loading customers...'}
+          </div>
+        </div>
+      </POSAuthWrapper>
+    );
+  }
+
+  // Show access denied if no permission
+  if (!canViewCustomers) {
+    return (
+      <POSAuthWrapper 
+        requireBusiness={true}
+        componentName="POSCustomersScreen"
+      >
+        <div style={styles.container}>
+          <div style={styles.accessDenied}>
+            <Lock size={64} style={styles.accessDeniedIcon} />
+            <h2 style={styles.accessDeniedTitle}>Access Denied</h2>
+            <p style={styles.accessDeniedText}>
+              You do not have permission to view customers.
+            </p>
+            <p style={styles.accessDeniedText}>
+              Contact your administrator to request access.
+            </p>
+          </div>
+        </div>
+      </POSAuthWrapper>
+    );
+  }
+
   return (
     <POSAuthWrapper 
       requireBusiness={true}
@@ -1205,10 +1360,28 @@ const POSCustomersScreen = () => {
       <div style={styles.container}>
         <div style={styles.header}>
           <h1 style={styles.title}>Customer Management</h1>
-          <button style={styles.createButton} onClick={handleCreateCustomer}>
-            + Add New Customer
-          </button>
+          
+          <PermissionGate
+            permission="pos.customers.manage"
+            fallback={
+              <button style={styles.disabledButton} disabled>
+                <Lock size={16} style={{ marginRight: '8px' }} />
+                Add Customer (Locked)
+              </button>
+            }
+          >
+            <button style={styles.createButton} onClick={handleCreateCustomer}>
+              + Add New Customer
+            </button>
+          </PermissionGate>
         </div>
+
+        {!canManageCustomers && (
+          <div style={styles.readOnlyBadge}>
+            <AlertCircle size={16} />
+            <span>View-Only Mode - Contact admin to create or edit customers</span>
+          </div>
+        )}
 
         {error && <div style={styles.errorBanner}>{error}</div>}
 
@@ -1270,9 +1443,7 @@ const POSCustomersScreen = () => {
         </div>
 
         {/* Customer Table */}
-        {loading ? (
-          <div style={styles.loadingState}>Loading customers...</div>
-        ) : filteredCustomers.length === 0 ? (
+        {filteredCustomers.length === 0 ? (
           <div style={styles.emptyState}>
             {searchTerm ? 'No customers found matching your search.' : 'No customers yet. Create your first customer to get started.'}
           </div>
@@ -1305,19 +1476,31 @@ const POSCustomersScreen = () => {
                       ${formatTaxAmount(customer.balance || 0)}
                     </td>
                     <td style={styles.td}>
-                      {/* Loyalty points button */}
-                      <button
-                        style={styles.loyaltyButton}
-                        onClick={() => loadLoyaltyHistory(customer)}
-                        title="View complete loyalty transaction history"
+                      <PermissionGate
+                        permission="pos.loyalty.use"
+                        fallback={
+                          <button
+                            style={{...styles.loyaltyButton, opacity: 0.5, cursor: 'not-allowed'}}
+                            disabled
+                            title="You don't have permission to view loyalty details"
+                          >
+                            <Lock size={16} />
+                          </button>
+                        }
                       >
-                        <div style={styles.loyaltyButtonBalance}>
-                          {getBalanceDisplay(customer)}
-                        </div>
-                        <div style={styles.loyaltyButtonSubtext}>
-                          Tap for more
-                        </div>
-                      </button>
+                        <button
+                          style={styles.loyaltyButton}
+                          onClick={() => loadLoyaltyHistory(customer)}
+                          title="View complete loyalty transaction history"
+                        >
+                          <div style={styles.loyaltyButtonBalance}>
+                            {getBalanceDisplay(customer)}
+                          </div>
+                          <div style={styles.loyaltyButtonSubtext}>
+                            Tap for more
+                          </div>
+                        </button>
+                      </PermissionGate>
                     </td>
                     <td style={styles.td}>
                       {new Date(customer.created_at).toLocaleDateString()}
@@ -1329,18 +1512,46 @@ const POSCustomersScreen = () => {
                       >
                         View
                       </button>
-                      <button 
-                        style={{ ...styles.actionButton, ...styles.editButton }}
-                        onClick={() => handleEditCustomer(customer)}
+                      
+                      <PermissionGate
+                        permission="pos.customers.manage"
+                        fallback={
+                          <button 
+                            style={{ ...styles.actionButton, ...styles.editButton, opacity: 0.5 }}
+                            disabled
+                            title="You don't have permission to edit"
+                          >
+                            <Lock size={12} />
+                          </button>
+                        }
                       >
-                        Edit
-                      </button>
-                      <button 
-                        style={{ ...styles.actionButton, ...styles.deleteButton }}
-                        onClick={() => handleDeleteCustomer(customer.id)}
+                        <button 
+                          style={{ ...styles.actionButton, ...styles.editButton }}
+                          onClick={() => handleEditCustomer(customer)}
+                        >
+                          Edit
+                        </button>
+                      </PermissionGate>
+                      
+                      <PermissionGate
+                        requireOwner
+                        fallback={
+                          <button 
+                            style={{ ...styles.actionButton, ...styles.deleteButton, opacity: 0.5 }}
+                            disabled
+                            title="Only owners can delete"
+                          >
+                            <Lock size={12} />
+                          </button>
+                        }
                       >
-                        Delete
-                      </button>
+                        <button 
+                          style={{ ...styles.actionButton, ...styles.deleteButton }}
+                          onClick={() => handleDeleteCustomer(customer.id)}
+                        >
+                          Delete
+                        </button>
+                      </PermissionGate>
                     </td>
                   </tr>
                 ))}

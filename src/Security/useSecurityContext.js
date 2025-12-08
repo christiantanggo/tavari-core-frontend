@@ -16,7 +16,7 @@ export const useSecurityContext = (options = {}) => {
     enableInputValidation = true,
     enableAuditLogging = true,
     autoInitialize = true,
-    sessionTimeout = 30 * 60 * 1000, // 30 minutes
+    sessionTimeout = Infinity, // BULLETPROOF: Never timeout
     componentName = 'UnknownComponent',
     sensitiveComponent = false
   } = options;
@@ -49,87 +49,140 @@ export const useSecurityContext = (options = {}) => {
   const interactionTimerRef = useRef(null);
 
   /**
-   * Initialize security context
+   * Initialize security context with timeout protection
    */
   const initializeSecurity = useCallback(async () => {
     if (initializationRef.current) return;
     initializationRef.current = true;
 
-    try {
-      const startTime = Date.now();
+    // Set a maximum timeout for initialization (5 seconds - reduced for faster login)
+    const initTimeout = new Promise((resolve) => {
+      setTimeout(() => {
+        resolve({ timeout: true });
+      }, 5000);
+    });
 
-      // Generate device fingerprint
-      let fingerprint = null;
-      if (enableDeviceTracking) {
-        fingerprint = await deviceFingerprint.generate();
+    const initPromise = (async () => {
+      try {
+        const startTime = Date.now();
+
+        // Generate device fingerprint with timeout (reduced to 2 seconds)
+        let fingerprint = null;
+        if (enableDeviceTracking) {
+          try {
+            const fingerprintPromise = deviceFingerprint.generate();
+            const fingerprintTimeout = new Promise((resolve) => setTimeout(() => resolve(null), 2000));
+            fingerprint = await Promise.race([fingerprintPromise, fingerprintTimeout]);
+          } catch (err) {
+            console.warn('Device fingerprint generation failed or timed out:', err);
+            fingerprint = null;
+          }
+        }
+
+        // Get user IP with timeout (reduced to 1 second)
+        let userIP = 'unknown';
+        try {
+          const ipPromise = SecurityUtils.getClientIP();
+          const ipTimeout = new Promise((resolve) => setTimeout(() => resolve('unknown'), 1000));
+          userIP = await Promise.race([ipPromise, ipTimeout]);
+        } catch (err) {
+          console.warn('IP lookup failed or timed out:', err);
+          userIP = 'unknown';
+        }
+
+        // Generate session ID (synchronous, no timeout needed)
+        const sessionId = SecurityUtils.generateSessionId();
+
+        // Initialize audit logging if enabled (with timeout - reduced to 1 second)
+        if (enableAuditLogging) {
+          try {
+            const auditPromise = Promise.all([
+              securityAudit.initialize(),
+              securityAudit.logPageView(componentName, Date.now() - componentMountTime.current)
+            ]);
+            const auditTimeout = new Promise((resolve) => setTimeout(() => resolve(), 1000));
+            await Promise.race([auditPromise, auditTimeout]);
+          } catch (err) {
+            console.warn('Audit logging initialization failed or timed out:', err);
+            // Continue even if audit fails
+          }
+        }
+
+        const endTime = Date.now();
+        const pageLoadTime = endTime - startTime;
+
+        setSecurityState(prev => ({
+          ...prev,
+          initialized: true,
+          deviceFingerprint: fingerprint,
+          sessionId,
+          userIP,
+          lastActivity: Date.now()
+        }));
+
+        setSecurityMetrics(prev => ({
+          ...prev,
+          pageLoadTime
+        }));
+
+        // Log successful initialization (non-blocking)
+        if (enableAuditLogging) {
+          securityAudit.logEvent('security_context_initialized', {
+            component: componentName,
+            device_fingerprint: fingerprint ? 'generated' : 'disabled',
+            session_id: sessionId,
+            ip_address: userIP,
+            page_load_time: pageLoadTime,
+            sensitive_data: sensitiveComponent
+          }, sensitiveComponent ? 'medium' : 'low').catch(err => {
+            console.warn('Failed to log initialization event:', err);
+          });
+        }
+
+        return { success: true };
+      } catch (error) {
+        console.error('Security context initialization failed:', error);
+        
+        setSecurityState(prev => ({
+          ...prev,
+          initialized: true,
+          isSecure: false,
+          threats: [...prev.threats, {
+            type: 'initialization_failed',
+            message: 'Security context failed to initialize',
+            timestamp: Date.now(),
+            severity: 'medium'
+          }]
+        }));
+
+        if (enableAuditLogging) {
+          securityAudit.logSystemError(error, {
+            component: componentName,
+            data_action: 'security_initialization'
+          }).catch(err => {
+            console.warn('Failed to log system error:', err);
+          });
+        }
+
+        return { success: false, error };
       }
+    })();
 
-      // Get user IP
-      const userIP = await SecurityUtils.getClientIP();
+    // Race between initialization and timeout
+    const result = await Promise.race([initPromise, initTimeout]);
 
-      // Generate session ID
-      const sessionId = SecurityUtils.generateSessionId();
-
-      // Initialize audit logging if enabled
-      if (enableAuditLogging) {
-        await securityAudit.initialize();
-        await securityAudit.logPageView(componentName, Date.now() - componentMountTime.current);
-      }
-
-      const endTime = Date.now();
-      const pageLoadTime = endTime - startTime;
-
+    // If timeout occurred, force initialization to complete
+    if (result.timeout) {
+      console.warn('Security context initialization timed out, completing with defaults');
       setSecurityState(prev => ({
         ...prev,
         initialized: true,
-        deviceFingerprint: fingerprint,
-        sessionId,
-        userIP,
-        lastActivity: Date.now()
+        deviceFingerprint: null,
+        sessionId: SecurityUtils.generateSessionId(),
+        userIP: 'unknown',
+        lastActivity: Date.now(),
+        isSecure: true
       }));
-
-      setSecurityMetrics(prev => ({
-        ...prev,
-        pageLoadTime
-      }));
-
-      // Start activity monitoring
-      if (sessionTimeout > 0) {
-        startActivityMonitoring();
-      }
-
-      // Log successful initialization
-      if (enableAuditLogging) {
-        await securityAudit.logEvent('security_context_initialized', {
-          component: componentName,
-          device_fingerprint: fingerprint ? 'generated' : 'disabled',
-          session_id: sessionId,
-          ip_address: userIP,
-          page_load_time: pageLoadTime,
-          sensitive_data: sensitiveComponent
-        }, sensitiveComponent ? 'medium' : 'low');
-      }
-
-    } catch (error) {
-      console.error('Security context initialization failed:', error);
-      
-      setSecurityState(prev => ({
-        ...prev,
-        isSecure: false,
-        threats: [...prev.threats, {
-          type: 'initialization_failed',
-          message: 'Security context failed to initialize',
-          timestamp: Date.now(),
-          severity: 'medium'
-        }]
-      }));
-
-      if (enableAuditLogging) {
-        await securityAudit.logSystemError(error, {
-          component: componentName,
-          data_action: 'security_initialization'
-        });
-      }
     }
   }, [enableDeviceTracking, enableAuditLogging, componentName, sensitiveComponent, sessionTimeout]);
 
@@ -265,8 +318,9 @@ export const useSecurityContext = (options = {}) => {
       }
 
       // Security threat checks
+      // Skip SQL injection check for email fields - emails are validated separately and dashes are valid
       const xssCheck = SecurityUtils.checkForXSS(input);
-      const sqlCheck = SecurityUtils.checkForSQLInjection(input);
+      const sqlCheck = validationType === 'email' ? { safe: true } : SecurityUtils.checkForSQLInjection(input);
       const commandCheck = SecurityUtils.checkForCommandInjection(input);
 
       const threats = [];
@@ -369,7 +423,12 @@ export const useSecurityContext = (options = {}) => {
         deviceFingerprint: securityState.deviceFingerprint
       };
 
-      const result = await rateLimiter.checkLimit(action, effectiveIdentifier, context);
+      // Add timeout to rate limiting to prevent hanging
+      const rateLimitPromise = rateLimiter.checkLimit(action, effectiveIdentifier, context);
+      const rateLimitTimeout = new Promise((resolve) => 
+        setTimeout(() => resolve({ allowed: true, reason: 'rate_limit_timeout' }), 2000)
+      );
+      const result = await Promise.race([rateLimitPromise, rateLimitTimeout]);
 
       // Update rate limit status
       setSecurityState(prev => ({

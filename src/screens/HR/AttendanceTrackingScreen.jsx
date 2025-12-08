@@ -1,16 +1,28 @@
-// screens/HR/AttendanceTrackingScreen.jsx
-// Updated with TavariStyles utility and POSAuthWrapper for consistent styling and authentication
+// screens/HR/AttendanceTrackingScreen.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { TavariStyles } from '../../utils/TavariStyles';
+import { usePermissions } from '../../hooks/usePermissions';
+import PermissionGate from '../../components/Auth/PermissionGate';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
+import toast from 'react-hot-toast';
 
 const AttendanceTrackingContent = ({ authState }) => {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const { selectedBusinessId, authUser } = authState;
+
+  // NEW: Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    isOwner, 
+    isManager,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
 
   // Component state
   const [sessionDetails, setSessionDetails] = useState(null);
@@ -22,12 +34,37 @@ const AttendanceTrackingContent = ({ authState }) => {
   const [selectedAttendees, setSelectedAttendees] = useState([]);
   const [error, setError] = useState(null);
 
+  // Permission checks
+  const canViewAttendance = hasAnyPermission([
+    'hr.onboarding.view_attendance',
+    'hr.onboarding.manage'
+  ]) || hasElevatedPrivileges();
+
+  const canMarkAttendance = hasAnyPermission([
+    'hr.onboarding.mark_attendance',
+    'hr.onboarding.manage'
+  ]) || hasElevatedPrivileges();
+
+  const canBulkUpdate = hasPermission('hr.onboarding.bulk_update') || isOwner();
+
+  const canCancelAttendance = hasPermission('hr.onboarding.cancel_attendance') || hasElevatedPrivileges();
+
+  // Check permissions on mount
+  useEffect(() => {
+    if (!permissionsLoading && !canViewAttendance) {
+      toast.error('You do not have permission to view attendance tracking');
+      navigate('/dashboard/hr/orientation');
+    }
+  }, [permissionsLoading, canViewAttendance]);
+
   // Load data when component mounts
   useEffect(() => {
     if (!authUser || !selectedBusinessId || !sessionId) return;
+    if (!canViewAttendance) return;
+    
     loadSessionData();
     loadAttendees();
-  }, [authUser, selectedBusinessId, sessionId]);
+  }, [authUser, selectedBusinessId, sessionId, canViewAttendance]);
 
   const loadSessionData = async () => {
     try {
@@ -79,6 +116,18 @@ const AttendanceTrackingContent = ({ authState }) => {
   };
 
   const markAttendance = async (attendeeId, status, notes = null) => {
+    // Check permission before proceeding
+    if (!canMarkAttendance) {
+      toast.error('You do not have permission to mark attendance');
+      return;
+    }
+
+    // Additional check for cancel action
+    if (status === 'cancelled' && !canCancelAttendance) {
+      toast.error('You do not have permission to cancel attendance');
+      return;
+    }
+
     setSaving(true);
     try {
       console.log('Marking attendance:', attendeeId, status);
@@ -96,12 +145,14 @@ const AttendanceTrackingContent = ({ authState }) => {
       }
       
       console.log('Attendance marked successfully');
+      toast.success(`Attendance marked as ${status.replace('_', ' ')}`);
       
       // Reload attendees to show updated status
       await loadAttendees();
       
     } catch (error) {
       console.error('Error marking attendance:', error);
+      toast.error('Failed to update attendance. Please try again.');
       setError('Failed to update attendance. Please try again.');
     } finally {
       setSaving(false);
@@ -110,6 +161,18 @@ const AttendanceTrackingContent = ({ authState }) => {
 
   const handleBulkAction = async () => {
     if (!bulkAction || selectedAttendees.length === 0) return;
+
+    // Check permission before proceeding
+    if (!canBulkUpdate) {
+      toast.error('You do not have permission to perform bulk updates');
+      return;
+    }
+
+    // Additional check for cancel action
+    if (bulkAction === 'cancelled' && !canCancelAttendance) {
+      toast.error('You do not have permission to cancel attendance');
+      return;
+    }
 
     setSaving(true);
     try {
@@ -131,9 +194,11 @@ const AttendanceTrackingContent = ({ authState }) => {
       setSelectedAttendees([]);
       setBulkAction('');
       
+      toast.success(`Bulk ${bulkAction} applied to ${selectedAttendees.length} attendees`);
       console.log(`Bulk ${bulkAction} applied successfully`);
     } catch (error) {
       console.error('Error applying bulk action:', error);
+      toast.error('Failed to apply bulk action. Please try again.');
       setError('Failed to apply bulk action. Please try again.');
     } finally {
       setSaving(false);
@@ -438,8 +503,50 @@ const AttendanceTrackingContent = ({ authState }) => {
       fontSize: TavariStyles.typography.fontSize.xs,
       color: TavariStyles.colors.gray400,
       fontStyle: 'italic'
+    },
+
+    noAccessContainer: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: `${TavariStyles.spacing['3xl']} 0`,
+      minHeight: '400px'
+    },
+
+    noAccessText: {
+      fontSize: TavariStyles.typography.fontSize.lg,
+      color: TavariStyles.colors.gray600,
+      fontWeight: TavariStyles.typography.fontWeight.medium,
+      textAlign: 'center'
     }
   };
+
+  // Show loading state while permissions are being checked
+  if (permissionsLoading) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.loadingMessage}>
+          <h3>Loading...</h3>
+          <p>Checking permissions...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show access denied if user doesn't have permission
+  if (!canViewAttendance) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.noAccessContainer}>
+          <p style={styles.noAccessText}>⚠️ You do not have permission to view attendance tracking</p>
+          <button style={styles.backButton} onClick={handleBackToCalendar}>
+            ← Back to Orientation Calendar
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!sessionDetails && !error) {
     return (
@@ -529,56 +636,68 @@ const AttendanceTrackingContent = ({ authState }) => {
           </select>
         </div>
 
-        <div style={styles.bulkActions}>
-          <div style={styles.selectionControls}>
-            <button 
-              style={{
-                ...styles.selectButton,
-                opacity: filteredAttendees.length === 0 ? 0.6 : 1
-              }}
-              onClick={selectAllVisible}
-              disabled={filteredAttendees.length === 0}
-            >
-              Select All Visible
-            </button>
-            <button 
-              style={{
-                ...styles.selectButton,
-                opacity: selectedAttendees.length === 0 ? 0.6 : 1
-              }}
-              onClick={clearSelection}
-              disabled={selectedAttendees.length === 0}
-            >
-              Clear Selection ({selectedAttendees.length})
-            </button>
-          </div>
-
-          {selectedAttendees.length > 0 && (
-            <div style={styles.bulkActionSection}>
-              <select 
-                style={styles.bulkSelect}
-                value={bulkAction}
-                onChange={(e) => setBulkAction(e.target.value)}
-              >
-                <option value="">Bulk Action...</option>
-                <option value="confirmed">Mark as Confirmed</option>
-                <option value="attended">Mark as Attended</option>
-                <option value="no_show">Mark as No Show</option>
-                <option value="cancelled">Mark as Cancelled</option>
-              </select>
+        {/* Bulk Actions - Protected */}
+        <PermissionGate
+          permissions={['hr.onboarding.bulk_update']}
+          requireOwner={!hasPermission('hr.onboarding.bulk_update')}
+          fallback={null}
+        >
+          <div style={styles.bulkActions}>
+            <div style={styles.selectionControls}>
               <button 
                 style={{
-                  ...styles.applyButton,
-                  opacity: (!bulkAction || saving) ? 0.6 : 1
+                  ...styles.selectButton,
+                  opacity: filteredAttendees.length === 0 ? 0.6 : 1
                 }}
-                onClick={handleBulkAction}
-                disabled={!bulkAction || saving}
+                onClick={selectAllVisible}
+                disabled={filteredAttendees.length === 0}
               >
-                {saving ? 'Applying...' : `Apply to ${selectedAttendees.length}`}
+                Select All Visible
+              </button>
+              <button 
+                style={{
+                  ...styles.selectButton,
+                  opacity: selectedAttendees.length === 0 ? 0.6 : 1
+                }}
+                onClick={clearSelection}
+                disabled={selectedAttendees.length === 0}
+              >
+                Clear Selection ({selectedAttendees.length})
               </button>
             </div>
-          )}
-        </div>
+
+            {selectedAttendees.length > 0 && (
+              <div style={styles.bulkActionSection}>
+                <select 
+                  style={styles.bulkSelect}
+                  value={bulkAction}
+                  onChange={(e) => setBulkAction(e.target.value)}
+                >
+                  <option value="">Bulk Action...</option>
+                  <option value="confirmed">Mark as Confirmed</option>
+                  <option value="attended">Mark as Attended</option>
+                  <option value="no_show">Mark as No Show</option>
+                  <PermissionGate
+                    permissions={['hr.onboarding.cancel_attendance']}
+                    requireElevated
+                  >
+                    <option value="cancelled">Mark as Cancelled</option>
+                  </PermissionGate>
+                </select>
+                <button 
+                  style={{
+                    ...styles.applyButton,
+                    opacity: (!bulkAction || saving) ? 0.6 : 1
+                  }}
+                  onClick={handleBulkAction}
+                  disabled={!bulkAction || saving}
+                >
+                  {saving ? 'Applying...' : `Apply to ${selectedAttendees.length}`}
+                </button>
+              </div>
+            )}
+          </div>
+        </PermissionGate>
       </div>
 
       {/* Attendees List */}
@@ -594,15 +713,22 @@ const AttendanceTrackingContent = ({ authState }) => {
             {filteredAttendees.map((attendee) => (
               <div key={attendee.attendee_id} style={styles.attendeeCard}>
                 <div style={styles.attendeeHeader}>
-                  <div style={styles.attendeeSelectSection}>
-                    <TavariCheckbox
-                      checked={selectedAttendees.includes(attendee.attendee_id)}
-                      onChange={(checked) => toggleAttendeeSelection(attendee.attendee_id, checked)}
-                      label=""
-                      size="md"
-                      testId={`attendee-checkbox-${attendee.attendee_id}`}
-                    />
-                  </div>
+                  {/* Only show checkbox if user can do bulk updates */}
+                  <PermissionGate
+                    permissions={['hr.onboarding.bulk_update']}
+                    requireOwner={!hasPermission('hr.onboarding.bulk_update')}
+                    fallback={<div style={{ width: '24px' }} />}
+                  >
+                    <div style={styles.attendeeSelectSection}>
+                      <TavariCheckbox
+                        checked={selectedAttendees.includes(attendee.attendee_id)}
+                        onChange={(checked) => toggleAttendeeSelection(attendee.attendee_id, checked)}
+                        label=""
+                        size="md"
+                        testId={`attendee-checkbox-${attendee.attendee_id}`}
+                      />
+                    </div>
+                  </PermissionGate>
                   
                   <div style={styles.attendeeInfo}>
                     <div style={styles.attendeeName}>
@@ -621,52 +747,70 @@ const AttendanceTrackingContent = ({ authState }) => {
                   </div>
                 </div>
 
-                <div style={styles.attendeeActions}>
-                  <button
-                    style={{
-                      ...styles.actionButton,
-                      backgroundColor: TavariStyles.colors.success,
-                      opacity: (saving || attendee.registration_status === 'confirmed') ? 0.6 : 1
-                    }}
-                    onClick={() => markAttendance(attendee.attendee_id, 'confirmed')}
-                    disabled={saving || attendee.registration_status === 'confirmed'}
-                  >
-                    Confirm
-                  </button>
-                  <button
-                    style={{
-                      ...styles.actionButton,
-                      backgroundColor: TavariStyles.colors.cashGreen,
-                      opacity: (saving || attendee.registration_status === 'attended') ? 0.6 : 1
-                    }}
-                    onClick={() => markAttendance(attendee.attendee_id, 'attended')}
-                    disabled={saving || attendee.registration_status === 'attended'}
-                  >
-                    Mark Present
-                  </button>
-                  <button
-                    style={{
-                      ...styles.actionButton,
-                      backgroundColor: TavariStyles.colors.danger,
-                      opacity: (saving || attendee.registration_status === 'no_show') ? 0.6 : 1
-                    }}
-                    onClick={() => markAttendance(attendee.attendee_id, 'no_show')}
-                    disabled={saving || attendee.registration_status === 'no_show'}
-                  >
-                    No Show
-                  </button>
-                  <button
-                    style={{
-                      ...styles.actionButton,
-                      backgroundColor: TavariStyles.colors.gray500,
-                      opacity: (saving || attendee.registration_status === 'cancelled') ? 0.6 : 1
-                    }}
-                    onClick={() => markAttendance(attendee.attendee_id, 'cancelled')}
-                    disabled={saving || attendee.registration_status === 'cancelled'}
-                  >
-                    Cancel
-                  </button>
-                </div>
+                {/* Attendance Actions - Protected */}
+                <PermissionGate
+                  permissions={['hr.onboarding.mark_attendance', 'hr.onboarding.manage']}
+                  requireAny
+                  fallback={
+                    <div style={styles.attendeeNotes}>
+                      <small>⚠️ You do not have permission to mark attendance</small>
+                    </div>
+                  }
+                >
+                  <div style={styles.attendeeActions}>
+                    <button
+                      style={{
+                        ...styles.actionButton,
+                        backgroundColor: TavariStyles.colors.success,
+                        opacity: (saving || attendee.registration_status === 'confirmed') ? 0.6 : 1
+                      }}
+                      onClick={() => markAttendance(attendee.attendee_id, 'confirmed')}
+                      disabled={saving || attendee.registration_status === 'confirmed'}
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      style={{
+                        ...styles.actionButton,
+                        backgroundColor: TavariStyles.colors.cashGreen,
+                        opacity: (saving || attendee.registration_status === 'attended') ? 0.6 : 1
+                      }}
+                      onClick={() => markAttendance(attendee.attendee_id, 'attended')}
+                      disabled={saving || attendee.registration_status === 'attended'}
+                    >
+                      Mark Present
+                    </button>
+                    <button
+                      style={{
+                        ...styles.actionButton,
+                        backgroundColor: TavariStyles.colors.danger,
+                        opacity: (saving || attendee.registration_status === 'no_show') ? 0.6 : 1
+                      }}
+                      onClick={() => markAttendance(attendee.attendee_id, 'no_show')}
+                      disabled={saving || attendee.registration_status === 'no_show'}
+                    >
+                      No Show
+                    </button>
+                    
+                    {/* Cancel button - Protected with elevated permission */}
+                    <PermissionGate
+                      permissions={['hr.onboarding.cancel_attendance']}
+                      requireElevated
+                    >
+                      <button
+                        style={{
+                          ...styles.actionButton,
+                          backgroundColor: TavariStyles.colors.gray500,
+                          opacity: (saving || attendee.registration_status === 'cancelled') ? 0.6 : 1
+                        }}
+                        onClick={() => markAttendance(attendee.attendee_id, 'cancelled')}
+                        disabled={saving || attendee.registration_status === 'cancelled'}
+                      >
+                        Cancel
+                      </button>
+                    </PermissionGate>
+                  </div>
+                </PermissionGate>
 
                 {attendee.notes && (
                   <div style={styles.attendeeNotes}>
@@ -695,7 +839,7 @@ const AttendanceTrackingScreen = () => {
   return (
     <POSAuthWrapper
       componentName="Attendance Tracking"
-      requiredRoles={['owner', 'manager']}
+      requiredRoles={['owner', 'manager', 'hr_admin']}
       requireBusiness={true}
       onAuthReady={setAuthState}
     >

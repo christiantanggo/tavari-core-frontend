@@ -1,61 +1,33 @@
-// components/HR/HRPayrollComponents/HolidayPayCalculator.jsx - Canadian Holiday Pay Calculator Component
+// components/HR/HRPayrollComponents/HolidayPayCalculator.jsx - CORRECTED: Uses pay_period_end, proper period counting, and ESA-compliant calculation
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '../../../supabaseClient';
 import { SecurityWrapper } from '../../../Security';
 import { useSecurityContext } from '../../../Security';
 import { usePOSAuth } from '../../../hooks/usePOSAuth';
 import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
-import { useCanadianTaxCalculations } from '../../../hooks/useCanadianTaxCalculations';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../../utils/TavariStyles';
 
-/**
- * Holiday Pay Calculator Component for Canadian Employment Standards
- * Implements provincial holiday pay calculations per Employment Standards Acts
- * 
- * Key Features:
- * - Provincial-specific holiday pay calculations (ON, BC, AB, etc.)
- * - Federal Labour Code compliance for federally regulated employers
- * - Holiday date picker integration
- * - Automatic eligibility validation
- * - Live calculation preview
- * - Integration with existing payroll system
- * 
- * Canadian Holiday Pay Rules Summary:
- * - Ontario: 1/20th of wages from 4 weeks before holiday week (ESA)
- * - Federal: 1/20th of wages from 4-week period before holiday week (CLC)
- * - BC: Average day's pay based on 30 calendar days before holiday
- * - Alberta: Average day's wage from 28 days before holiday
- * 
- * @param {Object} props Component props
- * @param {Object} props.employee - Employee object with wage and employment data
- * @param {string} props.selectedBusinessId - Business ID for jurisdiction determination
- * @param {Function} props.onHolidayPayChange - Callback when holiday pay is calculated
- * @param {Object} props.payPeriod - Current pay period {start, end, payDate}
- * @param {Object} props.settings - Payroll settings with jurisdiction info
- * @param {Function} props.formatAmount - Amount formatting function
- */
 const HolidayPayCalculator = ({
   employee,
   selectedBusinessId,
   onHolidayPayChange,
   payPeriod,
   settings,
-  formatAmount
+  formatAmount,
+  missedShiftBefore,
+  missedShiftAfter
 }) => {
-  const [isHolidayPayEnabled, setIsHolidayPayEnabled] = useState(false);
   const [selectedHolidayDate, setSelectedHolidayDate] = useState('');
   const [holidayName, setHolidayName] = useState('');
   const [holidayPayAmount, setHolidayPayAmount] = useState(0);
-  const [isEligible, setIsEligible] = useState(false);
+  const [isEligible, setIsEligible] = useState(true);
   const [eligibilityReason, setEligibilityReason] = useState('');
   const [calculationDetails, setCalculationDetails] = useState({});
   const [loading, setLoading] = useState(false);
-  const [showCalendar, setShowCalendar] = useState(false);
   const [payrollHistory, setPayrollHistory] = useState([]);
 
-  // Security context for holiday pay calculations
   const {
     validateInput,
     checkRateLimit,
@@ -69,7 +41,6 @@ const HolidayPayCalculator = ({
     securityLevel: 'high'
   });
 
-  // Authentication context
   const {
     selectedBusinessId: authBusinessId,
     authUser,
@@ -81,10 +52,8 @@ const HolidayPayCalculator = ({
     componentName: 'HolidayPayCalculator'
   });
 
-  // Tax calculations for formatting
   const { formatTaxAmount } = useTaxCalculations(selectedBusinessId || authBusinessId);
 
-  // Canadian statutory holidays by province/territory
   const CANADIAN_HOLIDAYS = {
     federal: [
       { name: 'New Year\'s Day', date: '2025-01-01' },
@@ -124,60 +93,256 @@ const HolidayPayCalculator = ({
     ]
   };
 
-  // Get jurisdiction-specific holidays
   const getJurisdictionHolidays = useCallback(() => {
     const jurisdiction = settings?.tax_jurisdiction || 'ON';
     const jurisdictionKey = jurisdiction.toLowerCase();
-    
     return CANADIAN_HOLIDAYS[jurisdictionKey] || CANADIAN_HOLIDAYS.ontario;
   }, [settings?.tax_jurisdiction]);
 
-  // Load employee payroll history for holiday pay calculation
+  // ✅ SIMPLIFIED: Just grab the most recent X periods based on pay frequency - NO DATE MATH
   const loadPayrollHistory = useCallback(async () => {
-    if (!employee?.id || !selectedBusinessId) return;
+    if (!employee?.id || !selectedBusinessId || !selectedHolidayDate) {
+      console.log('❌ Cannot load payroll history - missing requirements:', {
+        hasEmployee: !!employee?.id,
+        hasBusinessId: !!selectedBusinessId,
+        hasHolidayDate: !!selectedHolidayDate
+      });
+      return;
+    }
 
     try {
       setLoading(true);
+      console.log('🔍 ========== LOADING PAYROLL HISTORY ==========');
 
-      // Calculate the 4-week period before the holiday for calculation
-      const calculationEndDate = selectedHolidayDate ? 
-        new Date(new Date(selectedHolidayDate).getTime() - 7 * 24 * 60 * 60 * 1000) : // Week before holiday
-        new Date();
-      
-      const calculationStartDate = new Date(calculationEndDate.getTime() - 28 * 24 * 60 * 60 * 1000); // 4 weeks before
+      // ✅ Get business pay frequency from hrpayroll_settings table
+      const { data: payrollSettings, error: settingsError } = await supabase
+        .from('hrpayroll_settings')
+        .select('pay_frequency')
+        .eq('business_id', selectedBusinessId)
+        .single();
 
-      // Get payroll entries for the calculation period
-      const { data: entries, error } = await supabase
+      if (settingsError && settingsError.code !== 'PGRST116') {
+        console.error('⚠️ Error loading payroll settings:', settingsError);
+      }
+
+      const payFrequency = payrollSettings?.pay_frequency || 'bi_weekly';
+      console.log('📋 Pay frequency:', payFrequency);
+
+      // ✅ ONTARIO ESA: Holiday pay = wages from 4 WORK WEEKS before the holiday ÷ 20
+      // "4 work weeks" = 4 weekly pay periods OR 2 bi-weekly pay periods
+      const periodsNeeded = payFrequency === 'weekly' ? 4 : 
+                            payFrequency === 'bi_weekly' ? 2 :
+                            payFrequency === 'semi_monthly' ? 2 :
+                            payFrequency === 'monthly' ? 1 : 2;
+
+      const holidayDate = new Date(selectedHolidayDate);
+
+      console.log('📅 Calculation parameters:', {
+        holidayDate: holidayDate.toISOString().split('T')[0],
+        payFrequency: payFrequency,
+        periodsNeeded: periodsNeeded
+      });
+
+      // ✅ Query 1: Get ALL regular entries BEFORE holiday, sorted by most recent
+      console.log('🔎 Query 1: Searching for regular finalized payroll entries...');
+      const { data: regularEntries, error: regularError } = await supabase
         .from('hrpayroll_entries')
         .select(`
           *,
-          hrpayroll_runs!inner(pay_period_start, pay_period_end, pay_date, status)
+          hrpayroll_runs!inner(
+            pay_period_start,
+            pay_period_end,
+            pay_date,
+            business_id,
+            status
+          )
         `)
         .eq('user_id', employee.id)
+        .eq('hrpayroll_runs.business_id', selectedBusinessId)
         .eq('hrpayroll_runs.status', 'finalized')
-        .gte('hrpayroll_runs.pay_date', calculationStartDate.toISOString().split('T')[0])
-        .lte('hrpayroll_runs.pay_date', calculationEndDate.toISOString().split('T')[0])
-        .order('hrpayroll_runs.pay_date', { ascending: false });
+        .lt('hrpayroll_runs.pay_period_end', holidayDate.toISOString().split('T')[0]) // Periods ending BEFORE holiday
+        .not('payroll_run_id', 'is', null)
+        .order('hrpayroll_runs(pay_period_end)', { ascending: false }); // Most recent first
 
-      if (error) {
-        console.error('Error loading payroll history:', error);
-        return;
+      if (regularError) {
+        console.error('❌ Error loading regular payroll history:', regularError);
+      } else {
+        console.log('✅ Regular payroll entries found:', regularEntries?.length || 0);
       }
 
-      setPayrollHistory(entries || []);
+      // ✅ Query 2: Get ALL migration entries BEFORE holiday, sorted by most recent
+      console.log('🔎 Query 2: Searching for migration entries...');
+      const { data: migrationEntries, error: migrationError } = await supabase
+        .from('hrpayroll_entries')
+        .select('*')
+        .eq('user_id', employee.id)
+        .eq('business_id', selectedBusinessId)
+        .is('payroll_run_id', null)
+        .lt('period_end_date', holidayDate.toISOString().split('T')[0]) // Periods ending BEFORE holiday
+        .order('period_end_date', { ascending: false }); // Most recent first
+
+      if (migrationError) {
+        console.error('❌ Error loading migration payroll history:', migrationError);
+      } else {
+        console.log('✅ Migration entries found:', migrationEntries?.length || 0);
+      }
+
+      // ✅ FIXED: Calculate the specific periods that should be included
+      // For Ontario ESA: 4 work weeks = 4 weekly periods OR 2 bi-weekly periods immediately before holiday
+      const calculatedPeriods = [];
+      
+      if (payFrequency === 'weekly') {
+        // For weekly: get the 4 weeks immediately before the holiday
+        for (let i = 1; i <= 4; i++) {
+          const periodEnd = new Date(holidayDate);
+          periodEnd.setDate(periodEnd.getDate() - (i * 7)); // Go back i weeks
+          calculatedPeriods.push({
+            period_end: periodEnd.toISOString().split('T')[0],
+            period_start: new Date(periodEnd.getTime() - (6 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0] // 6 days before end
+          });
+        }
+      } else if (payFrequency === 'bi_weekly') {
+        // For bi-weekly: get the 2 bi-weekly periods immediately before the holiday
+        for (let i = 1; i <= 2; i++) {
+          const periodEnd = new Date(holidayDate);
+          periodEnd.setDate(periodEnd.getDate() - (i * 14)); // Go back i bi-weekly periods (14 days each)
+          calculatedPeriods.push({
+            period_end: periodEnd.toISOString().split('T')[0],
+            period_start: new Date(periodEnd.getTime() - (13 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0] // 13 days before end
+          });
+        }
+      } else {
+        // Fallback: use the old logic for other frequencies
+        const allEntries = [...(regularEntries || []), ...(migrationEntries || [])]
+          .sort((a, b) => {
+            const dateA = new Date(a.hrpayroll_runs?.pay_period_end || a.period_end_date);
+            const dateB = new Date(b.hrpayroll_runs?.pay_period_end || b.period_end_date);
+            return dateB - dateA; // Descending (newest first)
+          })
+          .slice(0, periodsNeeded);
+        
+        setPayrollHistory(allEntries);
+        return;
+      }
+      
+      console.log('📅 Calculated periods that should be included:', calculatedPeriods);
+      console.log('📋 Available migration entries:', migrationEntries?.map(e => ({
+        period_end: e.period_end_date,
+        gross_pay: parseFloat(e.gross_pay || 0).toFixed(2)
+      })) || []);
+      console.log('📋 Available regular entries:', regularEntries?.map(e => ({
+        period_end: e.hrpayroll_runs?.pay_period_end,
+        gross_pay: parseFloat(e.gross_pay || 0).toFixed(2)
+      })) || []);
+      
+      // ✅ Now find payroll entries for these specific periods (or create $0 entries for missing periods)
+      const allEntries = [];
+      
+      for (const calculatedPeriod of calculatedPeriods) {
+        // Look for existing payroll entry for this period (exact match or within 7 days)
+        const existingEntry = [...(regularEntries || []), ...(migrationEntries || [])]
+          .find(entry => {
+            const entryPeriodEnd = entry.hrpayroll_runs?.pay_period_end || entry.period_end_date;
+            const calculatedEnd = new Date(calculatedPeriod.period_end);
+            const entryEnd = new Date(entryPeriodEnd);
+            
+            // Exact match or within 7 days (to handle slight date variations)
+            const daysDiff = Math.abs((calculatedEnd - entryEnd) / (1000 * 60 * 60 * 24));
+            return daysDiff <= 7;
+          });
+        
+        if (existingEntry) {
+          // Employee worked this period - use actual data
+          allEntries.push(existingEntry);
+          console.log(`✅ Found payroll for period ending ${calculatedPeriod.period_end}: $${parseFloat(existingEntry.gross_pay || 0).toFixed(2)}`);
+        } else {
+          // Employee didn't work this period - create $0 entry
+          const zeroEntry = {
+            gross_pay: 0,
+            total_hours: 0,
+            period_end_date: calculatedPeriod.period_end,
+            hrpayroll_runs: {
+              pay_period_end: calculatedPeriod.period_end,
+              pay_period_start: calculatedPeriod.period_start
+            },
+            is_zero_period: true // Flag to identify this as a zero period
+          };
+          allEntries.push(zeroEntry);
+          console.log(`⚠️ No payroll found for period ending ${calculatedPeriod.period_end} - using $0`);
+        }
+      }
+      
+      // Sort by period end date (newest first)
+      allEntries.sort((a, b) => {
+        const dateA = new Date(a.hrpayroll_runs?.pay_period_end || a.period_end_date);
+        const dateB = new Date(b.hrpayroll_runs?.pay_period_end || b.period_end_date);
+        return dateB - dateA; // Descending (newest first)
+      });
+
+      console.log('📊 ========== PAYROLL HISTORY SUMMARY ==========');
+      console.log('Pay frequency:', payFrequency);
+      console.log('Periods needed:', periodsNeeded);
+      console.log('Periods selected for calculation:', allEntries.length);
+
+      if (allEntries.length > 0) {
+        const totalGross = allEntries.reduce((sum, e) => sum + parseFloat(e.gross_pay || 0), 0);
+        const totalHours = allEntries.reduce((sum, e) => sum + parseFloat(e.total_hours || 0), 0);
+        console.log('Total gross pay in period:', totalGross.toFixed(2));
+        console.log('Total hours in period:', totalHours.toFixed(2));
+        console.log('Entries detail:', allEntries.map(e => ({
+          period_end: e.hrpayroll_runs?.pay_period_end || e.period_end_date,
+          gross_pay: parseFloat(e.gross_pay || 0).toFixed(2),
+          total_hours: parseFloat(e.total_hours || 0).toFixed(2),
+          is_migration: e.is_migration_entry || !e.payroll_run_id
+        })));
+      } else {
+        console.warn('⚠️ NO PAYROLL ENTRIES FOUND - Will use fallback calculation');
+      }
+
+      setPayrollHistory(allEntries);
+      console.log('✅ ========== PAYROLL HISTORY LOAD COMPLETE ==========');
 
     } catch (err) {
-      console.error('Error in loadPayrollHistory:', err);
+      console.error('💥 CRITICAL ERROR in loadPayrollHistory:', err);
     } finally {
       setLoading(false);
     }
   }, [employee?.id, selectedBusinessId, selectedHolidayDate]);
 
-  // Calculate holiday pay based on provincial/federal rules
   const calculateHolidayPay = useCallback(() => {
-    if (!employee || !selectedHolidayDate || !isHolidayPayEnabled) {
+    if (!employee || !selectedHolidayDate) {
+      console.log('❌ Cannot calculate - missing employee or date');
       setHolidayPayAmount(0);
       setCalculationDetails({});
+      return;
+    }
+
+    console.log('💰 ========== CALCULATING HOLIDAY PAY ==========');
+    console.log('Employee:', employee.first_name, employee.last_name);
+    console.log('Holiday date:', selectedHolidayDate);
+    console.log('Payroll history entries:', payrollHistory.length);
+    console.log('Missed shift before?', missedShiftBefore);
+    console.log('Missed shift after?', missedShiftAfter);
+
+    // Check if disqualified by missed shifts
+    if (missedShiftBefore || missedShiftAfter) {
+      console.log('❌ DISQUALIFIED: Employee missed shifts');
+      setIsEligible(false);
+      setEligibilityReason('Not eligible due to missed shifts before/after holiday');
+      setHolidayPayAmount(0);
+      setCalculationDetails({
+        method: 'Disqualified',
+        reason: 'Missed shifts'
+      });
+
+      if (onHolidayPayChange) {
+        onHolidayPayChange(0, {
+          holidayDate: selectedHolidayDate,
+          holidayName,
+          isEligible: false,
+          calculationDetails: { reason: 'Missed shifts' }
+        });
+      }
       return;
     }
 
@@ -186,64 +351,82 @@ const HolidayPayCalculator = ({
     const employmentStartDate = employee.hire_date ? new Date(employee.hire_date) : null;
     const holidayDate = new Date(selectedHolidayDate);
 
-    // Check basic eligibility (30 days employment minimum for most provinces)
     const daysEmployed = employmentStartDate ? 
       Math.floor((holidayDate - employmentStartDate) / (1000 * 60 * 60 * 24)) : 0;
 
+    console.log('👤 Employee info:', {
+      wage: wage,
+      hire_date: employee.hire_date,
+      days_employed: daysEmployed,
+      jurisdiction: jurisdiction
+    });
+
     if (daysEmployed < 30) {
+      console.log('❌ DISQUALIFIED: Less than 30 days employed');
       setIsEligible(false);
       setEligibilityReason(`Employee must be employed for at least 30 days. Currently: ${daysEmployed} days.`);
       setHolidayPayAmount(0);
       return;
     }
 
-    // Calculate based on jurisdiction
     let holidayPay = 0;
     let calculationMethod = '';
     let details = {};
 
-    if (jurisdiction === 'ON') {
-      // Ontario: 1/20th of wages from 4 weeks before the week containing the holiday
+    console.log('🧮 Calculating for jurisdiction:', jurisdiction);
+
+    if (jurisdiction === 'ON' || jurisdiction === 'federal') {
       if (payrollHistory.length > 0) {
+        console.log('✅ Using actual payroll data (Ontario/Federal 1/20th method)');
         const totalWages = payrollHistory.reduce((sum, entry) => {
-          return sum + (parseFloat(entry.gross_pay || 0) + parseFloat(entry.vacation_pay || 0));
+          const gross = parseFloat(entry.gross_pay || 0);
+          const periodEnd = entry.hrpayroll_runs?.pay_period_end || entry.period_end_date;
+          console.log(`  Period ending ${periodEnd}: $${gross.toFixed(2)}`);
+          return sum + gross;
         }, 0);
-        
+
         holidayPay = totalWages / 20;
-        calculationMethod = 'Ontario ESA: 1/20th of wages from 4-week period';
+        calculationMethod = jurisdiction === 'ON' ? 'Ontario ESA: 1/20th of wages from 4 work weeks' : 'Canada Labour Code: 1/20th of wages from 4 work weeks';
         details = {
-          totalWages,
+          totalWages: totalWages.toFixed(2),
           payrollEntries: payrollHistory.length,
-          calculation: `$${totalWages.toFixed(2)} ÷ 20 = $${holidayPay.toFixed(2)}`
+          calculation: `$${totalWages.toFixed(2)} ÷ 20 = $${holidayPay.toFixed(2)}`,
+          entries: payrollHistory.map(e => ({
+            date: e.hrpayroll_runs?.pay_period_end || e.period_end_date,
+            amount: parseFloat(e.gross_pay || 0).toFixed(2),
+            isZeroPeriod: e.is_zero_period || false
+          }))
         };
+        console.log('💵 Calculation result:', details.calculation);
       } else {
-        // Fallback: Average day's pay based on weekly wage
-        holidayPay = (wage * 40) / 5; // Assume 40-hour week, 5 days
-        calculationMethod = 'Ontario ESA: Estimated average day\'s pay (fallback)';
+        console.log('⚠️ Using FALLBACK calculation (no payroll history)');
+        holidayPay = (wage * 40) / 5;
+        calculationMethod = 'Estimated average day\'s pay (FALLBACK - no payroll history found)';
         details = {
-          weeklyWage: wage * 40,
-          dailyWage: holidayPay,
-          calculation: `($${wage}/hour × 40 hours) ÷ 5 days = $${holidayPay.toFixed(2)}`
+          weeklyWage: (wage * 40).toFixed(2),
+          dailyWage: holidayPay.toFixed(2),
+          calculation: `($${wage}/hour × 40 hours) ÷ 5 days = $${holidayPay.toFixed(2)}`,
+          warning: 'No payroll history found for calculation period'
         };
+        console.log('💵 Fallback calculation:', details.calculation);
       }
     } else if (jurisdiction === 'BC') {
-      // BC: Average day's pay based on 30 calendar days before holiday
       if (payrollHistory.length > 0) {
         const totalWages = payrollHistory.reduce((sum, entry) => sum + parseFloat(entry.gross_pay || 0), 0);
         const totalDaysWorked = payrollHistory.reduce((sum, entry) => {
           const hoursWorked = parseFloat(entry.total_hours || 0);
-          return sum + (hoursWorked > 0 ? 1 : 0); // Count days with any hours as worked days
+          return sum + (hoursWorked > 0 ? 1 : 0);
         }, 0);
-        
+
         holidayPay = totalDaysWorked > 0 ? totalWages / totalDaysWorked : wage * 8;
         calculationMethod = 'BC ESA: Average day\'s pay from 30-day period';
         details = {
-          totalWages,
+          totalWages: totalWages.toFixed(2),
           totalDaysWorked,
           calculation: `$${totalWages.toFixed(2)} ÷ ${totalDaysWorked} days = $${holidayPay.toFixed(2)}`
         };
       } else {
-        holidayPay = wage * 8; // 8-hour day assumption
+        holidayPay = wage * 8;
         calculationMethod = 'BC ESA: Estimated 8-hour day (fallback)';
         details = {
           hourlyWage: wage,
@@ -252,18 +435,17 @@ const HolidayPayCalculator = ({
         };
       }
     } else if (jurisdiction === 'AB') {
-      // Alberta: Average day's wage from 28 days before holiday
       if (payrollHistory.length > 0) {
         const totalWages = payrollHistory.reduce((sum, entry) => sum + parseFloat(entry.gross_pay || 0), 0);
         const totalDaysWorked = payrollHistory.reduce((sum, entry) => {
           const hoursWorked = parseFloat(entry.total_hours || 0);
           return sum + (hoursWorked > 0 ? 1 : 0);
         }, 0);
-        
+
         holidayPay = totalDaysWorked > 0 ? totalWages / totalDaysWorked : wage * 8;
         calculationMethod = 'Alberta ESC: Average day\'s wage from 28-day period';
         details = {
-          totalWages,
+          totalWages: totalWages.toFixed(2),
           totalDaysWorked,
           calculation: `$${totalWages.toFixed(2)} ÷ ${totalDaysWorked} days = $${holidayPay.toFixed(2)}`
         };
@@ -275,29 +457,12 @@ const HolidayPayCalculator = ({
           calculation: `$${wage}/hour × 8 hours = $${holidayPay.toFixed(2)}`
         };
       }
-    } else {
-      // Federal or other: 1/20th method (Canada Labour Code)
-      if (payrollHistory.length > 0) {
-        const totalWages = payrollHistory.reduce((sum, entry) => {
-          return sum + (parseFloat(entry.gross_pay || 0) + parseFloat(entry.vacation_pay || 0));
-        }, 0);
-        
-        holidayPay = totalWages / 20;
-        calculationMethod = 'Canada Labour Code: 1/20th of wages from 4-week period';
-        details = {
-          totalWages,
-          payrollEntries: payrollHistory.length,
-          calculation: `$${totalWages.toFixed(2)} ÷ 20 = $${holidayPay.toFixed(2)}`
-        };
-      } else {
-        holidayPay = (wage * 40) / 5;
-        calculationMethod = 'Federal: Estimated average day\'s pay (fallback)';
-        details = {
-          weeklyWage: wage * 40,
-          calculation: `($${wage}/hour × 40 hours) ÷ 5 days = $${holidayPay.toFixed(2)}`
-        };
-      }
     }
+
+    console.log('✅ ========== CALCULATION COMPLETE ==========');
+    console.log('Holiday pay amount:', holidayPay.toFixed(2));
+    console.log('Method:', calculationMethod);
+    console.log('Details:', details);
 
     setIsEligible(true);
     setEligibilityReason(`Eligible: ${daysEmployed} days employed (minimum 30 required)`);
@@ -311,7 +476,8 @@ const HolidayPayCalculator = ({
       ...details
     });
 
-    // Notify parent component of holiday pay change
+    console.log('📞 Calling onHolidayPayChange callback with:', holidayPay);
+
     if (onHolidayPayChange) {
       onHolidayPayChange(holidayPay, {
         holidayDate: selectedHolidayDate,
@@ -324,61 +490,29 @@ const HolidayPayCalculator = ({
         }
       });
     }
+    console.log('✅ ========== HOLIDAY PAY PROCESS COMPLETE ==========');
 
-  }, [employee, selectedHolidayDate, isHolidayPayEnabled, settings?.tax_jurisdiction, payrollHistory, onHolidayPayChange, holidayName]);
+  }, [employee, selectedHolidayDate, settings?.tax_jurisdiction, payrollHistory, onHolidayPayChange, holidayName, missedShiftBefore, missedShiftAfter]);
 
-  // Handle checkbox change
-  const handleHolidayPayToggle = async (checked) => {
-    try {
-      await recordAction('holiday_pay_toggle', employee?.id, checked);
-      
-      setIsHolidayPayEnabled(checked);
-      
-      if (checked) {
-        setShowCalendar(true);
-        await logSecurityEvent('holiday_pay_enabled', {
-          employee_id: employee?.id,
-          business_id: selectedBusinessId
-        }, 'medium');
-      } else {
-        setSelectedHolidayDate('');
-        setHolidayName('');
-        setHolidayPayAmount(0);
-        setShowCalendar(false);
-        
-        // Notify parent of removal
-        if (onHolidayPayChange) {
-          onHolidayPayChange(0, null);
-        }
-        
-        await logSecurityEvent('holiday_pay_disabled', {
-          employee_id: employee?.id,
-          business_id: selectedBusinessId
-        }, 'medium');
-      }
-    } catch (error) {
-      console.error('Error toggling holiday pay:', error);
-    }
-  };
-
-  // Handle holiday date selection
   const handleHolidayDateChange = async (date) => {
     try {
+      console.log('📅 Holiday date changed to:', date);
       const validation = await validateInput(date, 'date', 'date');
       if (!validation.valid) {
-        console.error('Invalid date:', validation.error);
+        console.error('❌ Invalid date:', validation.error);
         return;
       }
 
       setSelectedHolidayDate(date);
-      
-      // Auto-detect holiday name from statutory holidays
+
       const holidays = getJurisdictionHolidays();
       const matchingHoliday = holidays.find(h => h.date === date);
-      
+
       if (matchingHoliday) {
+        console.log('🎉 Matched statutory holiday:', matchingHoliday.name);
         setHolidayName(matchingHoliday.name);
       } else {
+        console.log('📝 Custom holiday date selected');
         setHolidayName('Custom Holiday');
       }
 
@@ -388,37 +522,38 @@ const HolidayPayCalculator = ({
         holiday_name: matchingHoliday?.name || 'Custom Holiday',
         business_id: selectedBusinessId
       }, 'low');
-      
+
     } catch (error) {
-      console.error('Error handling holiday date change:', error);
+      console.error('💥 Error handling holiday date change:', error);
     }
   };
 
-  // Load payroll history when holiday date changes
+  const handleStatHolidayClick = (holiday) => {
+    console.log('🎯 Statutory holiday clicked:', holiday.name, holiday.date);
+    setSelectedHolidayDate(holiday.date);
+    setHolidayName(holiday.name);
+  };
+
   useEffect(() => {
-    if (selectedHolidayDate && employee?.id) {
+    console.log('🔄 Effect triggered - loading payroll history');
+    if (selectedHolidayDate && employee?.id && selectedBusinessId) {
       loadPayrollHistory();
     }
-  }, [selectedHolidayDate, employee?.id, loadPayrollHistory]);
+  }, [selectedHolidayDate, employee?.id, selectedBusinessId, loadPayrollHistory]);
 
-  // Recalculate when dependencies change
   useEffect(() => {
-    if (isHolidayPayEnabled && selectedHolidayDate) {
+    if (selectedHolidayDate && payrollHistory.length > 0) {
       calculateHolidayPay();
     }
-  }, [isHolidayPayEnabled, selectedHolidayDate, payrollHistory, calculateHolidayPay]);
-
-  // Get suggested holidays for the jurisdiction
+  }, [selectedHolidayDate, payrollHistory.length, missedShiftBefore, missedShiftAfter]);
   const suggestedHolidays = useMemo(() => {
     const holidays = getJurisdictionHolidays();
     const currentDate = new Date();
     const payPeriodStart = payPeriod?.start ? new Date(payPeriod.start) : currentDate;
     const payPeriodEnd = payPeriod?.end ? new Date(payPeriod.end) : new Date(currentDate.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-    // Filter holidays within or near the current pay period
     return holidays.filter(holiday => {
       const holidayDate = new Date(holiday.date);
-      // Include holidays in pay period or within 30 days
       return holidayDate >= new Date(payPeriodStart.getTime() - 30 * 24 * 60 * 60 * 1000) &&
              holidayDate <= new Date(payPeriodEnd.getTime() + 30 * 24 * 60 * 60 * 1000);
     });
@@ -427,33 +562,8 @@ const HolidayPayCalculator = ({
   const styles = {
     container: {
       backgroundColor: TavariStyles.colors.white,
-      padding: TavariStyles.spacing.lg,
-      borderRadius: TavariStyles.borderRadius?.md || '8px',
-      border: `1px solid ${TavariStyles.colors.gray200}`,
-      marginBottom: TavariStyles.spacing.md
-    },
-    header: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      marginBottom: TavariStyles.spacing.md
-    },
-    title: {
-      fontSize: TavariStyles.typography.fontSize.lg,
-      fontWeight: TavariStyles.typography.fontWeight.semibold,
-      color: TavariStyles.colors.gray800,
-      margin: 0
-    },
-    enableSection: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: TavariStyles.spacing.sm
-    },
-    holidayDetails: {
-      marginTop: TavariStyles.spacing.md,
       padding: TavariStyles.spacing.md,
-      backgroundColor: TavariStyles.colors.gray50,
-      borderRadius: TavariStyles.borderRadius?.sm || '6px',
+      borderRadius: TavariStyles.borderRadius?.md || '8px',
       border: `1px solid ${TavariStyles.colors.gray200}`
     },
     dateSection: {
@@ -480,7 +590,8 @@ const HolidayPayCalculator = ({
       backgroundColor: TavariStyles.colors.white
     },
     suggestedHolidays: {
-      marginTop: TavariStyles.spacing.sm
+      marginTop: TavariStyles.spacing.sm,
+      marginBottom: TavariStyles.spacing.md
     },
     suggestedTitle: {
       fontSize: TavariStyles.typography.fontSize.xs,
@@ -488,172 +599,250 @@ const HolidayPayCalculator = ({
       color: TavariStyles.colors.gray600,
       marginBottom: TavariStyles.spacing.xs
     },
-    holidayButton: {
-      padding: `${TavariStyles.spacing.xs} ${TavariStyles.spacing.sm}`,
-      margin: `0 ${TavariStyles.spacing.xs} ${TavariStyles.spacing.xs} 0`,
-      border: `1px solid ${TavariStyles.colors.primary}`,
-      borderRadius: TavariStyles.borderRadius?.sm || '4px',
-      backgroundColor: TavariStyles.colors.white,
-      color: TavariStyles.colors.primary,
+    holidayChips: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: TavariStyles.spacing.xs
+    },
+    holidayChip: {
+      padding: '6px 12px',
+      backgroundColor: TavariStyles.colors.gray50,
+      border: `1px solid ${TavariStyles.colors.gray300}`,
+      borderRadius: '16px',
       fontSize: TavariStyles.typography.fontSize.xs,
       cursor: 'pointer',
-      transition: 'all 0.2s ease'
+      transition: 'all 0.2s',
+      ':hover': {
+        backgroundColor: TavariStyles.colors.primary,
+        color: TavariStyles.colors.white,
+        borderColor: TavariStyles.colors.primary
+      }
     },
-    calculationPreview: {
-      marginTop: TavariStyles.spacing.md,
+    resultSection: {
+      marginTop: TavariStyles.spacing.lg,
       padding: TavariStyles.spacing.md,
-      backgroundColor: isEligible ? TavariStyles.colors.successBg : TavariStyles.colors.errorBg,
-      borderRadius: TavariStyles.borderRadius?.sm || '4px',
-      border: `1px solid ${isEligible ? TavariStyles.colors.success : TavariStyles.colors.danger}`
+      backgroundColor: TavariStyles.colors.gray50,
+      borderRadius: TavariStyles.borderRadius?.md || '8px'
     },
-    previewTitle: {
-      fontSize: TavariStyles.typography.fontSize.sm,
-      fontWeight: TavariStyles.typography.fontWeight.semibold,
-      color: isEligible ? TavariStyles.colors.success : TavariStyles.colors.danger,
-      marginBottom: TavariStyles.spacing.xs
+    eligibilityBadge: {
+      display: 'inline-block',
+      padding: '4px 12px',
+      borderRadius: '12px',
+      fontSize: TavariStyles.typography.fontSize.xs,
+      fontWeight: TavariStyles.typography.fontWeight.medium
     },
-    previewAmount: {
+    eligible: {
+      backgroundColor: '#dcfce7',
+      color: '#166534'
+    },
+    notEligible: {
+      backgroundColor: '#fee2e2',
+      color: '#991b1b'
+    },
+    amountDisplay: {
       fontSize: TavariStyles.typography.fontSize.xl,
       fontWeight: TavariStyles.typography.fontWeight.bold,
-      color: isEligible ? TavariStyles.colors.success : TavariStyles.colors.danger,
-      marginBottom: TavariStyles.spacing.sm
+      color: TavariStyles.colors.primary,
+      marginTop: TavariStyles.spacing.sm
     },
-    calculationDetails: {
-      fontSize: TavariStyles.typography.fontSize.xs,
+    calculationBox: {
+      marginTop: TavariStyles.spacing.md,
+      padding: TavariStyles.spacing.md,
+      backgroundColor: TavariStyles.colors.white,
+      border: `1px solid ${TavariStyles.colors.gray200}`,
+      borderRadius: TavariStyles.borderRadius?.sm || '4px'
+    },
+    calculationTitle: {
+      fontSize: TavariStyles.typography.fontSize.sm,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      marginBottom: TavariStyles.spacing.sm,
+      color: TavariStyles.colors.gray700
+    },
+    calculationText: {
+      fontSize: TavariStyles.typography.fontSize.sm,
       color: TavariStyles.colors.gray600,
-      lineHeight: TavariStyles.typography.lineHeight.relaxed
+      lineHeight: 1.6
     },
-    loadingSpinner: {
-      width: '20px',
-      height: '20px',
-      border: `2px solid ${TavariStyles.colors.gray200}`,
-      borderTop: `2px solid ${TavariStyles.colors.primary}`,
-      borderRadius: '50%',
-      animation: 'spin 1s linear infinite',
-      marginLeft: TavariStyles.spacing.sm
+    payrollEntriesTable: {
+      width: '100%',
+      marginTop: TavariStyles.spacing.sm,
+      borderCollapse: 'collapse'
+    },
+    tableHeader: {
+      padding: TavariStyles.spacing.sm,
+      backgroundColor: TavariStyles.colors.gray100,
+      textAlign: 'left',
+      fontSize: TavariStyles.typography.fontSize.xs,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      color: TavariStyles.colors.gray700,
+      borderBottom: `2px solid ${TavariStyles.colors.gray300}`
+    },
+    tableCell: {
+      padding: TavariStyles.spacing.sm,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray600,
+      borderBottom: `1px solid ${TavariStyles.colors.gray200}`
+    },
+    warningBox: {
+      marginTop: TavariStyles.spacing.md,
+      padding: TavariStyles.spacing.md,
+      backgroundColor: '#fef3c7',
+      border: '1px solid #fbbf24',
+      borderRadius: TavariStyles.borderRadius?.sm || '4px',
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: '#92400e'
     }
   };
 
-  if (!employee) {
-    return null;
-  }
-
   return (
-    <SecurityWrapper
-      componentName="HolidayPayCalculator"
-      securityLevel="high"
-      enableAuditLogging={true}
-      sensitiveComponent={true}
-    >
+    <SecurityWrapper>
       <div style={styles.container}>
-        {/* CSS for spinner animation */}
-        <style>{`
-          @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-          }
-        `}</style>
+        <h4 style={{
+          fontSize: TavariStyles.typography.fontSize.md,
+          fontWeight: TavariStyles.typography.fontWeight.semibold,
+          marginBottom: TavariStyles.spacing.md,
+          color: TavariStyles.colors.gray800
+        }}>
+          Holiday Pay Calculator
+        </h4>
 
-        <div style={styles.header}>
-          <h4 style={styles.title}>Holiday Pay Calculator</h4>
-          <div style={styles.enableSection}>
-            <TavariCheckbox
-              checked={isHolidayPayEnabled}
-              onChange={handleHolidayPayToggle}
-              label="Add Holiday Pay"
-              size="md"
-              id={`holiday-pay-${employee.id}`}
+        <div style={styles.dateSection}>
+          <div style={styles.formGroup}>
+            <label style={styles.label}>Holiday Date</label>
+            <input
+              type="date"
+              style={styles.input}
+              value={selectedHolidayDate}
+              onChange={(e) => handleHolidayDateChange(e.target.value)}
+              max={new Date().toISOString().split('T')[0]}
             />
-            {loading && <div style={styles.loadingSpinner}></div>}
+          </div>
+
+          <div style={styles.formGroup}>
+            <label style={styles.label}>Holiday Name</label>
+            <input
+              type="text"
+              style={styles.input}
+              value={holidayName}
+              onChange={(e) => setHolidayName(e.target.value)}
+              placeholder="Enter holiday name"
+            />
           </div>
         </div>
 
-        {isHolidayPayEnabled && (
-          <div style={styles.holidayDetails}>
-            <div style={styles.dateSection}>
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Holiday Date:</label>
-                <input
-                  type="date"
-                  value={selectedHolidayDate}
-                  onChange={(e) => handleHolidayDateChange(e.target.value)}
-                  style={styles.input}
-                  min="2024-01-01"
-                  max="2026-12-31"
-                />
-              </div>
-              
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Holiday Name:</label>
-                <input
-                  type="text"
-                  value={holidayName}
-                  onChange={(e) => setHolidayName(e.target.value)}
-                  placeholder="Enter holiday name"
-                  style={styles.input}
-                />
-              </div>
+        {suggestedHolidays.length > 0 && (
+          <div style={styles.suggestedHolidays}>
+            <div style={styles.suggestedTitle}>Suggested Statutory Holidays:</div>
+            <div style={styles.holidayChips}>
+              {suggestedHolidays.map((holiday, idx) => (
+                <div
+                  key={idx}
+                  style={styles.holidayChip}
+                  onClick={() => handleStatHolidayClick(holiday)}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = TavariStyles.colors.primary;
+                    e.currentTarget.style.color = TavariStyles.colors.white;
+                    e.currentTarget.style.borderColor = TavariStyles.colors.primary;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = TavariStyles.colors.gray50;
+                    e.currentTarget.style.color = TavariStyles.colors.gray700;
+                    e.currentTarget.style.borderColor = TavariStyles.colors.gray300;
+                  }}
+                >
+                  {holiday.name} ({holiday.date})
+                </div>
+              ))}
             </div>
+          </div>
+        )}
 
-            {/* Suggested statutory holidays */}
-            {suggestedHolidays.length > 0 && (
-              <div style={styles.suggestedHolidays}>
-                <div style={styles.suggestedTitle}>Suggested Statutory Holidays ({settings?.tax_jurisdiction || 'ON'}):</div>
-                <div>
-                  {suggestedHolidays.map((holiday, index) => (
-                    <button
-                      key={index}
-                      style={{
-                        ...styles.holidayButton,
-                        backgroundColor: selectedHolidayDate === holiday.date ? TavariStyles.colors.primary : TavariStyles.colors.white,
-                        color: selectedHolidayDate === holiday.date ? TavariStyles.colors.white : TavariStyles.colors.primary
-                      }}
-                      onClick={() => {
-                        handleHolidayDateChange(holiday.date);
-                        setHolidayName(holiday.name);
-                      }}
-                    >
-                      {holiday.name} ({holiday.date})
-                    </button>
-                  ))}
+        {selectedHolidayDate && !loading && (
+          <>
+            <div style={styles.resultSection}>
+              <div>
+                <span
+                  style={{
+                    ...styles.eligibilityBadge,
+                    ...(isEligible ? styles.eligible : styles.notEligible)
+                  }}
+                >
+                  {isEligible ? '✓ Eligible' : '✗ Not Eligible'}
+                </span>
+                <div style={{
+                  fontSize: TavariStyles.typography.fontSize.sm,
+                  color: TavariStyles.colors.gray600,
+                  marginTop: TavariStyles.spacing.xs
+                }}>
+                  {eligibilityReason}
                 </div>
               </div>
-            )}
 
-            {/* Calculation preview */}
-            {selectedHolidayDate && (
-              <div style={styles.calculationPreview}>
-                <div style={styles.previewTitle}>
-                  Holiday Pay Calculation - {holidayName}
-                </div>
-                
-                {isEligible ? (
-                  <>
-                    <div style={styles.previewAmount}>
-                      ${formatAmount ? formatAmount(holidayPayAmount) : formatTaxAmount ? formatTaxAmount(holidayPayAmount) : holidayPayAmount.toFixed(2)}
-                    </div>
-                    <div style={styles.calculationDetails}>
-                      <strong>Method:</strong> {calculationDetails.method}<br/>
-                      <strong>Jurisdiction:</strong> {calculationDetails.jurisdiction}<br/>
-                      <strong>Calculation:</strong> {calculationDetails.calculation}<br/>
-                      <strong>Eligibility:</strong> {eligibilityReason}
-                      {calculationDetails.payrollEntries && (
-                        <>
-                          <br/><strong>Based on:</strong> {calculationDetails.payrollEntries} payroll entries from last 4 weeks
-                        </>
-                      )}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div style={styles.previewAmount}>Not Eligible</div>
-                    <div style={styles.calculationDetails}>
-                      <strong>Reason:</strong> {eligibilityReason}
-                    </div>
-                  </>
-                )}
+              <div style={styles.amountDisplay}>
+                Holiday Pay: ${formatAmount ? formatAmount(holidayPayAmount) : formatTaxAmount ? formatTaxAmount(holidayPayAmount) : holidayPayAmount.toFixed(2)}
               </div>
-            )}
+
+              <div style={styles.calculationBox}>
+                <div style={styles.calculationTitle}>Calculation Method</div>
+                <div style={styles.calculationText}>
+                  <strong>Method:</strong> {calculationDetails.method}<br/>
+                  <strong>Jurisdiction:</strong> {calculationDetails.jurisdiction}<br/>
+                  <strong>Formula:</strong> {calculationDetails.calculation}
+                </div>
+              </div>
+
+              {calculationDetails.payrollEntries > 0 && calculationDetails.entries && (
+                <div style={styles.calculationBox}>
+                  <div style={styles.calculationTitle}>
+                    Based on {calculationDetails.payrollEntries} Payroll Period{calculationDetails.payrollEntries > 1 ? 's' : ''}
+                  </div>
+                  <table style={styles.payrollEntriesTable}>
+                    <thead>
+                      <tr>
+                        <th style={styles.tableHeader}>Period End Date</th>
+                        <th style={styles.tableHeader}>Gross Pay</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {calculationDetails.entries.map((entry, idx) => (
+                        <tr key={idx}>
+                          <td style={styles.tableCell}>
+                            {entry.date}
+                            {entry.isZeroPeriod && (
+                              <span style={{color: '#666', fontSize: '0.9em', marginLeft: '8px'}}>
+                                (No work)
+                              </span>
+                            )}
+                          </td>
+                          <td style={{
+                            ...styles.tableCell,
+                            color: entry.isZeroPeriod ? '#999' : 'inherit'
+                          }}>
+                            ${entry.amount}
+                          </td>
+                        </tr>
+                      ))}
+                      <tr style={{fontWeight: 'bold'}}>
+                        <td style={{...styles.tableCell, fontWeight: 'bold'}}>Total</td>
+                        <td style={{...styles.tableCell, fontWeight: 'bold'}}>${calculationDetails.totalWages}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {calculationDetails.warning && (
+                <div style={styles.warningBox}>
+                  <strong>⚠️ Warning:</strong> {calculationDetails.warning}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {loading && (
+          <div style={{padding: TavariStyles.spacing.lg, textAlign: 'center', color: TavariStyles.colors.gray600}}>
+            Loading payroll history...
           </div>
         )}
       </div>

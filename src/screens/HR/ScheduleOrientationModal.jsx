@@ -1,5 +1,10 @@
+// screens/HR/ScheduleOrientationModal.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
+import { useSecurityContext } from '../../Security';
+import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { usePermissions } from '../../hooks/usePermissions';
+import toast from 'react-hot-toast';
 
 const ScheduleOrientationModal = ({ 
   isOpen, 
@@ -8,6 +13,38 @@ const ScheduleOrientationModal = ({
   selectedSession,
   onEmployeeScheduled 
 }) => {
+  // Security context
+  const {
+    recordAction,
+    logSecurityEvent,
+    checkRateLimit
+  } = useSecurityContext({
+    componentName: 'ScheduleOrientationModal',
+    sensitiveComponent: false,
+    enableRateLimiting: true,
+    enableAuditLogging: true,
+    securityLevel: 'low'
+  });
+
+  // Authentication
+  const {
+    authUser,
+    authLoading
+  } = usePOSAuth({
+    requiredRoles: ['owner', 'manager', 'admin', 'hr_admin'],
+    requireBusiness: true,
+    componentName: 'ScheduleOrientationModal'
+  });
+
+  // Permission system
+  const { 
+    hasPermission, 
+    hasAnyPermission,
+    hasElevatedPrivileges,
+    loading: permissionsLoading 
+  } = usePermissions();
+
+  // Component state
   const [employees, setEmployees] = useState([]);
   const [selectedEmployees, setSelectedEmployees] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -16,21 +53,43 @@ const ScheduleOrientationModal = ({
   const [sessionDetails, setSessionDetails] = useState(null);
   const [currentAttendees, setCurrentAttendees] = useState([]);
 
+  // Permission checks
+  const canScheduleEmployees = hasPermission('hr.orientation.schedule') || hasElevatedPrivileges();
+  const canViewAttendees = hasPermission('hr.orientation.view_attendees') || hasElevatedPrivileges();
+
   useEffect(() => {
-    if (isOpen && businessId && selectedSession) {
-      loadAvailableEmployees();
-      loadSessionDetails();
-      loadCurrentAttendees();
-      setSelectedEmployees([]);
-      setSearchTerm('');
-      setErrors({});
+    if (isOpen && businessId && selectedSession && authUser && !authLoading && !permissionsLoading) {
+      if (canScheduleEmployees) {
+        loadAvailableEmployees();
+        loadSessionDetails();
+        if (canViewAttendees) {
+          loadCurrentAttendees();
+        }
+        setSelectedEmployees([]);
+        setSearchTerm('');
+        setErrors({});
+
+        logSecurityEvent('schedule_orientation_modal_opened', {
+          action: 'open_schedule_orientation_modal',
+          session_id: selectedSession.event_id,
+          business_id: businessId
+        }, 'low');
+      } else {
+        setErrors({ general: 'You do not have permission to schedule employees for orientation' });
+      }
     }
-  }, [isOpen, businessId, selectedSession]);
+  }, [isOpen, businessId, selectedSession, authUser, authLoading, permissionsLoading, canScheduleEmployees, canViewAttendees]);
 
   const loadAvailableEmployees = async () => {
     try {
       console.log('Loading employees for business:', businessId);
       
+      await logSecurityEvent('load_available_employees', {
+        action: 'load_employees_for_scheduling',
+        session_id: selectedSession.event_id,
+        business_id: businessId
+      }, 'low');
+
       // Get all active employees with business_users relationship
       const { data: allEmployees, error: allError } = await supabase
         .from('users')
@@ -61,7 +120,6 @@ const ScheduleOrientationModal = ({
 
       if (regError) {
         console.error('Error loading registered employees:', regError);
-        // Don't throw error here, just log it
       }
 
       const registeredIds = registeredEmployees ? registeredEmployees.map(r => r.employee_id) : [];
@@ -75,10 +133,22 @@ const ScheduleOrientationModal = ({
       console.log('Available employees:', availableEmployees?.length);
       setEmployees(availableEmployees);
 
+      recordAction('view_available_employees', {
+        session_id: selectedSession.event_id,
+        available_count: availableEmployees.length
+      });
+
     } catch (error) {
       console.error('Error loading employees:', error);
       setErrors({ general: 'Failed to load employees' });
       setEmployees([]);
+      toast.error('Failed to load available employees');
+
+      await logSecurityEvent('load_employees_failed', {
+        error_message: error.message,
+        session_id: selectedSession.event_id,
+        business_id: businessId
+      }, 'medium');
     }
   };
 
@@ -102,10 +172,16 @@ const ScheduleOrientationModal = ({
     } catch (error) {
       console.error('Error loading session details:', error);
       setSessionDetails(null);
+      toast.error('Failed to load session details');
     }
   };
 
   const loadCurrentAttendees = async () => {
+    if (!canViewAttendees) {
+      console.log('User does not have permission to view attendees');
+      return;
+    }
+
     try {
       console.log('Loading current attendees for session:', selectedSession.event_id);
       
@@ -116,7 +192,6 @@ const ScheduleOrientationModal = ({
 
       if (error) {
         console.error('Error loading current attendees:', error);
-        // Don't throw error, just set empty array
         setCurrentAttendees([]);
       } else {
         console.log('Current attendees loaded:', data?.length);
@@ -129,29 +204,54 @@ const ScheduleOrientationModal = ({
   };
 
   const handleEmployeeToggle = (employeeId) => {
+    if (!canScheduleEmployees) {
+      toast.error('You do not have permission to schedule employees');
+      return;
+    }
+
     setSelectedEmployees(prev => 
       prev.includes(employeeId) 
         ? prev.filter(id => id !== employeeId)
         : [...prev, employeeId]
     );
+    
     // Clear any previous errors
     if (errors.general) {
       setErrors({});
     }
+
+    recordAction('toggle_employee_selection', {
+      employee_id: employeeId,
+      selected: !selectedEmployees.includes(employeeId)
+    });
   };
 
   const handleScheduleEmployees = async () => {
+    if (!canScheduleEmployees) {
+      toast.error('You do not have permission to schedule employees');
+      return;
+    }
+
     if (selectedEmployees.length === 0) {
       setErrors({ general: 'Please select at least one employee' });
+      toast.error('Please select at least one employee');
       return;
     }
 
     // Check if adding these employees would exceed capacity
     const newTotal = currentAttendees.length + selectedEmployees.length;
     if (sessionDetails && newTotal > sessionDetails.max_attendees) {
-      setErrors({ 
-        general: `Cannot add ${selectedEmployees.length} employees. Only ${sessionDetails.max_attendees - currentAttendees.length} spots available.` 
-      });
+      const spotsAvailable = sessionDetails.max_attendees - currentAttendees.length;
+      const errorMsg = `Cannot add ${selectedEmployees.length} employees. Only ${spotsAvailable} spot${spotsAvailable !== 1 ? 's' : ''} available.`;
+      setErrors({ general: errorMsg });
+      toast.error(errorMsg);
+      return;
+    }
+
+    // Rate limiting check
+    const canProceed = await checkRateLimit('schedule_orientation', 10, 60);
+    if (!canProceed) {
+      toast.error('Too many scheduling requests. Please wait a moment.');
       return;
     }
 
@@ -159,10 +259,15 @@ const ScheduleOrientationModal = ({
     setErrors({});
 
     try {
-      const currentUser = await supabase.auth.getUser();
-      const registeredBy = currentUser.data.user?.id;
+      await logSecurityEvent('schedule_orientation_employees', {
+        action: 'schedule_employees_for_orientation',
+        session_id: selectedSession.event_id,
+        employee_count: selectedEmployees.length,
+        business_id: businessId,
+        scheduled_by: authUser?.id
+      }, 'medium');
 
-      if (!registeredBy) {
+      if (!authUser?.id) {
         throw new Error('User authentication required');
       }
 
@@ -176,7 +281,7 @@ const ScheduleOrientationModal = ({
             p_business_id: businessId,
             p_employee_id: employeeId,
             p_session_id: selectedSession.event_id,
-            p_registered_by: registeredBy
+            p_registered_by: authUser.id
           });
 
           if (error) {
@@ -193,6 +298,14 @@ const ScheduleOrientationModal = ({
       
       console.log(`Successfully scheduled ${successCount} employees for orientation`);
       
+      recordAction('employees_scheduled', {
+        session_id: selectedSession.event_id,
+        employee_count: successCount,
+        employee_ids: selectedEmployees
+      });
+
+      toast.success(`Successfully scheduled ${successCount} employee${successCount !== 1 ? 's' : ''} for orientation`);
+      
       // Call the callback to refresh parent data
       if (onEmployeeScheduled) {
         onEmployeeScheduled();
@@ -203,10 +316,27 @@ const ScheduleOrientationModal = ({
       
     } catch (error) {
       console.error('Error scheduling employees:', error);
-      setErrors({ general: `Failed to schedule employees: ${error.message}` });
+      const errorMsg = `Failed to schedule employees: ${error.message}`;
+      setErrors({ general: errorMsg });
+      toast.error(errorMsg);
+
+      await logSecurityEvent('schedule_employees_failed', {
+        error_message: error.message,
+        session_id: selectedSession.event_id,
+        employee_count: selectedEmployees.length,
+        business_id: businessId
+      }, 'high');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleClose = () => {
+    recordAction('close_schedule_orientation_modal', {
+      session_id: selectedSession?.event_id,
+      selected_count: selectedEmployees.length
+    });
+    onClose();
   };
 
   const filteredEmployees = employees.filter(employee => {
@@ -238,12 +368,40 @@ const ScheduleOrientationModal = ({
 
   if (!isOpen) return null;
 
+  // Permission check - don't render if user lacks permission
+  if (!canScheduleEmployees && !permissionsLoading && !authLoading) {
+    return (
+      <div style={styles.modalOverlay}>
+        <div style={styles.modal}>
+          <div style={styles.modalHeader}>
+            <h2 style={styles.modalTitle}>Access Denied</h2>
+            <button onClick={handleClose} style={styles.modalClose}>×</button>
+          </div>
+          <div style={styles.modalContent}>
+            <div style={styles.errorMessage}>
+              You do not have permission to schedule employees for orientation.
+            </div>
+            <div style={styles.formActions}>
+              <button
+                type="button"
+                onClick={handleClose}
+                style={styles.cancelButton}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.modalOverlay}>
       <div style={styles.modal}>
         <div style={styles.modalHeader}>
           <h2 style={styles.modalTitle}>Schedule Employees for Orientation</h2>
-          <button onClick={onClose} style={styles.modalClose}>×</button>
+          <button onClick={handleClose} style={styles.modalClose}>×</button>
         </div>
 
         <div style={styles.modalContent}>
@@ -264,8 +422,8 @@ const ScheduleOrientationModal = ({
             </div>
           )}
 
-          {/* Current Attendees */}
-          {currentAttendees.length > 0 && (
+          {/* Current Attendees - only show if user has permission */}
+          {canViewAttendees && currentAttendees.length > 0 && (
             <div style={styles.currentAttendees}>
               <h4 style={styles.subTitle}>Currently Registered ({currentAttendees.length})</h4>
               <div style={styles.attendeesList}>
@@ -290,6 +448,7 @@ const ScheduleOrientationModal = ({
               placeholder="Search employees by name or department..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
+              disabled={!canScheduleEmployees}
             />
           </div>
 
@@ -312,9 +471,11 @@ const ScheduleOrientationModal = ({
                     key={employee.id} 
                     style={{
                       ...styles.employeeItem,
-                      backgroundColor: isSelected ? '#e0f2fe' : 'white'
+                      backgroundColor: isSelected ? '#e0f2fe' : 'white',
+                      cursor: canScheduleEmployees ? 'pointer' : 'not-allowed',
+                      opacity: canScheduleEmployees ? 1 : 0.6
                     }}
-                    onClick={() => handleEmployeeToggle(employee.id)}
+                    onClick={() => canScheduleEmployees && handleEmployeeToggle(employee.id)}
                   >
                     <div style={styles.employeeInfo}>
                       <div style={styles.employeeName}>
@@ -335,7 +496,8 @@ const ScheduleOrientationModal = ({
                       <input
                         type="checkbox"
                         checked={isSelected}
-                        onChange={() => {}} // Handled by onClick on parent
+                        onChange={() => {}}
+                        disabled={!canScheduleEmployees}
                         style={styles.checkboxInput}
                       />
                     </div>
@@ -363,23 +525,26 @@ const ScheduleOrientationModal = ({
           <div style={styles.formActions}>
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               disabled={loading}
               style={styles.cancelButton}
             >
               Cancel
             </button>
-            <button
-              type="button"
-              onClick={handleScheduleEmployees}
-              disabled={loading || selectedEmployees.length === 0}
-              style={{
-                ...styles.scheduleButton,
-                opacity: (loading || selectedEmployees.length === 0) ? 0.5 : 1
-              }}
-            >
-              {loading ? 'Scheduling...' : `Schedule ${selectedEmployees.length} Employee${selectedEmployees.length !== 1 ? 's' : ''}`}
-            </button>
+            {canScheduleEmployees && (
+              <button
+                type="button"
+                onClick={handleScheduleEmployees}
+                disabled={loading || selectedEmployees.length === 0}
+                style={{
+                  ...styles.scheduleButton,
+                  opacity: (loading || selectedEmployees.length === 0) ? 0.5 : 1,
+                  cursor: (loading || selectedEmployees.length === 0) ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {loading ? 'Scheduling...' : `Schedule ${selectedEmployees.length} Employee${selectedEmployees.length !== 1 ? 's' : ''}`}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -482,8 +647,7 @@ const styles = {
     alignItems: 'center',
     padding: '8px 12px',
     borderBottom: '1px solid #e5e7eb',
-    fontSize: '14px',
-    cursor: 'pointer'
+    fontSize: '14px'
   },
   attendeeStatus: {
     fontSize: '12px',

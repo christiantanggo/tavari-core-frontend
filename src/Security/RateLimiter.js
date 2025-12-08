@@ -1,4 +1,4 @@
-// Security/RateLimiter.js - Advanced Rate Limiting System with Employee Actions Fixed
+// Security/RateLimiter.js - Advanced Rate Limiting System with All Actions
 import securityAudit from './SecurityAudit';
 
 /**
@@ -645,6 +645,15 @@ class RateLimiter {
       strictMode: true
     });
 
+    // User registration
+    this.createLimiter('user_registration', {
+      maxAttempts: 3,
+      windowMs: 60 * 60 * 1000, // 1 hour
+      blockDurationMs: 60 * 60 * 1000, // 1 hour
+      escalationEnabled: true,
+      strictMode: true
+    });
+
     // Password reset attempts
     this.createLimiter('password_reset', {
       maxAttempts: 3,
@@ -676,6 +685,24 @@ class RateLimiter {
       blockDurationMs: 60 * 60 * 1000, // 1 hour
       escalationEnabled: true
     });
+    this.createLimiter('email_receipt', {
+      maxAttempts: 5,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: true
+    });
+    this.createLimiter('load_campaign', {
+      maxAttempts: 30,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: false
+    });
+    this.createLimiter('send_test_email', {
+      maxAttempts: 5,
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      blockDurationMs: 30 * 60 * 1000, // 30 minutes
+      escalationEnabled: true
+    });
 
     // SMS sending
     this.createLimiter('sms_send', {
@@ -699,6 +726,15 @@ class RateLimiter {
       windowMs: 60 * 60 * 1000, // 1 hour
       blockDurationMs: 24 * 60 * 60 * 1000, // 24 hours
       escalationEnabled: true
+    });
+
+    // Business creation - More lenient limits
+    this.createLimiter('create_business', {
+      maxAttempts: 10, // Allow 10 attempts
+      windowMs: 60 * 60 * 1000, // 1 hour window
+      blockDurationMs: 15 * 60 * 1000, // 15 minute block
+      escalationEnabled: false, // Don't escalate for business creation
+      strictMode: false
     });
 
     // Payment processing
@@ -772,6 +808,15 @@ class RateLimiter {
       strictMode: true
     });
 
+    // Delete finalized payroll runs (highly sensitive)
+    this.createLimiter('delete_payroll_run', {
+      maxAttempts: 3,
+      windowMs: 60 * 60 * 1000, // 1 hour
+      blockDurationMs: 30 * 60 * 1000, // 30 minutes
+      escalationEnabled: true,
+      strictMode: true
+    });
+
     // Generate pay statements
     this.createLimiter('generate_pay_statement', {
       maxAttempts: 100,
@@ -828,6 +873,15 @@ class RateLimiter {
       escalationEnabled: true
     });
 
+    // Create employee (sensitive operation)
+    this.createLimiter('create_employee', {
+      maxAttempts: 10,
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: true,
+      strictMode: true
+    });
+
     // Sensitive employee data access
     this.createLimiter('employee_sensitive_data', {
       maxAttempts: 30,
@@ -837,7 +891,7 @@ class RateLimiter {
       strictMode: true
     });
 
-    // ===== MISSING EMPLOYEE SCREEN ACTIONS - FIXED =====
+    // ===== EMPLOYEE SCREEN ACTIONS =====
     
     // Employee data access (main list loading)
     this.createLimiter('employee_data_access', {
@@ -927,6 +981,80 @@ class RateLimiter {
       blockDurationMs: 5 * 60 * 1000, // 5 minutes
       escalationEnabled: true,
       strictMode: true
+    });
+
+    // ===== SETTINGS SCREEN ACTIONS =====
+    
+    // Settings save operations
+    this.createLimiter('settings_save', {
+      maxAttempts: 10,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: true,
+      strictMode: false
+    });
+
+    // Business settings access
+    this.createLimiter('settings_access', {
+      maxAttempts: 30,
+      windowMs: 5 * 60 * 1000, // 5 minutes
+      blockDurationMs: 2 * 60 * 1000, // 2 minutes
+      escalationEnabled: false,
+      strictMode: false
+    });
+
+    // Settings validation
+    this.createLimiter('settings_validation', {
+      maxAttempts: 50,
+      windowMs: 5 * 60 * 1000, // 5 minutes
+      blockDurationMs: 1 * 60 * 1000, // 1 minute
+      escalationEnabled: false,
+      strictMode: false
+    });
+
+    // Tavari Pay onboarding
+    this.createLimiter('tavari_pay_onboarding', {
+      maxAttempts: 3,
+      windowMs: 60 * 60 * 1000, // 1 hour
+      blockDurationMs: 60 * 60 * 1000, // 1 hour
+      escalationEnabled: true,
+      strictMode: true
+    });
+
+    // Tavari Pay link generation
+    this.createLimiter('tavari_pay_link_generation', {
+      maxAttempts: 5,
+      windowMs: 30 * 60 * 1000, // 30 minutes
+      blockDurationMs: 15 * 60 * 1000, // 15 minutes
+      escalationEnabled: true,
+      strictMode: false
+    });
+
+    // Tavari Pay status checks
+    this.createLimiter('tavari_pay_status_check', {
+      maxAttempts: 20,
+      windowMs: 5 * 60 * 1000, // 5 minutes
+      blockDurationMs: 2 * 60 * 1000, // 2 minutes
+      escalationEnabled: false,
+      strictMode: false
+    });
+
+    // Role management operations
+    this.createLimiter('role_management', {
+      maxAttempts: 30,
+      windowMs: 10 * 60 * 1000, // 10 minutes
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: true,
+      strictMode: true
+    });
+
+    // Holiday hours management
+    this.createLimiter('holiday_hours_update', {
+      maxAttempts: 20,
+      windowMs: 10 * 60 * 1000, // 10 minutes
+      blockDurationMs: 3 * 60 * 1000, // 3 minutes
+      escalationEnabled: false,
+      strictMode: false
     });
   }
 

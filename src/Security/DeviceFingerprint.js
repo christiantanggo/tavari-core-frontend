@@ -179,37 +179,18 @@ class DeviceFingerprint {
         return { error: 'AudioContext not supported' };
       }
 
-      const audioCtx = new AudioContext();
-      const oscillator = audioCtx.createOscillator();
-      const analyser = audioCtx.createAnalyser();
-      const gain = audioCtx.createGain();
-      const scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
-
-      gain.gain.setValueAtTime(0, audioCtx.currentTime);
-      oscillator.connect(analyser);
-      analyser.connect(scriptProcessor);
-      scriptProcessor.connect(gain);
-      gain.connect(audioCtx.destination);
-      oscillator.start(0);
-
-      const audioData = {
-        sampleRate: audioCtx.sampleRate,
-        maxChannelCount: audioCtx.destination.maxChannelCount,
-        numberOfInputs: audioCtx.destination.numberOfInputs,
-        numberOfOutputs: audioCtx.destination.numberOfOutputs,
-        channelCount: audioCtx.destination.channelCount,
-        channelCountMode: audioCtx.destination.channelCountMode,
-        channelInterpretation: audioCtx.destination.channelInterpretation
+      // Check if AudioContext would be suspended before creating it
+      // Browsers require user interaction to create/resume AudioContext
+      // Skip audio fingerprinting entirely to avoid errors
+      // This is called during component mount, before user interaction
+      return { 
+        skipped: true, 
+        reason: 'requires_user_interaction',
+        note: 'Audio fingerprinting disabled to comply with browser autoplay policies'
       };
-
-      // Clean up
-      oscillator.stop();
-      audioCtx.close();
-
-      return audioData;
     } catch (error) {
-      console.warn('Audio fingerprint error:', error);
-      return { error: error.message };
+      // Silently skip - audio fingerprinting is optional and shouldn't break the app
+      return { skipped: true, reason: 'autoplay_policy' };
     }
   }
 
