@@ -1,4 +1,27 @@
 // services/GlobalMusicService.js - COMPLETE VERSION WITH REALTIME SUBSCRIPTIONS
+//
+// ⚠️⚠️⚠️ CRITICAL WARNING ⚠️⚠️⚠️
+// 
+// THIS FILE CONTAINS THE MUSIC SCHEDULE SYSTEM.
+// DO NOT MODIFY THE FOLLOWING FUNCTIONS UNLESS EXPLICITLY REQUESTED:
+//   - checkSchedules()
+//   - isScheduleActive()
+//   - startScheduleMonitoring()
+//   - switchToScheduledPlaylist()
+//
+// These functions are critical for music schedules to work. Any modifications
+// can cause schedules to fail to activate, resulting in music not playing
+// at scheduled times. This has caused significant issues in the past.
+//
+// If you need to modify schedule logic, you MUST:
+//   1. Get explicit approval from the user
+//   2. Test thoroughly with all repeat types (once, daily, weekly, monthly)
+//   3. Test with overnight schedules (e.g., 22:00 to 06:00)
+//   4. Test with timezone edge cases
+//   5. Verify schedules activate at the correct times
+//
+// Last verified working: [Current Date]
+//
 import { supabase } from '../supabaseClient';
 import { playbackTrackingService } from './PlaybackTrackingService';
 
@@ -30,6 +53,7 @@ class GlobalMusicService {
     this.schedules = [];
     this.checkFrequency = 10000; // 10 seconds - check for schedule activation
     this.lastScheduleActivationDate = null; // Track when schedule was last activated
+    this.lastPlaylistSwitchTime = 0; // Track when playlist was last switched to prevent rapid switching
     
     // Track reloading - poll for new tracks periodically
     this.trackReloadInterval = null;
@@ -39,6 +63,13 @@ class GlobalMusicService {
     this.scheduleSubscription = null;
     this.playlistSubscription = null;
     this.trackSubscription = null;
+    this.announcementSubscription = null;
+    this.remoteCommandSubscription = null;
+    
+    // Announcement handling
+    this.announcementAudio = null;
+    this.isPlayingAnnouncement = false;
+    this.musicVolumeBeforeAnnouncement = 0.7;
     
     // Network and offline handling
     this.isOnline = navigator.onLine;
@@ -195,43 +226,6 @@ class GlobalMusicService {
       return;
     }
     
-    // CRITICAL FIX: Detect when tracks are missing and reload them
-    // This prevents the "no tracks to play" issue where tracks get lost
-    if (this.playlist.length === 0 && this.tracks.length === 0 && (this.isKioskMode || this.userInteracted)) {
-      console.warn('⚠️ [Keepalive] Detected missing tracks - attempting to reload...', {
-        businessId: this.businessId,
-        isInitialized: this.isInitialized,
-        isKioskMode: this.isKioskMode,
-        userInteracted: this.userInteracted,
-        timestamp: new Date().toISOString()
-      });
-      
-      try {
-        await this.loadTracks();
-        
-        if (this.tracks.length > 0) {
-          console.log(`✅ [Keepalive] Successfully reloaded ${this.tracks.length} tracks`);
-          // Try to start playback if we have tracks now
-          if (!this.currentTrack && this.playlist.length > 0) {
-            await this.loadFirstTrack();
-            if (this.isKioskMode || this.userInteracted) {
-              await this.attemptAutoPlay();
-            }
-          }
-        } else {
-          console.error('❌ [Keepalive] Track reload returned 0 tracks!', {
-            businessId: this.businessId,
-            timestamp: new Date().toISOString()
-          });
-        }
-      } catch (error) {
-        console.error('❌ [Keepalive] Failed to reload tracks:', error, {
-          businessId: this.businessId,
-          timestamp: new Date().toISOString()
-        });
-      }
-    }
-    
     // If we have a current track and should be playing, make sure it's actually playing
     if (this.currentTrack && this.shouldBePlaying() && !this.isPlaying && this.readyToPlay) {
       try {
@@ -268,17 +262,21 @@ class GlobalMusicService {
 
   async initialize(businessId) {
     if (!businessId) {
+      console.warn('⚠️ [GlobalMusicService] initialize called without businessId');
       return;
     }
 
     if (this.isInitialized && this.businessId === businessId) {
+      console.log('✅ [GlobalMusicService] Already initialized with same business ID:', businessId);
       return;
     }
 
     if (this.isInitialized && this.businessId && this.businessId !== businessId) {
+      console.log('🔄 [GlobalMusicService] Business ID changed, destroying old service:', this.businessId, '->', businessId);
       this.destroy();
     }
 
+    console.log('🎵 [GlobalMusicService] Initializing with business ID:', businessId);
     this.businessId = businessId;
     
     // Check for kiosk mode flag from Electron or window
@@ -287,7 +285,8 @@ class GlobalMusicService {
     }
 
     try {
-      await this.loadTracks();
+      // Load schedules FIRST before loading tracks
+      // This ensures we check for active schedules before defaulting to shuffle
       await this.loadSchedules();
       
       // Initialize playback tracking service with installation context
@@ -297,38 +296,28 @@ class GlobalMusicService {
       
       if (window.electronAPI) {
         try {
-          console.log('🔍 [GlobalMusicService] Detected Electron - looking up installation...');
           const systemInfo = await window.electronAPI.getSystemInfo();
-          console.log('📡 [GlobalMusicService] System info:', systemInfo);
           
           if (systemInfo?.fingerprint) {
-            console.log('🔍 [GlobalMusicService] Looking up installation by fingerprint:', systemInfo.fingerprint, 'for business:', businessId);
-            
             // First try with business_id filter
             let { data, error } = await supabase
               .from('music_installations')
-              .select('id, device_name, business_id, status')
+              .select('id, device_id, device_name, business_id, status')
               .eq('device_fingerprint', systemInfo.fingerprint)
               .eq('business_id', businessId)
               .eq('status', 'active')
               .maybeSingle();
             
-            console.log('📦 [GlobalMusicService] Installation lookup result (with business filter):', { data, error });
-            
             // If not found, try without business_id filter (in case it was registered to a different business)
             if (!data && !error) {
-              console.log('🔍 [GlobalMusicService] Not found with business filter, trying without business filter...');
               const { data: data2, error: error2 } = await supabase
                 .from('music_installations')
-                .select('id, device_name, business_id, status')
+                .select('id, device_id, device_name, business_id, status')
                 .eq('device_fingerprint', systemInfo.fingerprint)
                 .eq('status', 'active')
                 .maybeSingle();
               
-              console.log('📦 [GlobalMusicService] Installation lookup result (without business filter):', { data: data2, error: error2 });
-              
               if (data2) {
-                console.log('⚠️ [GlobalMusicService] Found installation but for different business:', data2.business_id, 'vs current:', businessId);
                 // Still use it if business matches or if we want to allow cross-business
                 if (data2.business_id === businessId) {
                   data = data2;
@@ -336,48 +325,37 @@ class GlobalMusicService {
               }
             }
             
-            if (error) {
-              console.warn('⚠️ [GlobalMusicService] Error looking up installation:', error);
-            } else if (data) {
+            if (!error && data) {
               installationId = data.id;
-              // device_id doesn't exist in music_installations table
-              deviceId = null;
-              console.log('✅ [GlobalMusicService] Found installation:', { 
-                installationId, 
-                deviceName: data.device_name,
-                businessId: data.business_id
-              });
-            } else {
-              console.log('ℹ️ [GlobalMusicService] No installation found for fingerprint:', systemInfo.fingerprint);
-              console.log('💡 [GlobalMusicService] Desktop kiosk may need to be registered via InstallationManager');
+              deviceId = data.device_id;
             }
-          } else {
-            console.log('⚠️ [GlobalMusicService] No fingerprint in system info:', systemInfo);
           }
         } catch (error) {
-          console.warn('⚠️ [GlobalMusicService] Error getting installation info:', error);
+          // Silent error handling
         }
-      } else {
-        // Running in browser - no installation ID
       }
-      
-      // Initializing playback tracking
       
       await playbackTrackingService.initialize(businessId, installationId, deviceId);
       
       // Set up network monitoring FIRST
       this.setupNetworkMonitoring();
       
-      // Cache current data for offline use
-      await this.cacheCurrentState();
-      
       // Set up realtime subscriptions BEFORE starting schedule monitoring
       this.subscribeToScheduleChanges();
       this.subscribeToPlaylistChanges();
       this.subscribeToTrackChanges();
+      this.subscribeToAnnouncements();
+      this.subscribeToRemoteCommands();
       
       // Start aggressive schedule monitoring (realtime + polling hybrid)
-      this.startScheduleMonitoring();
+      // This will check schedules immediately and switch if needed
+      await this.startScheduleMonitoring();
+      
+      // Only load default tracks if no schedule is active
+      // If a schedule activated, it will have already loaded the playlist
+      if (!this.activeSchedule || !this.currentPlaylistId) {
+        await this.loadTracks();
+      }
       
       // Start periodic track reloading to catch new uploads
       this.startTrackReloading();
@@ -400,6 +378,9 @@ class GlobalMusicService {
       if (this.isKioskMode || this.userInteracted) {
         this.startKeepalive();
       }
+      
+      // Cache current data for offline use (after everything is set up)
+      await this.cacheCurrentState();
       
       // Notify listeners of state change
       this.notifyListeners();
@@ -452,7 +433,7 @@ class GlobalMusicService {
           }
 
           const shouldForce = this.activeSchedule === null;
-          this.checkSchedules(shouldForce);
+          await this.checkSchedules(shouldForce);
 
           // Update cache
           await this.cacheCurrentState();
@@ -529,14 +510,11 @@ class GlobalMusicService {
           filter: `business_id=eq.${this.businessId}`
         },
         async (payload) => {
-          console.log('🔄 Track change detected via realtime:', payload.eventType);
-          
           // Always reload tracks when they change (new upload, update, or delete)
           if (this.isShuffleAllMode) {
             const previousTrackCount = this.tracks?.length || 0;
             await this.loadTracks();
             const newTrackCount = this.tracks?.length || 0;
-            console.log(`✅ Tracks reloaded: ${previousTrackCount} → ${newTrackCount}`);
             
             // If we got new tracks and nothing is playing, start playing
             if (newTrackCount > previousTrackCount && !this.currentTrack && this.playlist.length > 0) {
@@ -558,27 +536,328 @@ class GlobalMusicService {
       });
   }
 
-  async loadTracks() {
+  /**
+   * Subscribe to announcement broadcasts for this business
+   * When an announcement is sent, it will pause music, play the announcement, then resume
+   * 
+   * This can be called manually to re-subscribe if needed (e.g., after code update)
+   */
+  subscribeToAnnouncements() {
+    // Unsubscribe from any existing subscription first
+    if (this.announcementSubscription) {
+      supabase.removeChannel(this.announcementSubscription);
+      this.announcementSubscription = null;
+    }
+
     if (!this.businessId) {
-      console.error('❌ Cannot load tracks - businessId is not set!', {
-        businessId: this.businessId,
-        isInitialized: this.isInitialized,
-        timestamp: new Date().toISOString()
-      });
+      console.warn('📢 Cannot subscribe to announcements: no business ID');
       return;
     }
 
-    console.log(`🔄 [loadTracks] Starting track load for business: ${this.businessId}`, {
-      timestamp: new Date().toISOString(),
-      previousTrackCount: this.tracks?.length || 0
+    const channelName = `music-announcements-${this.businessId}`;
+
+    this.announcementSubscription = supabase
+      .channel(channelName)
+      .on(
+        'broadcast',
+        {
+          event: 'announcement'
+        },
+        async (payload) => {
+          console.log('📢 Announcement received:', payload);
+          await this.playAnnouncement(payload.payload);
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('📢 ✅ Subscribed to announcements channel:', channelName);
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('📢 ❌ Failed to subscribe to announcements channel');
+        }
+      });
+  }
+  
+  /**
+   * Manually re-subscribe to announcements (useful after code updates)
+   * Call this from browser console: window.globalMusicService.resubscribeAnnouncements()
+   */
+  resubscribeAnnouncements() {
+    console.log('📢 Manually re-subscribing to announcements...');
+    this.subscribeToAnnouncements();
+  }
+
+  /**
+   * Play an announcement - pauses music, plays announcement, then resumes music
+   */
+  async playAnnouncement(announcementData) {
+    if (!announcementData || this.isPlayingAnnouncement) {
+      return; // Already playing an announcement or invalid data
+    }
+
+    // Store current music state OUTSIDE try block so it's available in finally
+    const wasPlaying = this.isPlaying;
+    
+    try {
+      this.isPlayingAnnouncement = true;
+      
+      this.musicVolumeBeforeAnnouncement = this.volume;
+      
+      // Pause music
+      if (wasPlaying) {
+        this.pause();
+      }
+      
+      // Lower music volume to 20% if it was playing (ducking)
+      if (wasPlaying && this.audio) {
+        this.audio.volume = 0.2;
+      }
+      
+      // Create announcement audio element if it doesn't exist
+      if (!this.announcementAudio) {
+        this.announcementAudio = new Audio();
+        this.announcementAudio.volume = 1.0; // Announcements play at full volume
+      }
+      
+      // Get audio URL from announcement data
+      let audioUrl = null;
+      
+      if (announcementData.audioUrl) {
+        // Direct URL provided
+        audioUrl = announcementData.audioUrl;
+      } else if (announcementData.file_path) {
+        // File path provided - get signed URL
+        const { data, error } = await supabase.storage
+          .from('music-files')
+          .createSignedUrl(announcementData.file_path, 3600);
+        
+        if (error || !data?.signedUrl) {
+          throw new Error('Failed to get announcement audio URL');
+        }
+        
+        audioUrl = data.signedUrl;
+      } else if (announcementData.text) {
+        // Text-to-speech announcement - would need TTS service
+        console.warn('📢 Text-to-speech announcements not yet implemented');
+        this.isPlayingAnnouncement = false;
+        if (wasPlaying) {
+          this.audio.volume = this.musicVolumeBeforeAnnouncement;
+          await this.play();
+        }
+        return;
+      } else {
+        throw new Error('No audio source provided in announcement');
+      }
+      
+      // Load and play announcement
+      this.announcementAudio.src = audioUrl;
+      
+      await new Promise((resolve, reject) => {
+        this.announcementAudio.onended = () => {
+          resolve();
+        };
+        
+        this.announcementAudio.onerror = (error) => {
+          console.error('📢 Error playing announcement:', error);
+          reject(error);
+        };
+        
+        this.announcementAudio.play().catch(reject);
+      });
+      
+      console.log('📢 Announcement finished playing');
+      
+    } catch (error) {
+      console.error('📢 Error in playAnnouncement:', error);
+    } finally {
+      // Restore music state
+      this.isPlayingAnnouncement = false;
+      
+      if (this.audio) {
+        this.audio.volume = this.musicVolumeBeforeAnnouncement;
+      }
+      
+      // Resume music if it was playing
+      if (wasPlaying && this.audio) {
+        await this.play();
+      }
+    }
+  }
+
+  /**
+   * Send an announcement to all kiosks for this business
+   * This is a static helper method that can be called from anywhere
+   */
+  static async sendAnnouncement(businessId, announcementData) {
+    if (!businessId || !announcementData) {
+      throw new Error('Business ID and announcement data are required');
+    }
+
+    const channelName = `music-announcements-${businessId}`;
+    const channel = supabase.channel(channelName);
+    
+    const { error } = await channel.send({
+      type: 'broadcast',
+      event: 'announcement',
+      payload: announcementData
     });
+
+    if (error) {
+      console.error('📢 Error sending announcement:', error);
+      throw error;
+    }
+
+    console.log('📢 Announcement sent to channel:', channelName);
+    return true;
+  }
+
+  /**
+   * Subscribe to remote commands (restart, etc.) for this business
+   * Allows dashboard to remotely control kiosks
+   */
+  subscribeToRemoteCommands() {
+    // Unsubscribe from any existing subscription first
+    if (this.remoteCommandSubscription) {
+      supabase.removeChannel(this.remoteCommandSubscription);
+      this.remoteCommandSubscription = null;
+    }
+
+    if (!this.businessId) {
+      return;
+    }
+
+    const channelName = `music-remote-commands-${this.businessId}`;
+
+    this.remoteCommandSubscription = supabase
+      .channel(channelName)
+      .on(
+        'broadcast',
+        {
+          event: 'command'
+        },
+        async (payload) => {
+          console.log('🎮 Remote command received:', payload);
+          await this.handleRemoteCommand(payload.payload);
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('🎮 ✅ Subscribed to remote commands channel:', channelName);
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('🎮 ❌ Failed to subscribe to remote commands channel');
+        }
+      });
+  }
+
+  /**
+   * Handle remote commands from dashboard
+   */
+  async handleRemoteCommand(commandData) {
+    if (!commandData || !commandData.action) {
+      console.warn('🎮 Invalid remote command received');
+      return;
+    }
+
+    try {
+      switch (commandData.action) {
+        case 'restart':
+          console.log('🔄 Remote restart command received');
+          await this.handleRemoteRestart(commandData);
+          break;
+        case 'resubscribe':
+          console.log('🔄 Remote resubscribe command received');
+          this.subscribeToAnnouncements();
+          this.subscribeToRemoteCommands();
+          break;
+        default:
+          console.warn('🎮 Unknown remote command:', commandData.action);
+      }
+    } catch (error) {
+      console.error('🎮 Error handling remote command:', error);
+    }
+  }
+
+  /**
+   * Handle remote restart command
+   */
+  async handleRemoteRestart(commandData) {
+    // If Electron app, use Electron API to restart
+    if (window.electronAPI && window.electronAPI.restartApp) {
+      console.log('🔄 Restarting Electron app via remote command...');
+      try {
+        await window.electronAPI.restartApp();
+      } catch (error) {
+        console.error('🔄 Error restarting Electron app:', error);
+        // Fallback to page reload
+        setTimeout(() => {
+          window.location.reload();
+        }, 1000);
+      }
+    } else {
+      // Web app - just reload the page
+      console.log('🔄 Reloading page via remote command...');
+      setTimeout(() => {
+        window.location.reload();
+      }, 1000);
+    }
+  }
+
+  /**
+   * Send a remote command to all kiosks for this business
+   * This is a static helper method that can be called from anywhere
+   */
+  static async sendRemoteCommand(businessId, commandData) {
+    if (!businessId || !commandData || !commandData.action) {
+      throw new Error('Business ID and command data with action are required');
+    }
+
+    const channelName = `music-remote-commands-${businessId}`;
+    const channel = supabase.channel(channelName);
+    
+    const { error } = await channel.send({
+      type: 'broadcast',
+      event: 'command',
+      payload: {
+        ...commandData,
+        timestamp: new Date().toISOString(),
+        sentBy: 'dashboard'
+      }
+    });
+
+    if (error) {
+      console.error('🎮 Error sending remote command:', error);
+      throw error;
+    }
+
+    console.log('🎮 Remote command sent to channel:', channelName, commandData);
+    return true;
+  }
+
+  /**
+   * Send a restart command to all kiosks
+   */
+  static async sendRemoteRestart(businessId, reason = 'Remote restart from dashboard') {
+    return this.sendRemoteCommand(businessId, {
+      action: 'restart',
+      reason: reason
+    });
+  }
+
+  async loadTracks() {
+    if (!this.businessId) {
+      return;
+    }
+    
+    // Don't load tracks if we're in a scheduled playlist (not shuffle mode)
+    // This prevents overwriting the scheduled playlist
+    if (this.activeSchedule && !this.isShuffleAllMode && this.currentPlaylistId) {
+      return;
+    }
     
     // Load all tracks without pagination limit
     let allTracks = [];
     let page = 0;
     const pageSize = 1000;
     let hasMore = true;
-    let queryErrors = [];
 
     // Use EXACT same query pattern as MusicLibrary.jsx (which works)
     // Load ALL tracks first, then filter in JavaScript
@@ -596,33 +875,19 @@ class GlobalMusicService {
       const { data, error } = await query;
 
       if (error) {
-        console.error(`❌ [loadTracks] Error loading tracks page ${page}:`, error, {
-          businessId: this.businessId,
+        console.error('❌ [GlobalMusicService] Error loading tracks:', error);
+        console.error('❌ [GlobalMusicService] Business ID:', this.businessId);
+        console.error('❌ [GlobalMusicService] Query details:', {
+          table: 'music_tracks',
+          business_id: this.businessId,
           page,
-          pageSize,
-          timestamp: new Date().toISOString()
+          pageSize
         });
-        queryErrors.push({ page, error });
-        
-        // Don't return immediately - try to continue with other pages
-        // But if it's a critical error (like RLS policy), we should stop
-        if (error.code === 'PGRST301' || error.message?.includes('permission') || error.message?.includes('policy')) {
-          console.error('❌ [loadTracks] Critical permission error - stopping track load');
-          // Keep existing tracks if we have them, don't clear them
-          if (this.tracks.length === 0) {
-            console.warn('⚠️ [loadTracks] No tracks loaded and permission error - tracks may be empty');
-          }
-          return;
-        }
-        
-        // For other errors, continue to next page
-        hasMore = false;
-        break;
+        return;
       }
 
       if (data && data.length > 0) {
         allTracks = allTracks.concat(data);
-        console.log(`📦 [loadTracks] Loaded page ${page}: ${data.length} tracks (total so far: ${allTracks.length})`);
         page++;
         hasMore = data.length === pageSize;
       } else {
@@ -630,22 +895,42 @@ class GlobalMusicService {
       }
     }
     
-    console.log(`📊 [loadTracks] Loaded ${allTracks.length} total tracks from database`, {
-      businessId: this.businessId,
-      pages: page,
-      errors: queryErrors.length,
-      timestamp: new Date().toISOString()
-    });
-    
     // Filter to shuffle tracks (like MusicLibrary does in JavaScript)
-    const shuffleTracks = allTracks.filter(t => t.include_in_shuffle);
-    const nonShuffleTracks = allTracks.filter(t => !t.include_in_shuffle);
-    
-    console.log(`🎲 [loadTracks] Track breakdown: ${shuffleTracks.length} shuffle tracks, ${nonShuffleTracks.length} non-shuffle tracks`);
+    const shuffleTracks = allTracks.filter(t => t.include_in_shuffle !== false);
+    const nonShuffleTracks = allTracks.filter(t => t.include_in_shuffle === false);
     
     // Use shuffle tracks if available, otherwise fall back to ALL tracks
     // This ensures shuffle mode works, but if no shuffle tracks exist, we still show all tracks
+    // IMPORTANT: If include_in_shuffle is null/undefined, treat it as true (include in shuffle)
+    // Only exclude tracks where include_in_shuffle is explicitly false
     this.tracks = shuffleTracks.length > 0 ? shuffleTracks : allTracks;
+    
+    // Log track loading results
+    console.log('🎵 [GlobalMusicService] Track loading complete:', {
+      businessId: this.businessId,
+      totalInDb: allTracks.length,
+      shuffleTracks: shuffleTracks.length,
+      nonShuffleTracks: nonShuffleTracks.length,
+      loadedTracks: this.tracks.length
+    });
+    
+    // Log track filtering for debugging
+    if (allTracks.length > 0 && this.tracks.length === 0) {
+      console.warn('⚠️ All tracks filtered out!', {
+        totalTracks: allTracks.length,
+        shuffleTracks: shuffleTracks.length,
+        nonShuffleTracks: nonShuffleTracks.length,
+        sampleTrack: allTracks[0] ? {
+          id: allTracks[0].id,
+          title: allTracks[0].title,
+          include_in_shuffle: allTracks[0].include_in_shuffle
+        } : null
+      });
+    }
+    
+    if (allTracks.length === 0) {
+      console.warn('⚠️ [GlobalMusicService] No tracks found in database for business:', this.businessId);
+    }
 
     // Use filtered tracks for playlist
     this.playlist = this.tracks;
@@ -659,16 +944,6 @@ class GlobalMusicService {
     
     if (this.tracks.length > 0) {
       this.shufflePlaylist();
-      console.log(`✅ [loadTracks] Successfully loaded ${this.tracks.length} tracks for playback`);
-    } else {
-      console.warn('⚠️ [loadTracks] No tracks available for playback!', {
-        businessId: this.businessId,
-        allTracksCount: allTracks.length,
-        shuffleTracksCount: shuffleTracks.length,
-        nonShuffleTracksCount: nonShuffleTracks.length,
-        queryErrors: queryErrors.length,
-        timestamp: new Date().toISOString()
-      });
     }
     this.notifyListeners();
   }
@@ -714,8 +989,12 @@ class GlobalMusicService {
    * - Aggressive polling (30 seconds - backup when realtime fails)
    * - Frequent activation checks (10 seconds)
    * - Offline cache support
+   * 
+   * ⚠️ CRITICAL: DO NOT MODIFY THIS FUNCTION UNLESS EXPLICITLY REQUESTED
+   * This function sets up the schedule checking intervals. Any changes can break
+   * schedule activation and cause music to not play at scheduled times.
    */
-  startScheduleMonitoring() {
+  async startScheduleMonitoring() {
     if (this.scheduleInterval) {
       clearInterval(this.scheduleInterval);
     }
@@ -730,26 +1009,26 @@ class GlobalMusicService {
         if (this.isOnline) {
           await this.loadSchedules();
           await this.cacheCurrentState(); // Update cache
-          this.checkSchedules();
+          await this.checkSchedules();
           this.syncRetryCount = 0; // Reset on success
         } else {
           // Offline - use cached schedules
           await this.loadCachedSchedules();
-          this.checkSchedules();
+          await this.checkSchedules();
         }
       } catch (error) {
         await this.loadCachedSchedules();
-        this.checkSchedules();
+        await this.checkSchedules();
       }
     }, 30 * 1000); // 30 seconds - MUCH more aggressive
 
     // Check schedules for activation every 10 seconds (unchanged)
-    this.scheduleInterval = setInterval(() => {
-      this.checkSchedules();
+    this.scheduleInterval = setInterval(async () => {
+      await this.checkSchedules();
     }, this.checkFrequency);
 
     // Check immediately on start
-    this.checkSchedules();
+    await this.checkSchedules();
     
     // Reload schedules on date change (midnight check)
     this.setupDailyScheduleReload();
@@ -768,13 +1047,11 @@ class GlobalMusicService {
     this.trackReloadInterval = setInterval(async () => {
       try {
         if (this.isOnline && this.businessId) {
-          console.log('🔄 Periodic track reload - checking for new tracks...');
           const previousTrackCount = this.tracks?.length || 0;
           await this.loadTracks();
           const newTrackCount = this.tracks?.length || 0;
           
           if (newTrackCount > previousTrackCount) {
-            console.log(`✅ Found ${newTrackCount - previousTrackCount} new tracks! Reloaded playlist.`);
             // If we have a current track, keep playing - new tracks will be in the shuffle
             // If playlist is empty, load first track
             if (this.playlist.length > 0 && !this.currentTrack) {
@@ -784,10 +1061,8 @@ class GlobalMusicService {
               }
             }
           } else if (newTrackCount < previousTrackCount) {
-            console.log(`⚠️ Track count decreased from ${previousTrackCount} to ${newTrackCount}`);
             // If current track was deleted, load next
             if (this.currentTrack && !this.playlist.find(t => t.id === this.currentTrack.id)) {
-              console.log('🎵 Current track was deleted, loading next...');
               await this.next();
             }
           }
@@ -796,11 +1071,9 @@ class GlobalMusicService {
           await this.cacheCurrentState();
         }
       } catch (error) {
-        console.warn('⚠️ Error during periodic track reload:', error);
+        // Silent error handling
       }
     }, this.trackReloadFrequency);
-    
-    // Track reloading started
   }
   
   /**
@@ -813,7 +1086,6 @@ class GlobalMusicService {
       if (!savedState) return;
       
       const state = JSON.parse(savedState);
-      console.log('🔄 Attempting to resume playback after reload...', state);
       
       // Wait a bit for tracks to load
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -835,7 +1107,6 @@ class GlobalMusicService {
             if (this.isKioskMode || this.userInteracted) {
               await this.attemptAutoPlay();
             }
-            console.log('✅ Resumed playback after reload');
           }
         }
       }
@@ -843,7 +1114,6 @@ class GlobalMusicService {
       // Clear saved state
       localStorage.removeItem('_reload_resume_track');
     } catch (error) {
-      console.warn('⚠️ Could not resume playback after reload:', error);
       localStorage.removeItem('_reload_resume_track');
     }
   }
@@ -856,9 +1126,9 @@ class GlobalMusicService {
     window.addEventListener('online', () => {
       this.isOnline = true;
       this.syncRetryCount = 0;
-      this.loadSchedules().then(() => {
-        this.cacheCurrentState();
-        this.checkSchedules();
+      this.loadSchedules().then(async () => {
+        await this.cacheCurrentState();
+        await this.checkSchedules();
       });
     });
     
@@ -874,9 +1144,9 @@ class GlobalMusicService {
       
       if (!wasOnline && this.isOnline) {
         // Just came back online - sync immediately
-        this.loadSchedules().then(() => {
-          this.cacheCurrentState();
-          this.checkSchedules();
+        this.loadSchedules().then(async () => {
+          await this.cacheCurrentState();
+          await this.checkSchedules();
         });
       }
     }, 5000); // Check every 5 seconds
@@ -937,13 +1207,13 @@ class GlobalMusicService {
     midnight.setHours(24, 0, 0, 0); // Next midnight
     const msUntilMidnight = midnight.getTime() - now.getTime();
     
-    this.midnightReloadTimeout = setTimeout(() => {
+    this.midnightReloadTimeout = setTimeout(async () => {
       // Reload schedules at midnight
-      this.loadSchedules();
+      await this.loadSchedules();
       // Reset activation date so recurring schedules can activate again
       this.lastScheduleActivationDate = null;
       // Check schedules immediately
-      this.checkSchedules();
+      await this.checkSchedules();
       
       // Schedule next midnight reload
       this.setupDailyScheduleReload();
@@ -953,128 +1223,288 @@ class GlobalMusicService {
   /**
    * BULLETPROOF schedule checking - runs every 10 seconds
    * Handles offline mode and ensures immediate activation
+   * 
+   * ⚠️ CRITICAL: DO NOT MODIFY THIS FUNCTION UNLESS EXPLICITLY REQUESTED
+   * This function is the core of the music schedule system. Any changes can break
+   * schedule activation and cause music to not play at scheduled times.
    */
-  checkSchedules(force = false) {
-    // Ensure we have schedules (load from cache if needed)
-    if (!this.schedules || this.schedules.length === 0) {
-      if (!this.isOnline) {
-        this.loadCachedSchedules();
+  async checkSchedules(force = false) {
+    try {
+      // Ensure we have schedules (load from cache if needed, or reload if online)
+      if (!this.schedules || this.schedules.length === 0) {
+        if (this.isOnline) {
+          // Try to reload schedules if online
+          await this.loadSchedules();
+          // If still no schedules, return early
+          if (!this.schedules || this.schedules.length === 0) {
+            return;
+          }
+        } else {
+          // Offline - try cache
+          await this.loadCachedSchedules();
+          if (!this.schedules || this.schedules.length === 0) {
+            return;
+          }
+        }
       }
-      return;
-    }
-    
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const currentDate = `${year}-${month}-${day}`;
-    const currentTime = now.getHours() * 60 + now.getMinutes();
-    const currentDay = now.getDay();
+      
+      // Get current time/date info - use local time consistently
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+      const currentDate = `${year}-${month}-${day}`;
+      const currentTime = now.getHours() * 60 + now.getMinutes();
+      const currentDay = now.getDay();
 
-    const activeSchedules = (this.schedules || []).filter(schedule => {
-      return this.isScheduleActive(schedule, currentTime, currentDate, currentDay);
-    });
-
-    // Debug logging for schedule checking
-    if (this.schedules.length > 0) {
-      // Schedule check
-    }
-
-    if (activeSchedules.length === 0) {
-      if (this.activeSchedule) {
-        // Schedule has ended - clear it so it can activate again tomorrow
-        console.log('📅 Active schedule ended, switching to shuffle');
-        this.activeSchedule = null;
-        this.lastScheduleActivationDate = null;
-        this.switchToShuffle();
-        this.cacheCurrentState();
-      }
-      return;
-    }
-
-    const bestSchedule = activeSchedules
-      .slice()
-      .sort((a, b) => {
-        const pa = a.priority ?? 1;
-        const pb = b.priority ?? 1;
-        if (pb !== pa) return pb - pa;
-        const aCreated = a.created_at ? new Date(a.created_at).getTime() : 0;
-        const bCreated = b.created_at ? new Date(b.created_at).getTime() : 0;
-        return bCreated - aCreated;
-      })[0];
-
-    // Check if we need to activate the schedule
-    // For recurring schedules, activate if:
-    // 1. No active schedule currently
-    // 2. Different schedule (ID or playlist)
-    // 3. Same schedule but different day (for recurring daily schedules)
-    const shouldActivate = force ||
-      !this.activeSchedule ||
-      this.activeSchedule.playlist_id !== bestSchedule.playlist_id ||
-      this.activeSchedule.id !== bestSchedule.id ||
-      (this.activeSchedule.id === bestSchedule.id && 
-       this.lastScheduleActivationDate !== currentDate);
-
-    if (shouldActivate) {
-      console.log(`📅 Activating schedule: ${bestSchedule.playlist?.name || bestSchedule.playlist_id} (Priority: ${bestSchedule.priority || 1})`);
-      this.activeSchedule = bestSchedule;
-      this.lastScheduleActivationDate = currentDate; // Track when it was activated
-      this.switchToScheduledPlaylist(bestSchedule.playlist_id, bestSchedule).then(() => {
-        this.cacheCurrentState();
+      // Filter to find active schedules
+      const activeSchedules = (this.schedules || []).filter(schedule => {
+        try {
+          return this.isScheduleActive(schedule, currentTime, currentDate, currentDay);
+        } catch (error) {
+          console.error(`📅 Error checking schedule ${schedule.id}:`, error);
+          return false;
+        }
       });
+
+      // If no active schedules, clear current schedule and switch to shuffle
+      if (activeSchedules.length === 0) {
+        if (this.activeSchedule) {
+          // Schedule has ended - clear it so it can activate again tomorrow
+          this.activeSchedule = null;
+          this.lastScheduleActivationDate = null;
+          await this.switchToShuffle();
+          await this.cacheCurrentState();
+        }
+        return;
+      }
+
+      // Select best schedule by priority (higher priority wins, then most recent)
+      const bestSchedule = activeSchedules
+        .slice()
+        .sort((a, b) => {
+          const pa = a.priority ?? 1;
+          const pb = b.priority ?? 1;
+          if (pb !== pa) return pb - pa;
+          const aCreated = a.created_at ? new Date(a.created_at).getTime() : 0;
+          const bCreated = b.created_at ? new Date(b.created_at).getTime() : 0;
+          return bCreated - aCreated;
+        })[0];
+
+      // Check if we need to activate the schedule
+      // For recurring schedules, activate if:
+      // 1. No active schedule currently
+      // 2. Different schedule (ID or playlist)
+      // 3. Same schedule but different day (for recurring daily schedules)
+      // 4. **CRITICAL**: Current playlist doesn't match the active schedule's playlist (playlist was switched manually or lost)
+      const hasNoActiveSchedule = !this.activeSchedule;
+      const differentPlaylist = this.activeSchedule && this.activeSchedule.playlist_id !== bestSchedule.playlist_id;
+      const differentScheduleId = this.activeSchedule && this.activeSchedule.id !== bestSchedule.id;
+      const sameScheduleDifferentDay = this.activeSchedule && 
+        this.activeSchedule.id === bestSchedule.id && 
+        this.lastScheduleActivationDate !== currentDate;
+      
+      // CRITICAL FIX: Check if current playlist matches the active schedule
+      // If activeSchedule exists but currentPlaylistId doesn't match, we need to switch!
+      const playlistMismatch = this.activeSchedule && 
+        this.activeSchedule.id === bestSchedule.id &&
+        this.currentPlaylistId !== bestSchedule.playlist_id &&
+        !this.isShuffleAllMode; // Only check if we're not in shuffle mode
+
+      const shouldActivate = force ||
+        hasNoActiveSchedule ||
+        differentPlaylist ||
+        differentScheduleId ||
+        sameScheduleDifferentDay ||
+        playlistMismatch;
+
+      if (shouldActivate) {
+        console.log(`📅 ✅ ACTIVATING schedule: ${bestSchedule.playlist?.name || bestSchedule.playlist_id} (Priority: ${bestSchedule.priority || 1})`);
+        console.log(`📅 Schedule details:`, {
+          id: bestSchedule.id,
+          playlist_id: bestSchedule.playlist_id,
+          start_time: bestSchedule.start_time,
+          end_time: bestSchedule.end_time,
+          schedule_date: bestSchedule.schedule_date,
+          repeat_type: bestSchedule.repeat_type,
+          day_of_week: bestSchedule.day_of_week
+        });
+        this.activeSchedule = bestSchedule;
+        this.lastScheduleActivationDate = currentDate; // Track when it was activated
+        try {
+          await this.switchToScheduledPlaylist(bestSchedule.playlist_id, bestSchedule);
+          console.log(`📅 ✅ Successfully switched to scheduled playlist: ${bestSchedule.playlist?.name || bestSchedule.playlist_id}`);
+          await this.cacheCurrentState();
+        } catch (error) {
+          console.error(`📅 ❌ ERROR switching to scheduled playlist:`, error);
+          // Don't throw - allow retry on next check
+        }
+      } else {
+        // Schedule is already active - only verify playback, don't switch unless absolutely necessary
+        if (this.activeSchedule && 
+            this.currentPlaylistId === this.activeSchedule.playlist_id &&
+            !this.isShuffleAllMode) {
+          // Playlist matches - just ensure playback is happening
+          const hasTracks = this.playlist && this.playlist.length > 0;
+          const isActuallyPlaying = this.isPlaying && this.audio && !this.audio.paused;
+          const hasCurrentTrack = this.currentTrack !== null;
+          
+          // Only reload if we have no tracks or no current track
+          if (!hasTracks || !hasCurrentTrack) {
+            try {
+              await this.switchToScheduledPlaylist(this.activeSchedule.playlist_id, this.activeSchedule);
+              await this.cacheCurrentState();
+            } catch (error) {
+              console.error(`📅 ❌ ERROR reloading playlist:`, error);
+            }
+          } else if (!isActuallyPlaying && (this.userInteracted || this.isKioskMode)) {
+            // Just ensure playback - don't reload the playlist
+            try {
+              await this.ensurePlayback();
+            } catch (error) {
+              console.error(`📅 ❌ ERROR starting playback:`, error);
+            }
+          }
+        } else if (this.activeSchedule && 
+                   this.currentPlaylistId !== this.activeSchedule.playlist_id && 
+                   !this.isShuffleAllMode) {
+          // Playlist mismatch - but only switch if we're not in the middle of switching
+          // Add a small delay to prevent rapid switching
+          const lastSwitchTime = this.lastPlaylistSwitchTime || 0;
+          const timeSinceLastSwitch = Date.now() - lastSwitchTime;
+          
+          if (timeSinceLastSwitch > 5000) { // Only switch if it's been at least 5 seconds since last switch
+            console.log(`📅 ⚠️ Schedule marked active but playlist mismatch! Current: ${this.currentPlaylistId}, Expected: ${this.activeSchedule.playlist_id}`);
+            console.log(`📅 🔄 Forcing playlist switch to match active schedule...`);
+            try {
+              this.lastPlaylistSwitchTime = Date.now();
+              await this.switchToScheduledPlaylist(this.activeSchedule.playlist_id, this.activeSchedule);
+              console.log(`📅 ✅ Successfully corrected playlist to match active schedule`);
+              await this.cacheCurrentState();
+            } catch (error) {
+              console.error(`📅 ❌ ERROR correcting playlist:`, error);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`📅 ❌ CRITICAL ERROR in checkSchedules:`, error);
+      // Don't throw - allow retry on next interval
     }
   }
 
+  /**
+   * Check if a schedule is currently active based on time, date, and day constraints
+   * 
+   * ⚠️ CRITICAL: DO NOT MODIFY THIS FUNCTION UNLESS EXPLICITLY REQUESTED
+   * This function determines when schedules activate. Any changes can break
+   * schedule activation and cause music to not play at scheduled times.
+   * 
+   * @param {Object} schedule - The schedule object from database
+   * @param {number} currentTime - Current time in minutes since midnight (0-1439)
+   * @param {string} currentDate - Current date in YYYY-MM-DD format
+   * @param {number} currentDay - Current day of week (0=Sunday, 6=Saturday)
+   * @returns {boolean} - True if schedule should be active now
+   */
   isScheduleActive(schedule, currentTime, currentDate, currentDay) {
-    const startTime = this.timeToMinutes(schedule.start_time);
-    const endTime = this.timeToMinutes(schedule.end_time);
+    try {
+      // First check if time matches
+      const startTime = this.timeToMinutes(schedule.start_time);
+      const endTime = this.timeToMinutes(schedule.end_time);
 
-    let timeMatch = false;
-    if (startTime === endTime) {
-      timeMatch = Math.abs(currentTime - startTime) <= 1;
-    } else if (startTime < endTime) {
-      timeMatch = currentTime >= startTime && currentTime < endTime;
-    } else {
-      timeMatch = currentTime >= startTime || currentTime < endTime;
-    }
+      let timeMatch = false;
+      if (startTime === endTime) {
+        // Same start/end time means it's a single moment - allow 1 minute tolerance
+        timeMatch = Math.abs(currentTime - startTime) <= 1;
+      } else if (startTime < endTime) {
+        // Normal case: start < end (e.g., 09:00 to 17:00)
+        timeMatch = currentTime >= startTime && currentTime < endTime;
+      } else {
+        // Overnight case: start > end (e.g., 22:00 to 06:00)
+        timeMatch = currentTime >= startTime || currentTime < endTime;
+      }
 
-    if (!timeMatch) {
-      return false;
-    }
+      if (!timeMatch) {
+        return false;
+      }
 
-    if (schedule.schedule_date) {
-      const scheduleDate = new Date(schedule.schedule_date + 'T00:00:00');
-      const checkDate = new Date(currentDate + 'T00:00:00');
-    
-      if (schedule.repeat_until) {
-        const repeatUntilDate = new Date(schedule.repeat_until + 'T00:00:00');
-        if (checkDate > repeatUntilDate) {
-          return false;
+      // If schedule has schedule_date, use date-based logic
+      if (schedule.schedule_date) {
+        // Parse dates using local timezone to avoid timezone issues
+        // Use YYYY-MM-DD format directly for comparison to avoid timezone conversion
+        const scheduleDateStr = schedule.schedule_date;
+        const scheduleDateParts = scheduleDateStr.split('-');
+        const currentDateParts = currentDate.split('-');
+        
+        // Compare dates as integers (YYYYMMDD) to avoid timezone issues
+        const scheduleDateInt = parseInt(scheduleDateParts[0] + scheduleDateParts[1] + scheduleDateParts[2]);
+        const currentDateInt = parseInt(currentDateParts[0] + currentDateParts[1] + currentDateParts[2]);
+        
+        // Check if repeat_until date has passed
+        if (schedule.repeat_until) {
+          const repeatUntilParts = schedule.repeat_until.split('-');
+          const repeatUntilInt = parseInt(repeatUntilParts[0] + repeatUntilParts[1] + repeatUntilParts[2]);
+          if (currentDateInt > repeatUntilInt) {
+            return false;
+          }
         }
+
+        // Check repeat_type
+        if (schedule.repeat_type === 'once') {
+          // One-time schedule: must match exact date
+          return scheduleDateStr === currentDate;
+        } 
+      
+        if (schedule.repeat_type === 'daily') {
+          // Daily: current date must be >= schedule start date
+          return currentDateInt >= scheduleDateInt;
+        } 
+      
+        if (schedule.repeat_type === 'weekly') {
+          // Weekly: current date must be >= schedule start date AND
+          // current day of week must match the day of week from schedule_date
+          if (currentDateInt < scheduleDateInt) {
+            return false; // Not started yet
+          }
+          
+          // Get day of week from the original schedule_date
+          // Use the date string to create a date object and get its day of week
+          const scheduleDateObj = new Date(scheduleDateStr + 'T12:00:00'); // Use noon to avoid timezone edge cases
+          const scheduleDayOfWeek = scheduleDateObj.getDay();
+          
+          // Check if current day matches the schedule's day of week
+          return currentDay === scheduleDayOfWeek;
+        }
+      
+        if (schedule.repeat_type === 'monthly') {
+          // Monthly: current date must be >= schedule start date AND
+          // day of month must match (e.g., 15th of every month)
+          if (currentDateInt < scheduleDateInt) {
+            return false; // Not started yet
+          }
+          
+          // Get day of month from schedule_date
+          const scheduleDayOfMonth = parseInt(scheduleDateParts[2]);
+          const currentDayOfMonth = parseInt(currentDateParts[2]);
+          
+          return currentDayOfMonth === scheduleDayOfMonth;
+        }
+        
+        // If schedule_date exists but no repeat_type matches, return false
+        return false;
       }
 
-      if (schedule.repeat_type === 'once') {
-        return schedule.schedule_date === currentDate;
-      } 
-    
-      if (schedule.repeat_type === 'daily') {
-        return checkDate >= scheduleDate;
-      } 
-    
-      if (schedule.repeat_type === 'weekly') {
-        return checkDate >= scheduleDate && currentDay === scheduleDate.getDay();
+      // If no schedule_date, check day_of_week (legacy format)
+      if (schedule.day_of_week !== null && schedule.day_of_week !== undefined) {
+        return currentDay === schedule.day_of_week;
       }
-    
-      if (schedule.repeat_type === 'monthly') {
-        return checkDate >= scheduleDate && checkDate.getDate() === scheduleDate.getDate();
-      }
+
+      // If no date or day constraints, schedule is always active (time already matched)
+      return true;
+    } catch (error) {
+      console.error(`📅 Error in isScheduleActive for schedule ${schedule.id}:`, error);
+      return false; // Fail safe: don't activate if there's an error
     }
-
-    if (schedule.day_of_week !== null && schedule.day_of_week !== undefined) {
-      return currentDay === schedule.day_of_week;
-    }
-
-    return true;
   }
 
   timeToMinutes(timeString) {
@@ -1082,7 +1512,15 @@ class GlobalMusicService {
     return hours * 60 + minutes;
   }
 
+  /**
+   * Switch to a scheduled playlist
+   * 
+   * ⚠️ CRITICAL: DO NOT MODIFY THIS FUNCTION UNLESS EXPLICITLY REQUESTED
+   * This function handles switching to scheduled playlists. Any changes can break
+   * schedule activation and cause music to not play at scheduled times.
+   */
   async switchToScheduledPlaylist(playlistId, schedule = null) {
+    console.log(`🔄 [switchToScheduledPlaylist] Starting switch to playlist: ${playlistId}`, { schedule });
     try {
       const { data: playlist, error: playlistError } = await supabase
         .from('music_playlists')
@@ -1090,47 +1528,33 @@ class GlobalMusicService {
         .eq('id', playlistId)
         .single();
 
-      if (playlistError) throw playlistError;
+      if (playlistError) {
+        console.error(`❌ [switchToScheduledPlaylist] Error loading playlist:`, playlistError);
+        throw playlistError;
+      }
+      
+      console.log(`✅ [switchToScheduledPlaylist] Loaded playlist: ${playlist.name} (type: ${playlist.playlist_type})`);
 
       let tracks = [];
       
+      // For both shuffle and ordered playlists, load tracks from the playlist_tracks junction table
+      // The playlist_type only determines playback order, not which tracks to include
+      const { data: playlistTracksData, error: playlistTracksError } = await supabase
+        .from('music_playlist_tracks')
+        .select('music_tracks(*)')
+        .eq('playlist_id', playlistId)
+        .order('sort_order');
+
+      if (playlistTracksError) {
+        console.error(`❌ [switchToScheduledPlaylist] Error loading playlist tracks:`, playlistTracksError);
+        throw playlistTracksError;
+      }
+      
+      tracks = playlistTracksData?.map(pt => pt.music_tracks).filter(t => t !== null) || [];
+      
+      // If playlist type is shuffle, randomize the order
       if (playlist.playlist_type === 'shuffle') {
-        // Load all tracks without pagination limit
-        let allTracks = [];
-        let page = 0;
-        const pageSize = 1000;
-        let hasMore = true;
-
-        while (hasMore) {
-          const { data, error } = await supabase
-            .from('music_tracks')
-            .select('*')
-            .eq('business_id', this.businessId)
-            .eq('include_in_shuffle', true)
-            .range(page * pageSize, (page + 1) * pageSize - 1);
-
-          if (error) throw error;
-
-          if (data && data.length > 0) {
-            allTracks = allTracks.concat(data);
-            page++;
-            hasMore = data.length === pageSize;
-          } else {
-            hasMore = false;
-          }
-        }
-
-        tracks = allTracks;
         this.shuffleArray(tracks);
-      } else {
-        const { data, error } = await supabase
-          .from('music_playlist_tracks')
-          .select('music_tracks(*)')
-          .eq('playlist_id', playlistId)
-          .order('sort_order');
-
-        if (error) throw error;
-        tracks = data?.map(pt => pt.music_tracks) || [];
       }
 
       this.playlist = tracks;
@@ -1146,11 +1570,30 @@ class GlobalMusicService {
         this.stopWhenComplete = false;
       }
 
+      console.log(`📦 [switchToScheduledPlaylist] Loaded ${tracks.length} tracks for playlist: ${playlist.name}`);
+
       if (tracks.length > 0) {
         await this.loadTrack(tracks[0]);
-        if (this.userInteracted) {
-          this.play();
+        console.log(`🎵 [switchToScheduledPlaylist] Loaded first track: ${tracks[0].title}`);
+        
+        // For scheduled playlists, always try to play (enable kiosk mode if needed)
+        if (!this.isKioskMode && !this.userInteracted) {
+          this.enableKioskMode();
         }
+        
+        if (this.userInteracted || this.isKioskMode) {
+          await this.play();
+          console.log(`▶️ [switchToScheduledPlaylist] Started playback`);
+          
+          // Ensure playback continues (handles autoplay blocking)
+          setTimeout(() => {
+            this.ensurePlayback();
+          }, 500);
+        } else {
+          console.log(`⏸️ [switchToScheduledPlaylist] Waiting for user interaction before playing`);
+        }
+      } else {
+        console.warn(`⚠️ [switchToScheduledPlaylist] Playlist ${playlist.name} has no tracks!`);
       }
 	  
       this.currentPlaylistId = playlistId;
@@ -1161,7 +1604,9 @@ class GlobalMusicService {
       };
       this.isShuffleAllMode = false;
       this.shuffleMode = playlist.playlist_type === 'shuffle';
+      this.lastPlaylistSwitchTime = Date.now(); // Track when we switched to prevent rapid re-switching
 
+      console.log(`✅ [switchToScheduledPlaylist] Playlist switch complete: ${playlist.name} (${tracks.length} tracks)`);
       this.notifyListeners();
     } catch (error) {
       // Silent error handling
@@ -1211,35 +1656,6 @@ class GlobalMusicService {
   }
 
   async loadFirstTrack() {
-    // CRITICAL FIX: If playlist is empty, try to reload tracks first
-    if (this.playlist.length === 0) {
-      console.warn('⚠️ [loadFirstTrack] Playlist is empty - attempting to reload tracks...', {
-        businessId: this.businessId,
-        tracksLength: this.tracks?.length || 0,
-        timestamp: new Date().toISOString()
-      });
-      
-      try {
-        await this.loadTracks();
-        
-        if (this.playlist.length === 0) {
-          console.error('❌ [loadFirstTrack] Still no tracks after reload - cannot load first track', {
-            businessId: this.businessId,
-            timestamp: new Date().toISOString()
-          });
-          return;
-        }
-        
-        console.log(`✅ [loadFirstTrack] Reloaded ${this.playlist.length} tracks - loading first track`);
-      } catch (error) {
-        console.error('❌ [loadFirstTrack] Failed to reload tracks:', error, {
-          businessId: this.businessId,
-          timestamp: new Date().toISOString()
-        });
-        return;
-      }
-    }
-    
     if (this.playlist.length > 0) {
       this.currentIndex = Math.floor(Math.random() * this.playlist.length);
       await this.loadTrack(this.playlist[this.currentIndex]);
@@ -1277,7 +1693,6 @@ class GlobalMusicService {
       this.currentPlayLogId = logId;
     } catch (error) {
       // Silent error handling - don't break playback if tracking fails
-      console.warn('Failed to log song start:', error);
     }
   }
 
@@ -1330,34 +1745,7 @@ class GlobalMusicService {
   }
 
   async next() {
-    // CRITICAL FIX: If playlist is empty, try to reload tracks before giving up
-    if (this.playlist.length === 0) {
-      console.warn('⚠️ [next] Playlist is empty - attempting to reload tracks...', {
-        businessId: this.businessId,
-        tracksLength: this.tracks?.length || 0,
-        timestamp: new Date().toISOString()
-      });
-      
-      try {
-        await this.loadTracks();
-        
-        if (this.playlist.length === 0) {
-          console.error('❌ [next] Still no tracks after reload - cannot play next track', {
-            businessId: this.businessId,
-            timestamp: new Date().toISOString()
-          });
-          return;
-        }
-        
-        console.log(`✅ [next] Reloaded ${this.playlist.length} tracks - continuing playback`);
-      } catch (error) {
-        console.error('❌ [next] Failed to reload tracks:', error, {
-          businessId: this.businessId,
-          timestamp: new Date().toISOString()
-        });
-        return;
-      }
-    }
+    if (this.playlist.length === 0) return;
     
     // Log current song as skipped/completed before moving to next
     if (this.currentPlayLogId && this.currentTrack) {
@@ -1506,6 +1894,23 @@ class GlobalMusicService {
       this.trackSubscription = null;
     }
     
+    if (this.announcementSubscription) {
+      supabase.removeChannel(this.announcementSubscription);
+      this.announcementSubscription = null;
+    }
+    
+    if (this.remoteCommandSubscription) {
+      supabase.removeChannel(this.remoteCommandSubscription);
+      this.remoteCommandSubscription = null;
+    }
+    
+    // Clean up announcement audio
+    if (this.announcementAudio) {
+      this.announcementAudio.pause();
+      this.announcementAudio.src = '';
+      this.announcementAudio = null;
+    }
+    
     // Clear network monitoring
     if (this.networkCheckInterval) {
       clearInterval(this.networkCheckInterval);
@@ -1548,7 +1953,6 @@ class GlobalMusicService {
    */
   async diagnosticCheck() {
     if (!this.businessId) {
-      console.error('❌ Cannot run diagnostic - no business ID');
       return null;
     }
 
@@ -1561,7 +1965,6 @@ class GlobalMusicService {
         .order('uploaded_at', { ascending: false });
 
       if (dbError) {
-        console.error('❌ Database query error:', dbError);
         return null;
       }
 
@@ -1589,7 +1992,6 @@ class GlobalMusicService {
         }))
       };
     } catch (error) {
-      console.error('❌ Diagnostic check failed:', error);
       return null;
     }
   }
@@ -1600,52 +2002,20 @@ class GlobalMusicService {
    */
   async reloadTracks() {
     if (!this.businessId) {
-      console.error('❌ Cannot reload tracks - no business ID set!');
-      console.error('Current state:', {
-        businessId: this.businessId,
-        isInitialized: this.isInitialized,
-        localStorage_businessId: localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId')
-      });
-      
       // Try to get businessId from localStorage as fallback
       const storedBusinessId = localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
       if (storedBusinessId) {
-        console.log('🔄 Attempting to use businessId from localStorage:', storedBusinessId);
         this.businessId = storedBusinessId;
       } else {
-        console.error('❌ No businessId available anywhere - cannot reload tracks');
         return { error: 'No businessId available', previousCount: 0, newCount: 0 };
       }
     }
-    
-    console.log('🔄 Manual track reload requested for business:', this.businessId);
-    console.log('📋 Business ID sources:', {
-      serviceBusinessId: this.businessId,
-      localStorage_selected: localStorage.getItem('selectedBusinessId'),
-      localStorage_current: localStorage.getItem('currentBusinessId')
-    });
     
     const previousTrackCount = this.tracks?.length || 0;
     const previousTrackIds = new Set((this.tracks || []).map(t => t.id));
     
     // Run diagnostic BEFORE reload to see what's in DB
-    console.log('🔍 Running diagnostic check...');
     const diagnostic = await this.diagnosticCheck();
-    if (diagnostic) {
-      console.log('📊 Database Diagnostic:', {
-        'Total tracks in DB': diagnostic.totalInDb,
-        'Shuffle tracks in DB': diagnostic.shuffleInDb,
-        'Non-shuffle tracks in DB': diagnostic.nonShuffleInDb,
-        'Currently loaded tracks': diagnostic.loadedTracks,
-        'Business ID': diagnostic.businessId,
-        'Sample tracks': diagnostic.sampleTracks
-      });
-      
-      if (diagnostic.totalInDb > diagnostic.loadedTracks) {
-        console.warn(`⚠️ MISMATCH: Database has ${diagnostic.totalInDb} tracks but only ${diagnostic.loadedTracks} are loaded!`);
-        console.warn(`   This suggests tracks are being filtered out or businessId mismatch`);
-      }
-    }
     
     await this.loadTracks();
     
@@ -1659,19 +2029,7 @@ class GlobalMusicService {
     // Run diagnostic AFTER reload to compare
     const diagnosticAfter = await this.diagnosticCheck();
     
-    console.log('📊 Reload summary:', {
-      previousCount: previousTrackCount,
-      newCount: newTrackCount,
-      added: addedTracks.length,
-      removed: removedTracks.length,
-      businessId: this.businessId,
-      'DB total tracks': diagnosticAfter?.totalInDb,
-      'DB shuffle tracks': diagnosticAfter?.shuffleInDb,
-      'Loaded tracks': diagnosticAfter?.loadedTracks
-    });
-    
     if (newTrackCount > previousTrackCount) {
-      console.log(`✅ Found ${newTrackCount - previousTrackCount} new tracks! (${addedTracks.length} by ID comparison)`);
       // If playlist is empty, load first track
       if (this.playlist.length > 0 && !this.currentTrack) {
         await this.loadFirstTrack();
@@ -1679,21 +2037,6 @@ class GlobalMusicService {
           await this.attemptAutoPlay();
         }
       }
-    } else if (newTrackCount === previousTrackCount) {
-      if (addedTracks.length > 0 || removedTracks.length > 0) {
-        console.log(`🔄 Tracks reloaded - same count but ${addedTracks.length} added, ${removedTracks.length} removed`);
-      } else {
-        console.log('✅ Tracks reloaded - no changes detected');
-        
-        // If diagnostic shows more tracks in DB, warn user
-        if (diagnosticAfter && diagnosticAfter.totalInDb > newTrackCount) {
-          console.error(`❌ PROBLEM DETECTED: Database has ${diagnosticAfter.totalInDb} tracks but only ${newTrackCount} are loaded!`);
-          console.error(`   This means ${diagnosticAfter.totalInDb - newTrackCount} tracks are being filtered out.`);
-          console.error(`   Check if tracks have include_in_shuffle=false or businessId mismatch`);
-        }
-      }
-    } else {
-      console.log(`⚠️ Track count decreased from ${previousTrackCount} to ${newTrackCount} (${removedTracks.length} removed)`);
     }
     
     this.notifyListeners();
