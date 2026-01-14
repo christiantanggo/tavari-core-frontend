@@ -5,7 +5,8 @@
     "apps/*",
     "packages/*"
   ],
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "deployment": "January 14, 2026 v1",
   "type": "module",
   "description": "Tavari Core System - Multi-module business management platform",
   "scripts": {
@@ -77,6 +78,7 @@
     "html2pdf.js": "^0.12.1",
     "lucide-react": "^0.542.0",
     "node-machine-id": "^1.1.12",
+    "openai": "^6.9.1",
     "qrcode": "^1.5.3",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",
