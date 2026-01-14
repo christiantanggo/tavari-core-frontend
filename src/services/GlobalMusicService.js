@@ -285,8 +285,9 @@ class GlobalMusicService {
     }
 
     try {
-      // Load schedules FIRST before loading tracks
-      // This ensures we check for active schedules before defaulting to shuffle
+      // CRITICAL: Load tracks FIRST (old working order)
+      // This ensures tracks are always available, even if schedule check fails
+      await this.loadTracks();
       await this.loadSchedules();
       
       // Initialize playback tracking service with installation context
@@ -296,28 +297,38 @@ class GlobalMusicService {
       
       if (window.electronAPI) {
         try {
+          console.log('🔍 [GlobalMusicService] Detected Electron - looking up installation...');
           const systemInfo = await window.electronAPI.getSystemInfo();
+          console.log('📡 [GlobalMusicService] System info:', systemInfo);
           
           if (systemInfo?.fingerprint) {
+            console.log('🔍 [GlobalMusicService] Looking up installation by fingerprint:', systemInfo.fingerprint, 'for business:', businessId);
+            
             // First try with business_id filter
             let { data, error } = await supabase
               .from('music_installations')
-              .select('id, device_id, device_name, business_id, status')
+              .select('id, device_name, business_id, status')
               .eq('device_fingerprint', systemInfo.fingerprint)
               .eq('business_id', businessId)
               .eq('status', 'active')
               .maybeSingle();
             
+            console.log('📦 [GlobalMusicService] Installation lookup result (with business filter):', { data, error });
+            
             // If not found, try without business_id filter (in case it was registered to a different business)
             if (!data && !error) {
+              console.log('🔍 [GlobalMusicService] Not found with business filter, trying without business filter...');
               const { data: data2, error: error2 } = await supabase
                 .from('music_installations')
-                .select('id, device_id, device_name, business_id, status')
+                .select('id, device_name, business_id, status')
                 .eq('device_fingerprint', systemInfo.fingerprint)
                 .eq('status', 'active')
                 .maybeSingle();
               
+              console.log('📦 [GlobalMusicService] Installation lookup result (without business filter):', { data: data2, error: error2 });
+              
               if (data2) {
+                console.log('⚠️ [GlobalMusicService] Found installation but for different business:', data2.business_id, 'vs current:', businessId);
                 // Still use it if business matches or if we want to allow cross-business
                 if (data2.business_id === businessId) {
                   data = data2;
@@ -325,20 +336,40 @@ class GlobalMusicService {
               }
             }
             
-            if (!error && data) {
+            if (error) {
+              console.warn('⚠️ [GlobalMusicService] Error looking up installation:', error);
+            } else if (data) {
               installationId = data.id;
-              deviceId = data.device_id;
+              // device_id doesn't exist in music_installations table
+              deviceId = null;
+              console.log('✅ [GlobalMusicService] Found installation:', { 
+                installationId, 
+                deviceName: data.device_name,
+                businessId: data.business_id
+              });
+            } else {
+              console.log('ℹ️ [GlobalMusicService] No installation found for fingerprint:', systemInfo.fingerprint);
+              console.log('💡 [GlobalMusicService] Desktop kiosk may need to be registered via InstallationManager');
             }
+          } else {
+            console.log('⚠️ [GlobalMusicService] No fingerprint in system info:', systemInfo);
           }
         } catch (error) {
-          // Silent error handling
+          console.warn('⚠️ [GlobalMusicService] Error getting installation info:', error);
         }
+      } else {
+        // Running in browser - no installation ID
       }
+      
+      // Initializing playback tracking
       
       await playbackTrackingService.initialize(businessId, installationId, deviceId);
       
       // Set up network monitoring FIRST
       this.setupNetworkMonitoring();
+      
+      // Cache current data for offline use
+      await this.cacheCurrentState();
       
       // Set up realtime subscriptions BEFORE starting schedule monitoring
       this.subscribeToScheduleChanges();
@@ -348,14 +379,7 @@ class GlobalMusicService {
       this.subscribeToRemoteCommands();
       
       // Start aggressive schedule monitoring (realtime + polling hybrid)
-      // This will check schedules immediately and switch if needed
-      await this.startScheduleMonitoring();
-      
-      // Only load default tracks if no schedule is active
-      // If a schedule activated, it will have already loaded the playlist
-      if (!this.activeSchedule || !this.currentPlaylistId) {
-        await this.loadTracks();
-      }
+      this.startScheduleMonitoring();
       
       // Start periodic track reloading to catch new uploads
       this.startTrackReloading();
@@ -896,13 +920,11 @@ class GlobalMusicService {
     }
     
     // Filter to shuffle tracks (like MusicLibrary does in JavaScript)
-    const shuffleTracks = allTracks.filter(t => t.include_in_shuffle !== false);
-    const nonShuffleTracks = allTracks.filter(t => t.include_in_shuffle === false);
+    const shuffleTracks = allTracks.filter(t => t.include_in_shuffle);
+    const nonShuffleTracks = allTracks.filter(t => !t.include_in_shuffle);
     
     // Use shuffle tracks if available, otherwise fall back to ALL tracks
     // This ensures shuffle mode works, but if no shuffle tracks exist, we still show all tracks
-    // IMPORTANT: If include_in_shuffle is null/undefined, treat it as true (include in shuffle)
-    // Only exclude tracks where include_in_shuffle is explicitly false
     this.tracks = shuffleTracks.length > 0 ? shuffleTracks : allTracks;
     
     // Log track loading results
@@ -1009,26 +1031,26 @@ class GlobalMusicService {
         if (this.isOnline) {
           await this.loadSchedules();
           await this.cacheCurrentState(); // Update cache
-          await this.checkSchedules();
+          this.checkSchedules();
           this.syncRetryCount = 0; // Reset on success
         } else {
           // Offline - use cached schedules
           await this.loadCachedSchedules();
-          await this.checkSchedules();
+          this.checkSchedules();
         }
       } catch (error) {
         await this.loadCachedSchedules();
-        await this.checkSchedules();
+        this.checkSchedules();
       }
     }, 30 * 1000); // 30 seconds - MUCH more aggressive
 
     // Check schedules for activation every 10 seconds (unchanged)
-    this.scheduleInterval = setInterval(async () => {
-      await this.checkSchedules();
+    this.scheduleInterval = setInterval(() => {
+      this.checkSchedules();
     }, this.checkFrequency);
 
     // Check immediately on start
-    await this.checkSchedules();
+    this.checkSchedules();
     
     // Reload schedules on date change (midnight check)
     this.setupDailyScheduleReload();
