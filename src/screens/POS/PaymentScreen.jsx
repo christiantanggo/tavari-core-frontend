@@ -485,12 +485,11 @@ const PaymentScreen = () => {
     // Only require manager approval for overpayments > $0.05
     if (isSignificantOverpayment && method !== 'cash' && !isWithinExactTolerance) {
       if (!showManagerOverride) {
-        if (!canOverridePayments) {
-          setError('Manager approval required for overpayment, but you do not have permission');
-          return;
-        }
+        // Always show the manager override modal when overpayment is detected
+        // The modal will require a manager PIN to approve
         setShowManagerOverride(true);
-        setOverrideReason('Significant overpayment detected - Manager approval required for non-cash overpayment');
+        setOverrideReason(`Overpayment detected: Payment amount ($${amount.toFixed(2)}) exceeds remaining balance ($${remainingBalance.toFixed(2)}) by more than $${smallOverpaymentThreshold.toFixed(2)}. Manager approval required.`);
+        setError(''); // Clear any previous errors
         return;
       }
     }
@@ -502,8 +501,10 @@ const PaymentScreen = () => {
     }
 
     if (showManagerOverride) {
-      if (!canOverridePayments) {
-        setOverrideError('You do not have permission to override payments');
+      // Validate manager PIN - if valid, allow approval regardless of user's permissions
+      // The PIN itself is the authorization for the override
+      if (!managerPin || managerPin.trim() === '') {
+        setOverrideError('Please enter a manager PIN to approve this override');
         return;
       }
 
@@ -513,6 +514,7 @@ const PaymentScreen = () => {
         return;
       }
 
+      // PIN is valid - proceed with override
       setOverrideError('');
       await logAction({
         action: 'manager_override_payment',
@@ -520,7 +522,8 @@ const PaymentScreen = () => {
         metadata: { 
           reason: overrideReason, 
           amount, 
-          method: method
+          method: method,
+          approved_by_pin: true
         }
       });
     }
