@@ -797,7 +797,7 @@ const LoginComponent = () => {
         </p>
         
         <div style={styles.deploymentDate}>
-          November 25 2025 v7
+          January 28 V3
         </div>
       </div>
       
