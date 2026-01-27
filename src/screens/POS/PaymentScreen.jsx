@@ -1,5 +1,5 @@
 // screens/POS/PaymentScreen.jsx - Updated with Permissions and Clean Logging
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { logAction } from '../../helpers/posAudit';
@@ -25,6 +25,8 @@ import ManagerOverrideModal from '../../components/POS/POSPaymentScreenComponent
 import LoyaltyDisplay from '../../components/POS/POSPaymentScreenComponents/LoyaltyDisplay';
 import TaxBreakdown from '../../components/POS/POSPaymentScreenComponents/TaxBreakdown';
 import { useSaleProcessor } from '../../components/POS/POSPaymentScreenComponents/SaleProcessor';
+import HelcimCardReader from '../../components/POS/HelcimCardReader';
+import useHelcimPayment from '../../hooks/useHelcimPayment';
 
 const PaymentScreen = () => {
   const navigate = useNavigate();
@@ -47,7 +49,8 @@ const PaymentScreen = () => {
     loading: permissionsLoading 
   } = usePermissions();
 
-  // Permission checks
+  // Permission checks - all users should be able to process transactions
+  // Permissions match the PIN used to unlock the register (employee's permissions)
   const canProcessPayments = hasAnyPermission(['pos.sales.process', 'pos.sales.create', 'pos.register.operate']) || hasElevatedPrivileges();
   const canApplyDiscounts = hasPermission('pos.discounts.apply') || hasElevatedPrivileges();
   const canUseLoyalty = hasPermission('pos.loyalty.use') || hasElevatedPrivileges();
@@ -62,6 +65,7 @@ const PaymentScreen = () => {
   const [businessSettings, setBusinessSettings] = useState(null);
   
   const [payments, setPayments] = useState([]);
+  const paymentsRef = useRef([]);
   const [currentPayment, setCurrentPayment] = useState({ method: 'cash', amount: '' });
   const [customMethodName, setCustomMethodName] = useState('');
   const [showCustomMethod, setShowCustomMethod] = useState(false);
@@ -74,6 +78,14 @@ const PaymentScreen = () => {
   const [tipAmount, setTipAmount] = useState(0);
   const [overrideError, setOverrideError] = useState('');
   
+  // HELCIM TERMINAL STATE
+  const [showHelcimTerminal, setShowHelcimTerminal] = useState(false);
+  const [helcimPaymentAmount, setHelcimPaymentAmount] = useState(0);
+  const [helcimSaleId, setHelcimSaleId] = useState(null); // real pos_sales.id used for Helcim invoiceNumber
+  const [draftSaleId, setDraftSaleId] = useState(null);
+  const [draftReceiptNumber, setDraftReceiptNumber] = useState(null);
+  const helcimPayment = useHelcimPayment(auth.selectedBusinessId);
+  
   // LOYALTY STATE
   const [autoLoyaltyApplied, setAutoLoyaltyApplied] = useState(0);
   const [availableLoyaltyCredit, setAvailableLoyaltyCredit] = useState(0);
@@ -82,6 +94,11 @@ const PaymentScreen = () => {
   const [dailyUsageRemaining, setDailyUsageRemaining] = useState(0);
 
   const receivedSaleData = location.state?.saleData;
+
+  // Keep a live reference so async finalization never sees stale `payments`.
+  useEffect(() => {
+    paymentsRef.current = payments || [];
+  }, [payments]);
 
   // Sale processor utilities
   const saleProcessor = useSaleProcessor(auth, taxCalc, businessSettings);
@@ -106,6 +123,67 @@ const PaymentScreen = () => {
       return `${displayPoints.toLocaleString()} pts`;
     }
     return `$${balanceInDollars.toFixed(2)}`;
+  };
+
+  // Create a POS sale record BEFORE terminal payment so we have a stable ID to tie to Helcim.
+  // This allows invoiceNumber = `SALE-{pos_sales.id}` and enables webhook/lookup to update the correct sale.
+  const ensureDraftSaleForHelcim = async () => {
+    if (draftSaleId) return { saleId: draftSaleId, receiptNumber: draftReceiptNumber };
+
+    if (!auth?.authUser?.id) {
+      throw new Error('User not authenticated');
+    }
+    if (!auth.selectedBusinessId) {
+      throw new Error('Business not selected');
+    }
+
+    // Use the same receipt number that will be used at finalization.
+    const receiptNumber = await saleProcessor.generateReceiptNumber();
+    const nowIso = new Date().toISOString();
+
+    // Calculate total loyalty redeemed from all loyalty payment methods + auto apply
+    const totalLoyaltyRedeemed = payments
+      .filter(p => p.method === 'loyalty_credit')
+      .reduce((sum, p) => sum + (p.amount || 0), 0) + autoLoyaltyApplied;
+
+    const draftSaleRecord = {
+      business_id: auth.selectedBusinessId,
+      user_id: auth.authUser.id,
+      customer_id: saleData?.loyaltyCustomer?.id || null,
+      loyalty_customer_id: saleData?.loyaltyCustomer?.id || null,
+      customer_name: saleData?.loyaltyCustomer?.customer_name || null,
+      customer_phone: saleData?.loyaltyCustomer?.customer_phone || null,
+
+      subtotal: saleSubtotal,
+      tax: finalTaxAmount,
+      discount: discountAmount,
+      loyalty_discount: totalLoyaltyRedeemed,
+      total: displayTotal,
+
+      payment_status: 'unpaid',
+      payment_method: 'helcim_terminal',
+      sale_number: receiptNumber,
+      notes: totalLoyaltyRedeemed > 0 ? `Loyalty redemption: $${totalLoyaltyRedeemed.toFixed(2)}` : null,
+      item_count: saleData?.items?.length || 0,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+
+    const { data: sale, error: saleError } = await supabase
+      .from('pos_sales')
+      .insert(draftSaleRecord)
+      .select()
+      .single();
+
+    if (saleError) {
+      throw new Error(saleError.message || 'Failed to create draft sale');
+    }
+
+    setDraftSaleId(sale.id);
+    setDraftReceiptNumber(receiptNumber);
+    setHelcimSaleId(sale.id);
+
+    return { saleId: sale.id, receiptNumber };
   };
 
   // Set up sale data when authentication is ready
@@ -394,17 +472,29 @@ const PaymentScreen = () => {
       }
     }
 
-    if (amount > remainingBalance && method !== 'cash') {
+    // Check for overpayment - allow small overpayments without manager approval
+    // All employees should be able to process transactions without manager override
+    // Allow $0.05 tolerance for exact payments to account for floating point precision issues
+    const exactPaymentTolerance = 0.05;
+    const smallOverpaymentThreshold = 0.05;
+    const isSignificantOverpayment = amount > (remainingBalance + smallOverpaymentThreshold);
+    const isWithinExactTolerance = Math.abs(amount - remainingBalance) <= exactPaymentTolerance;
+    
+    // Cash payments can always go over (for giving change)
+    // For non-cash payments, allow payments within $0.05 tolerance without any approval
+    // Only require manager approval for overpayments > $0.05
+    if (isSignificantOverpayment && method !== 'cash' && !isWithinExactTolerance) {
       if (!showManagerOverride) {
         if (!canOverridePayments) {
           setError('Manager approval required for overpayment, but you do not have permission');
           return;
         }
         setShowManagerOverride(true);
-        setOverrideReason('Overpayment detected - Manager approval required for non-cash overpayment');
+        setOverrideReason('Significant overpayment detected - Manager approval required for non-cash overpayment');
         return;
       }
     }
+    // Payments within $0.05 tolerance are automatically allowed - no approval needed for any employee
 
     if (method === 'custom' && !customName?.trim()) {
       setError('Please enter a custom payment method name');
@@ -479,13 +569,120 @@ const PaymentScreen = () => {
     } else if (method === 'card') {
       // Card payments need terminal processing
       updatePaymentStatus('processing');
-    } else if (method === 'helcim') {
-      // Helcim QR payments need processing
+    } else if (method === 'helcim_terminal') {
+      // Helcim Gen 2 terminal payments - show terminal interface
+      try {
+        const draft = await ensureDraftSaleForHelcim();
+        setHelcimSaleId(draft.saleId);
+      } catch (draftErr) {
+        // Remove the pending payment we just added (since we can't start terminal flow)
+        setPayments(prev => prev.filter(p => p.id !== newPayment.id));
+        setError(draftErr.message || 'Unable to create sale record for Helcim payment');
+        updatePaymentStatus('error', { errorMessage: draftErr.message });
+        toast.error(draftErr.message || 'Unable to start Helcim payment');
+        return;
+      }
+
+      setHelcimPaymentAmount(amount);
+      setShowHelcimTerminal(true);
       updatePaymentStatus('processing');
     } else {
       // Other methods (gift card, loyalty, custom) are immediate
       updatePaymentStatus('success');
     }
+  };
+
+  // Handle Helcim terminal payment success
+  const handleHelcimPaymentSuccess = async (paymentResult) => {
+    console.log('[PaymentScreen] Helcim payment successful:', paymentResult);
+    
+    // If payment is awaiting card, keep terminal UI open and wait for customer to complete
+    if (paymentResult.status === 'awaiting_card' || paymentResult.status === 'awaiting_confirmation') {
+      console.log('[PaymentScreen] Payment awaiting confirmation - keeping terminal UI open');
+      toast.info('Waiting for Helcim to confirm the transaction...');
+      // Don't close terminal UI or complete sale yet - wait for customer
+      // The terminal UI will show the message to complete payment
+      return;
+    }
+    
+    // Payment is completed (or has transaction details)
+    if (!paymentResult.transactionId) {
+      console.error('[PaymentScreen] Missing transactionId for completed Helcim payment:', paymentResult);
+      toast.error('Payment could not be verified (missing transaction ID). Please retry verification.');
+      return;
+    }
+
+    // Update the last payment with transaction details
+    const updatedPayments = [...payments];
+    if (updatedPayments.length > 0) {
+      const lastPayment = updatedPayments[updatedPayments.length - 1];
+      if (lastPayment.method === 'helcim_terminal') {
+        lastPayment.transaction_id = paymentResult.transactionId;
+        lastPayment.approval_code = paymentResult.approvalCode;
+        lastPayment.card_type = paymentResult.cardType;
+        lastPayment.last_four = paymentResult.lastFour;
+        lastPayment.status = 'completed';
+      }
+    }
+    setPayments(updatedPayments);
+    
+    setShowHelcimTerminal(false);
+    updatePaymentStatus('success');
+    toast.success('Payment processed successfully');
+    
+    // Clear the device screen after payment completes (non-blocking)
+    try {
+      const deviceCode = paymentResult.deviceCode || 'JSV5';
+      await helcimPayment.clearDevice(deviceCode);
+      console.log('[PaymentScreen] Device clear attempted');
+    } catch (clearError) {
+      // Non-critical - device will clear on next payment if this fails
+      console.log('[PaymentScreen] Device clear failed (non-critical):', clearError);
+    }
+    
+    // Calculate new remaining balance with updated payments
+    const totalPaidAfterPayment = updatedPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+    const newRemainingBalance = displayTotal - totalPaidAfterPayment;
+    
+    // If balance is paid off, automatically complete the sale
+    if (newRemainingBalance <= 0.01) {
+      console.log('[PaymentScreen] Balance paid in full, automatically completing sale...');
+      // Small delay to ensure state updates are processed
+      setTimeout(async () => {
+        // Pass the authoritative payment snapshot (includes Helcim transaction id)
+        await finalizeSale(updatedPayments);
+      }, 100);
+    }
+  };
+
+  // Handle Helcim terminal payment error
+  const handleHelcimPaymentError = (errorMessage) => {
+    console.error('[PaymentScreen] Helcim payment failed:', errorMessage);
+    
+    // Remove the failed payment
+    const updatedPayments = payments.filter((p, index) => 
+      !(index === payments.length - 1 && p.method === 'helcim_terminal')
+    );
+    setPayments(updatedPayments);
+    
+    setShowHelcimTerminal(false);
+    setError(errorMessage || 'Helcim payment failed. Please try again.');
+    updatePaymentStatus('error', { errorMessage });
+    toast.error(errorMessage || 'Payment failed');
+  };
+
+  // Handle Helcim terminal cancellation
+  const handleHelcimPaymentCancel = () => {
+    console.log('[PaymentScreen] Helcim payment cancelled');
+    
+    // Remove the cancelled payment
+    const updatedPayments = payments.filter((p, index) => 
+      !(index === payments.length - 1 && p.method === 'helcim_terminal')
+    );
+    setPayments(updatedPayments);
+    
+    setShowHelcimTerminal(false);
+    updatePaymentStatus('cancelled');
   };
 
   // Handle card payment success/error
@@ -504,7 +701,8 @@ const PaymentScreen = () => {
   };
 
   // Complete sale finalization with enhanced loyalty processing
-  const finalizeSale = async () => {
+  // Accept an optional snapshot to avoid stale-state issues in async callbacks.
+  const finalizeSale = async (paymentsSnapshot = null) => {
     // Permission check
     if (!canProcessPayments) {
       toast.error('You do not have permission to process payments');
@@ -532,7 +730,7 @@ const PaymentScreen = () => {
       }
 
       // Generate receipt number and QR code with built-in retry logic
-      const receiptNumber = await saleProcessor.generateReceiptNumber();
+      const receiptNumber = draftReceiptNumber || await saleProcessor.generateReceiptNumber();
       const qrCode = saleProcessor.generateQRCode(receiptNumber);
 
       // Calculate total loyalty redeemed from all loyalty payment methods
@@ -560,22 +758,40 @@ const PaymentScreen = () => {
         sale_number: receiptNumber,
         notes: totalLoyaltyRedeemed > 0 ? `Loyalty redemption: $${totalLoyaltyRedeemed.toFixed(2)}` : null,
         item_count: saleData.items?.length || 0,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       };
 
-      const { data: sale, error: saleError } = await supabase
-        .from('pos_sales')
-        .insert(saleRecord)
-        .select()
-        .single();
+      let sale;
+      if (draftSaleId) {
+        // Update the existing draft sale instead of inserting a new one
+        const saleUpdateRecord = { ...saleRecord };
+        delete saleUpdateRecord.created_at;
 
-      if (saleError) {
-        // Check if it's a duplicate key error
-        if (saleError.code === '23505' && saleError.message.includes('idx_pos_sales_business_sale_number')) {
-          throw new Error('Duplicate sale detected. This may be a double-click issue. Please refresh and try again.');
+        const { data: updatedSale, error: saleError } = await supabase
+          .from('pos_sales')
+          .update(saleUpdateRecord)
+          .eq('id', draftSaleId)
+          .select()
+          .single();
+
+        if (saleError) throw saleError;
+        sale = updatedSale;
+      } else {
+        const { data: insertedSale, error: saleError } = await supabase
+          .from('pos_sales')
+          .insert(saleRecord)
+          .select()
+          .single();
+
+        if (saleError) {
+          // Check if it's a duplicate key error
+          if (saleError.code === '23505' && saleError.message.includes('idx_pos_sales_business_sale_number')) {
+            throw new Error('Duplicate sale detected. This may be a double-click issue. Please refresh and try again.');
+          }
+          throw saleError;
         }
-        
-        throw saleError;
+        sale = insertedSale;
       }
 
       // Create receipt record
@@ -608,14 +824,38 @@ const PaymentScreen = () => {
         }
       }
 
+      const paymentsToSave = paymentsSnapshot || paymentsRef.current || payments || [];
+
       // Save payment records
-      if (payments.length > 0) {
-        const paymentRecords = payments.map(payment => ({
+      if (paymentsToSave.length > 0) {
+        console.log('[PaymentScreen] Saving payment records:', {
+          saleId: sale.id,
+          count: paymentsToSave.length,
+          methods: paymentsToSave.map(p => p.method),
+        });
+
+        const paymentRecords = paymentsToSave.map(payment => ({
           business_id: auth.selectedBusinessId,
           sale_id: sale.id,
           payment_method: payment.method,
           amount: payment.amount,
           custom_method_name: payment.custom_method_name || null,
+          // For Helcim terminal payments, persist the processor transaction id.
+          // `pos_payments` does not have dedicated Helcim columns, so we store it in `reference_number`.
+          reference_number: payment.reference_number || payment.transaction_id || null,
+          // Optionally store extra card/approval metadata for audits/reporting.
+          notes: payment.notes || (
+            payment.method === 'helcim_terminal'
+              ? JSON.stringify({
+                  helcim: {
+                    transactionId: payment.transaction_id || null,
+                    approvalCode: payment.approval_code || null,
+                    cardType: payment.card_type || null,
+                    lastFour: payment.last_four || null
+                  }
+                })
+              : null
+          ),
           processed_by: auth.authUser.id,
           created_at: new Date().toISOString()
         }));
@@ -625,6 +865,7 @@ const PaymentScreen = () => {
           .insert(paymentRecords);
 
         if (paymentsError) {
+          console.error('[PaymentScreen] Failed to save payment records:', paymentsError);
           toast.error('Failed to save payment records');
         }
       }
@@ -637,7 +878,7 @@ const PaymentScreen = () => {
             return sum + ((item.price || 0) * (item.quantity || 1));
           }, 0);
           
-          const totalPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+          const totalPaid = paymentsToSave.reduce((sum, p) => sum + (p.amount || 0), 0);
           
           // Collect all updates first, then apply them
           const itemUpdates = [];
@@ -1207,6 +1448,44 @@ const PaymentScreen = () => {
           }}
           overrideError={overrideError}
         />
+
+        {/* Helcim Terminal Payment Modal */}
+        {showHelcimTerminal && (
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000
+          }}>
+            <div style={{
+              backgroundColor: 'white',
+              borderRadius: '8px',
+              padding: '24px',
+              maxWidth: '500px',
+              width: '90%',
+              maxHeight: '90vh',
+              overflow: 'auto'
+            }}>
+              <HelcimCardReader
+                amount={helcimPaymentAmount * 100} // Convert to cents
+                currency="CAD"
+                saleId={helcimSaleId || draftSaleId || saleData?.id || saleData?.receipt_number}
+                description={`POS Sale ${draftReceiptNumber || saleData?.receipt_number || 'N/A'}`}
+                businessId={auth.selectedBusinessId}
+                onPaymentSuccess={handleHelcimPaymentSuccess}
+                onPaymentError={handleHelcimPaymentError}
+                onCancel={handleHelcimPaymentCancel}
+                isVisible={showHelcimTerminal}
+              />
+            </div>
+          </div>
+        )}
 
         <div style={styles.actions}>
           <button
