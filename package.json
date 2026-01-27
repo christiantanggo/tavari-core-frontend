@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "version": "1.0.1",
-  "deployment": "January 14, 2026 v1",
+  "deployment": "January 28 2026 V3",
   "type": "module",
   "description": "Tavari Core System - Multi-module business management platform",
   "scripts": {
@@ -19,9 +19,11 @@
     "deploy": "vite build && npx vercel --prod",
     "electron-dev": "cross-env NODE_ENV=development electron build/electron/main.cjs",
     "electron-kiosk": "cross-env KIOSK_MODE=true KIOSK_FULLSCREEN=true electron build/electron/main.cjs",
+    "electron-waiver-kiosk": "node scripts/run-waiver-kiosk-dev.cjs",
     "build-desktop": "electron-builder",
     "build-exe": "node scripts/build-exe-only.cjs",
-    "build-desktop-portable": "npm run build-desktop"
+    "build-desktop-portable": "npm run build-desktop",
+    "build-waiver-kiosk": "node scripts/build-waiver-kiosk.cjs"
   },
   "main": "build/electron/main.cjs",
   "build": {
@@ -45,7 +47,6 @@
           ]
         }
       ],
-      "sign": null,
       "signingHashAlgorithms": [],
       "signDlls": false,
       "verifyUpdateCodeSignature": false
