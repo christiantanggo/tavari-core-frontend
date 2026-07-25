@@ -487,7 +487,6 @@ export function generateReceiptHTML(saleData, receiptType = RECEIPT_TYPES.STANDA
       footerHTML += `
         <div style="margin-bottom: 10px;">
           Thank you for your business!<br>
-          Returns accepted within 30 days with receipt<br>
           Questions? Email: ${business.email}
         </div>
       `;

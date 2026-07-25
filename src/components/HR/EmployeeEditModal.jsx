@@ -14,6 +14,39 @@ import { TavariStyles } from '../../utils/TavariStyles';
 
 // Import the Lieu Time Modal
 import EmployeeLieuTimeTrackingModal from './HREmployeeProfilesComponents/EmployeeLieuTimeTrackingModal';
+import PositionSelectWithNew from './PositionSelectWithNew';
+import AddPositionModal from './AddPositionModal';
+import {
+  FALLBACK_BUSINESS_ROLE_KEYS,
+  formatRoleLabel,
+  resolveCanonicalRoleKey,
+} from '../../helpers/businessRoleKeys';
+
+function normalizeAuthEmail(email) {
+  return (email || '').trim().toLowerCase();
+}
+
+/** public.users row for the signed-in operator (JWT id may differ from roster user_id). */
+async function fetchOperatorPublicUserRow(supabaseClient, authUser) {
+  const em = normalizeAuthEmail(authUser?.email);
+  if (em) {
+    const { data, error } = await supabaseClient
+      .from('users')
+      .select('id')
+      .eq('email', em)
+      .maybeSingle();
+    if (!error && data) return data;
+  }
+  if (authUser?.id) {
+    const { data, error } = await supabaseClient
+      .from('users')
+      .select('id')
+      .eq('id', authUser.id)
+      .maybeSingle();
+    if (!error && data) return data;
+  }
+  return null;
+}
 
 const EmployeeEditModal = ({ 
   employee, 
@@ -33,9 +66,12 @@ const EmployeeEditModal = ({
   const [businessPayrollSettings, setBusinessPayrollSettings] = useState(null);
   const [roleOptions, setRoleOptions] = useState([]);
   const [selectedRole, setSelectedRole] = useState('employee');
+  const [originalRole, setOriginalRole] = useState('employee');
   
   // Lieu Time Modal state
   const [showLieuTimeModal, setShowLieuTimeModal] = useState(false);
+  const [showAddPositionModal, setShowAddPositionModal] = useState(false);
+  const [positionSelectRemountKey, setPositionSelectRemountKey] = useState(0);
 
   const {
     validateInput,
@@ -56,7 +92,7 @@ const EmployeeEditModal = ({
     userRole,
     businessData
   } = usePOSAuth({
-    requiredRoles: ['owner', 'manager'],
+    requiredRoles: ['owner', 'manager', 'admin'],
     requireBusiness: true,
     componentName: 'EmployeeEditModal'
   });
@@ -124,7 +160,13 @@ const EmployeeEditModal = ({
       claim_code: 1,
       lieu_time_enabled: false,
       max_paid_hours_per_period: '',
-      lieu_time_balance: 0
+      lieu_time_balance: 0,
+      labor_subsidy_enabled: false,
+      labor_subsidy_partner: '',
+      labor_subsidy_wage_cap: '',
+      labor_subsidy_max_hours_per_week: '',
+      labor_subsidy_start_date: '',
+      labor_subsidy_end_date: ''
     } : {
       first_name: employee?.first_name || '',
       last_name: employee?.last_name || '',
@@ -141,13 +183,20 @@ const EmployeeEditModal = ({
       claim_code: employee?.claim_code || 1,
       lieu_time_enabled: employee?.lieu_time_enabled || false,
       max_paid_hours_per_period: employee?.max_paid_hours_per_period || '',
-      lieu_time_balance: employee?.lieu_time_balance || 0
+      lieu_time_balance: employee?.lieu_time_balance || 0,
+      labor_subsidy_enabled: employee?.labor_subsidy_enabled || false,
+      labor_subsidy_partner: employee?.labor_subsidy_partner || '',
+      labor_subsidy_wage_cap: employee?.labor_subsidy_wage_cap ?? '',
+      labor_subsidy_max_hours_per_week: employee?.labor_subsidy_max_hours_per_week ?? '',
+      labor_subsidy_start_date: employee?.labor_subsidy_start_date || '',
+      labor_subsidy_end_date: employee?.labor_subsidy_end_date || ''
     };
 
     setFormData(initialData);
     setOriginalData(initialData);
     setErrors({});
     setChangeReason('');
+    setShowAddPositionModal(false);
   };
 
   const loadRolesAndCurrent = async () => {
@@ -161,12 +210,12 @@ const EmployeeEditModal = ({
         .select('role_key')
         .eq('business_id', businessId);
 
-      if (!rolesError && Array.isArray(rolesData)) {
-        const unique = Array.from(new Set(rolesData.map(r => r.role_key).filter(Boolean))).sort();
-        setRoleOptions(unique.length ? unique : ['owner','admin','manager','employee']);
-      } else {
-        setRoleOptions(['owner','admin','manager','employee']);
-      }
+      const keysFromDb =
+        !rolesError && Array.isArray(rolesData)
+          ? Array.from(new Set(rolesData.map((r) => r.role_key).filter(Boolean))).sort()
+          : [];
+      const finalKeys = keysFromDb.length ? keysFromDb : FALLBACK_BUSINESS_ROLE_KEYS;
+      setRoleOptions(finalKeys);
 
       // Load employee's current role
       if (employee?.id) {
@@ -178,13 +227,17 @@ const EmployeeEditModal = ({
           .eq('active', true)
           .maybeSingle();
 
-        setSelectedRole(currentRoleRow?.role || 'employee');
+        const raw = currentRoleRow?.role || 'employee';
+        const canonicalRole = resolveCanonicalRoleKey(raw, finalKeys);
+        setSelectedRole(canonicalRole);
+        setOriginalRole(canonicalRole);
       } else {
         setSelectedRole('employee');
+        setOriginalRole('employee');
       }
     } catch (err) {
       console.warn('Failed to load roles:', err?.message || err);
-      if (!roleOptions.length) setRoleOptions(['owner','admin','manager','employee']);
+      if (!roleOptions.length) setRoleOptions(FALLBACK_BUSINESS_ROLE_KEYS);
     }
   };
 
@@ -347,6 +400,21 @@ const EmployeeEditModal = ({
       newErrors.max_paid_hours_per_period = 'Maximum paid hours must be set when lieu time is enabled';
     }
 
+    if (formData.labor_subsidy_enabled) {
+      const cap = parseFloat(formData.labor_subsidy_wage_cap);
+      const maxHrs = parseFloat(formData.labor_subsidy_max_hours_per_week);
+      if (!Number.isFinite(cap) || cap <= 0) {
+        newErrors.labor_subsidy_wage_cap = 'Subsidized wage cap is required';
+      }
+      if (!Number.isFinite(maxHrs) || maxHrs <= 0) {
+        newErrors.labor_subsidy_max_hours_per_week = 'Max subsidized hours per week is required';
+      }
+      if (formData.labor_subsidy_start_date && formData.labor_subsidy_end_date &&
+          formData.labor_subsidy_end_date < formData.labor_subsidy_start_date) {
+        newErrors.labor_subsidy_end_date = 'End date must be on or after start date';
+      }
+    }
+
     try {
       const emailValidation = await validateInput(formData.email, 'email', 'email');
       if (!emailValidation.valid) {
@@ -454,7 +522,7 @@ const EmployeeEditModal = ({
     }
 
     const rateLimitCheck = await checkRateLimit('employee_update');
-    if (!rateLimitCheck.allowed) {
+    if (!rateLimitCheck?.allowed) {
       setErrors({ general: 'You are making changes too quickly. Please wait a moment before trying again.' });
       return;
     }
@@ -463,7 +531,7 @@ const EmployeeEditModal = ({
       setSaving(true);
       setErrors({});
       
-      await recordAction('employee_edit_attempt', true);
+      await recordAction('employee_edit_attempt', true, employee?.id);
 
       let result;
       
@@ -474,14 +542,14 @@ const EmployeeEditModal = ({
       }
 
       if (result.success) {
-        await recordAction('employee_edit_success', true);
+        await recordAction('employee_edit_success', true, employee?.id);
         onSave(result.employee);
         onClose();
       }
 
     } catch (error) {
       console.error('Error saving employee:', error);
-      await recordAction('employee_edit_failure', false);
+      await recordAction('employee_edit_failure', false, employee?.id);
       
       const errorMessage = getUserFriendlyError(error);
       
@@ -589,7 +657,9 @@ const EmployeeEditModal = ({
     const allowedFields = [
       'first_name', 'last_name', 'email', 'phone', 'employee_number',
       'position', 'department', 'manager_id', 'hire_date', 'termination_date',
-      'employment_status', 'wage', 'claim_code', 'lieu_time_enabled', 'max_paid_hours_per_period'
+      'employment_status', 'wage', 'claim_code', 'lieu_time_enabled', 'max_paid_hours_per_period',
+      'labor_subsidy_enabled', 'labor_subsidy_partner', 'labor_subsidy_wage_cap',
+      'labor_subsidy_max_hours_per_week', 'labor_subsidy_start_date', 'labor_subsidy_end_date'
     ];
 
     Object.keys(formData).forEach(key => {
@@ -598,7 +668,9 @@ const EmployeeEditModal = ({
       }
     });
 
-    if (Object.keys(changedFields).length === 0) {
+    const roleChanged = (selectedRole || 'employee') !== (originalRole || 'employee');
+
+    if (Object.keys(changedFields).length === 0 && !roleChanged) {
       return { success: true, employee };
     }
 
@@ -629,20 +701,64 @@ const EmployeeEditModal = ({
         parseFloat(changedFields.max_paid_hours_per_period) : null;
     }
 
+    if (changedFields.labor_subsidy_enabled !== undefined) {
+      changedFields.labor_subsidy_enabled = Boolean(changedFields.labor_subsidy_enabled);
+      if (changedFields.labor_subsidy_enabled) {
+        // Always persist the full subsidy profile when enabling so partial saves don't leave invalid config.
+        changedFields.labor_subsidy_partner = (formData.labor_subsidy_partner || '').trim() || null;
+        changedFields.labor_subsidy_wage_cap = formData.labor_subsidy_wage_cap !== '' && formData.labor_subsidy_wage_cap != null
+          ? parseFloat(formData.labor_subsidy_wage_cap) : null;
+        changedFields.labor_subsidy_max_hours_per_week = formData.labor_subsidy_max_hours_per_week !== '' && formData.labor_subsidy_max_hours_per_week != null
+          ? parseFloat(formData.labor_subsidy_max_hours_per_week) : null;
+        changedFields.labor_subsidy_start_date = formData.labor_subsidy_start_date || null;
+        changedFields.labor_subsidy_end_date = formData.labor_subsidy_end_date || null;
+      }
+    }
+    if (changedFields.labor_subsidy_wage_cap !== undefined) {
+      changedFields.labor_subsidy_wage_cap = changedFields.labor_subsidy_wage_cap !== '' && changedFields.labor_subsidy_wage_cap != null
+        ? parseFloat(changedFields.labor_subsidy_wage_cap) : null;
+    }
+    if (changedFields.labor_subsidy_max_hours_per_week !== undefined) {
+      changedFields.labor_subsidy_max_hours_per_week = changedFields.labor_subsidy_max_hours_per_week !== '' && changedFields.labor_subsidy_max_hours_per_week != null
+        ? parseFloat(changedFields.labor_subsidy_max_hours_per_week) : null;
+    }
+    if (changedFields.labor_subsidy_partner !== undefined) {
+      changedFields.labor_subsidy_partner = (changedFields.labor_subsidy_partner || '').trim() || null;
+    }
+    if (changedFields.labor_subsidy_start_date !== undefined) {
+      changedFields.labor_subsidy_start_date = changedFields.labor_subsidy_start_date || null;
+    }
+    if (changedFields.labor_subsidy_end_date !== undefined) {
+      changedFields.labor_subsidy_end_date = changedFields.labor_subsidy_end_date || null;
+    }
+    if (changedFields.labor_subsidy_enabled === false) {
+      changedFields.labor_subsidy_partner = null;
+      changedFields.labor_subsidy_wage_cap = null;
+      changedFields.labor_subsidy_max_hours_per_week = null;
+      changedFields.labor_subsidy_start_date = null;
+      changedFields.labor_subsidy_end_date = null;
+    }
+
     if (changedFields.base_wage !== undefined) {
       delete changedFields.base_wage;
     }
 
     try {
-      const { data: updatedEmployee, error: updateError } = await supabase
-        .from('users')
-        .update(changedFields)
-        .eq('id', employee.id)
-        .select()
-        .single();
+      let updatedEmployee = employee;
 
-      if (updateError) {
-        throw updateError;
+      if (Object.keys(changedFields).length > 0) {
+        const { data, error: updateError } = await supabase
+          .from('users')
+          .update(changedFields)
+          .eq('id', employee.id)
+          .select()
+          .single();
+
+        if (updateError) {
+          throw updateError;
+        }
+
+        updatedEmployee = data;
       }
 
       // Upsert role assignment for this business
@@ -658,26 +774,63 @@ const EmployeeEditModal = ({
             .maybeSingle();
 
           if (existing) {
-            await supabase
+            const { error: userRolesUpdateError } = await supabase
               .from('user_roles')
               .update({ role: selectedRole, active: true })
               .eq('user_id', employee.id)
               .eq('business_id', businessId);
+
+            if (userRolesUpdateError) {
+              throw userRolesUpdateError;
+            }
           } else {
-            await supabase
+            const { error: userRolesInsertError } = await supabase
               .from('user_roles')
               .insert({ user_id: employee.id, business_id: businessId, role: selectedRole, active: true, custom_permissions: {} });
+
+            if (userRolesInsertError) {
+              throw userRolesInsertError;
+            }
           }
 
-          // Keep business_users role in sync if present
-          await supabase
+          // Keep business_users in sync (insert if missing — update alone affects 0 rows when never linked)
+          const { data: existingBu, error: buSelectErr } = await supabase
             .from('business_users')
-            .update({ role: selectedRole })
+            .select('id')
             .eq('user_id', employee.id)
-            .eq('business_id', businessId);
+            .eq('business_id', businessId)
+            .maybeSingle();
+
+          if (buSelectErr) {
+            throw buSelectErr;
+          }
+
+          if (existingBu) {
+            const { error: businessUsersUpdateError } = await supabase
+              .from('business_users')
+              .update({ role: selectedRole })
+              .eq('user_id', employee.id)
+              .eq('business_id', businessId);
+
+            if (businessUsersUpdateError) {
+              throw businessUsersUpdateError;
+            }
+          } else {
+            const { error: businessUsersInsertError } = await supabase
+              .from('business_users')
+              .insert({
+                user_id: employee.id,
+                business_id: businessId,
+                role: selectedRole
+              });
+
+            if (businessUsersInsertError) {
+              throw businessUsersInsertError;
+            }
+          }
         }
       } catch (roleErr) {
-        console.warn('Role update warning:', roleErr?.message || roleErr);
+        throw roleErr;
       }
 
       try {
@@ -698,6 +851,7 @@ const EmployeeEditModal = ({
         console.warn('Security logging failed (non-critical):', loggingError);
       }
 
+      setOriginalRole(selectedRole || 'employee');
       return { success: true, employee: updatedEmployee };
 
     } catch (dbError) {
@@ -713,46 +867,76 @@ const EmployeeEditModal = ({
   // Handle lieu time modal
   const handleOpenLieuTimeModal = () => {
     if (employee) {
-      recordAction('open_lieu_time_modal', employee.id);
+      recordAction('open_lieu_time_modal', true, employee.id);
       setShowLieuTimeModal(true);
     }
   };
 
   // Handle delete employee
+  // Remove employee from current business roster (same rules as EmployeeEditor — no public.users delete)
   const handleDeleteEmployee = async () => {
     if (!employee) return;
 
-    const confirmDelete = window.confirm(
-      `Are you sure you want to delete ${employee.first_name} ${employee.last_name}? This action cannot be undone.`
-    );
+    const businessId = userContext?.businessId || selectedBusinessId;
+    if (!businessId) {
+      setErrors({ general: 'No business selected.' });
+      return;
+    }
 
-    if (!confirmDelete) return;
+    const ok = window.confirm(
+      `Remove ${employee.first_name} ${employee.last_name} from this business? They will disappear from this roster; their Tavari profile is not destroyed if they belong elsewhere.`
+    );
+    if (!ok) return;
+
+    const rateLimitCheck = await checkRateLimit('delete_employee');
+    if (!rateLimitCheck?.allowed) {
+      setErrors({ general: 'Too many delete attempts. Please wait before trying again.' });
+      return;
+    }
+
+    const operatorRow = await fetchOperatorPublicUserRow(supabase, authUser);
+    if (String(employee.id) === String(operatorRow?.id ?? authUser?.id)) {
+      setErrors({ general: 'You cannot remove your own account from the roster here.' });
+      return;
+    }
 
     try {
       setSaving(true);
+      setErrors({});
 
-      await recordAction('delete_employee', employee.id);
+      await recordAction('delete_employee', true, employee.id);
 
-      const { error: deleteError } = await supabase
-        .from('users')
-        .delete()
-        .eq('id', employee.id);
+      const { data: rpcResult, error: rpcError } = await supabase.rpc('remove_employee_from_business', {
+        p_target_user_id: employee.id,
+        p_business_id: businessId
+      });
 
-      if (deleteError) throw deleteError;
+      if (rpcError) throw rpcError;
+
+      const removed =
+        (rpcResult?.user_roles_deleted != null ? Number(rpcResult.user_roles_deleted) : 0) +
+        (rpcResult?.business_users_deleted != null ? Number(rpcResult.business_users_deleted) : 0);
+
+      if (!rpcResult?.ok || removed === 0) {
+        throw new Error(
+          'No membership rows were removed. This person may not be on this business roster, or access blocked.'
+        );
+      }
 
       await logSecurityEvent('employee_deleted', {
         employee_id: employee.id,
         employee_name: `${employee.first_name} ${employee.last_name}`,
-        deleted_by: authUser?.id
+        deleted_by: authUser?.id,
+        business_id: businessId,
+        user_roles_removed: rpcResult?.user_roles_deleted ?? 0,
+        business_users_removed: rpcResult?.business_users_deleted ?? 0,
       }, 'high');
 
-      // Close modal and refresh parent
       onSave(employee);
       onClose();
-
     } catch (error) {
       console.error('Error deleting employee:', error);
-      setErrors({ general: 'Failed to delete employee: ' + error.message });
+      setErrors({ general: 'Failed to remove employee: ' + (error.message || 'Unknown error') });
     } finally {
       setSaving(false);
     }
@@ -771,7 +955,7 @@ const EmployeeEditModal = ({
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      zIndex: 50,
+      zIndex: 1000,
       padding: TavariStyles.spacing.lg
     },
     modal: {
@@ -995,7 +1179,7 @@ const EmployeeEditModal = ({
   return (
     <POSAuthWrapper
       componentName="EmployeeEditModal"
-      requiredRoles={['owner', 'manager']}
+      requiredRoles={['owner', 'manager', 'admin']}
       requireBusiness={true}
     >
       <SecurityWrapper
@@ -1101,8 +1285,8 @@ const EmployeeEditModal = ({
                         style={styles.select}
                         disabled={saving}
                       >
-                        {(roleOptions.length ? roleOptions : ['owner','admin','manager','employee']).map((rk) => (
-                          <option key={rk} value={rk}>{rk}</option>
+                        {(roleOptions.length ? roleOptions : FALLBACK_BUSINESS_ROLE_KEYS).map((rk) => (
+                          <option key={rk} value={rk}>{formatRoleLabel(rk)}</option>
                         ))}
                       </select>
                       <p style={styles.helpText}>Controls access across the app for this business.</p>
@@ -1130,12 +1314,14 @@ const EmployeeEditModal = ({
 
                     <div style={styles.formGroup}>
                       <label style={styles.label}>Position</label>
-                      <input
-                        type="text"
+                      <PositionSelectWithNew
+                        key={positionSelectRemountKey}
+                        businessId={userContext?.businessId || selectedBusinessId}
                         value={formData.position || ''}
-                        onChange={(e) => handleInputChange('position', e.target.value)}
-                        style={styles.input}
+                        onChange={(v) => handleInputChange('position', v)}
                         disabled={saving}
+                        selectStyle={{ ...styles.input, width: '100%' }}
+                        onRequestNewPosition={() => setShowAddPositionModal(true)}
                       />
                     </div>
 
@@ -1330,6 +1516,94 @@ const EmployeeEditModal = ({
                 </div>
 
                 <div style={styles.section}>
+                  <h3 style={styles.sectionTitle}>Labor Subsidy (Manager Dashboard Only)</h3>
+                  <p style={styles.helpText}>
+                    Adjusts labor % on the employee app manager dashboard only. Does not change payroll or wages paid.
+                  </p>
+                  <div style={styles.formGrid}>
+                    <div style={styles.formGroup}>
+                      <TavariCheckbox
+                        checked={formData.labor_subsidy_enabled || false}
+                        onChange={(checked) => handleInputChange('labor_subsidy_enabled', checked)}
+                        label="Subsidized employee"
+                        size="md"
+                        disabled={saving}
+                      />
+                    </div>
+
+                    {formData.labor_subsidy_enabled && (
+                      <>
+                        <div style={styles.formGroup}>
+                          <label style={styles.label}>Subsidy partner</label>
+                          <input
+                            type="text"
+                            value={formData.labor_subsidy_partner || ''}
+                            onChange={(e) => handleInputChange('labor_subsidy_partner', e.target.value)}
+                            style={styles.input}
+                            disabled={saving}
+                            placeholder="e.g., YMCA"
+                          />
+                        </div>
+
+                        <div style={styles.formGroup}>
+                          <label style={styles.label}>Subsidized wage cap ($/hr) *</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={formData.labor_subsidy_wage_cap ?? ''}
+                            onChange={(e) => handleInputChange('labor_subsidy_wage_cap', e.target.value)}
+                            style={styles.input}
+                            disabled={saving}
+                            placeholder="e.g., 17.60"
+                          />
+                          <p style={styles.helpText}>
+                            Base wage covered by subsidy. Shift premiums above this cap still count toward labor.
+                          </p>
+                        </div>
+
+                        <div style={styles.formGroup}>
+                          <label style={styles.label}>Max subsidized hours per week *</label>
+                          <input
+                            type="number"
+                            step="0.25"
+                            min="0"
+                            value={formData.labor_subsidy_max_hours_per_week ?? ''}
+                            onChange={(e) => handleInputChange('labor_subsidy_max_hours_per_week', e.target.value)}
+                            style={styles.input}
+                            disabled={saving}
+                            placeholder="e.g., 30"
+                          />
+                          <p style={styles.helpText}>Resets each Sunday–Saturday week until the subsidy end date.</p>
+                        </div>
+
+                        <div style={styles.formGroup}>
+                          <label style={styles.label}>Subsidy start date</label>
+                          <input
+                            type="date"
+                            value={formData.labor_subsidy_start_date || ''}
+                            onChange={(e) => handleInputChange('labor_subsidy_start_date', e.target.value)}
+                            style={styles.input}
+                            disabled={saving}
+                          />
+                        </div>
+
+                        <div style={styles.formGroup}>
+                          <label style={styles.label}>Subsidy end date</label>
+                          <input
+                            type="date"
+                            value={formData.labor_subsidy_end_date || ''}
+                            onChange={(e) => handleInputChange('labor_subsidy_end_date', e.target.value)}
+                            style={styles.input}
+                            disabled={saving}
+                          />
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div style={styles.section}>
                   <h3 style={styles.sectionTitle}>Claim Code Information</h3>
                   <div style={styles.claimCodeInfo}>
                     <div style={styles.claimCodeTitle}>About CRA Claim Codes:</div>
@@ -1416,7 +1690,7 @@ const EmployeeEditModal = ({
                     style={styles.deleteButton}
                     disabled={saving}
                   >
-                    {saving ? 'Deleting...' : 'Delete Employee'}
+                    {saving ? 'Removing…' : 'Remove from business'}
                   </button>
                 )}
               </div>
@@ -1437,6 +1711,16 @@ const EmployeeEditModal = ({
             }}
           />
         )}
+        <AddPositionModal
+          isOpen={showAddPositionModal}
+          businessId={userContext?.businessId || selectedBusinessId}
+          zIndex={1100}
+          onClose={() => setShowAddPositionModal(false)}
+          onCreated={(positionName) => {
+            void handleInputChange('position', positionName);
+            setPositionSelectRemountKey((k) => k + 1);
+          }}
+        />
       </SecurityWrapper>
     </POSAuthWrapper>
   );

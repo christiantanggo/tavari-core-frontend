@@ -489,11 +489,39 @@ export const YTD_CONSTANTS = {
   TAX_YEAR_START: { month: 0, day: 1 }, // January 1st
   TAX_YEAR_END: { month: 11, day: 31 }, // December 31st
   
-  // Canadian tax limits for 2025
+  // Canadian tax limits by year (CRA T4127). Update annually as new editions are published.
+  CRA_LIMITS: {
+    2024: {
+      EI_MAX_INSURABLE: 63200,
+      CPP_MAX_PENSIONABLE: 68500,
+      EI_RATE: 0.0166,
+      CPP_RATE: 0.0595
+    },
+    2025: {
+      EI_MAX_INSURABLE: 65700,
+      CPP_MAX_PENSIONABLE: 71300,
+      EI_RATE: 0.0164,
+      CPP_RATE: 0.0595
+    },
+    2026: {
+      EI_MAX_INSURABLE: 68900,
+      CPP_MAX_PENSIONABLE: 74600,
+      EI_RATE: 0.0163,
+      CPP_RATE: 0.0595
+    }
+  },
+  // Backwards-compat alias for callers expecting 2025 specifically.
   CRA_2025_LIMITS: {
     EI_MAX_INSURABLE: 65700,
     CPP_MAX_PENSIONABLE: 71300,
     EI_RATE: 0.0164,
+    CPP_RATE: 0.0595
+  },
+  // Current year limits (used by callers that don't pick a specific year).
+  CRA_2026_LIMITS: {
+    EI_MAX_INSURABLE: 68900,
+    CPP_MAX_PENSIONABLE: 74600,
+    EI_RATE: 0.0163,
     CPP_RATE: 0.0595
   },
   

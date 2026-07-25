@@ -1,4 +1,49 @@
 
+[functions.business-helcim-credentials]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/business-helcim-credentials/index.ts"
+
+[functions.business-authorize-net-credentials]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/business-authorize-net-credentials/index.ts"
+
+[functions.authorize-net-webhook]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/authorize-net-webhook/index.ts"
+
+[functions.authorize-net-sync-sales]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/authorize-net-sync-sales/index.ts"
+
+[functions.business-clover-credentials]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/business-clover-credentials/index.ts"
+
+[functions.clover-webhook]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/clover-webhook/index.ts"
+
+[functions.clover-sync-sales]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/clover-sync-sales/index.ts"
+
+[functions.daily-sales-ledger]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/daily-sales-ledger/index.ts"
+
+[functions.clover-waiver-app]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/clover-waiver-app/index.ts"
+
 [functions.helcim-payment-webhook]
 enabled = true
 verify_jwt = false
@@ -9,6 +54,17 @@ entrypoint = "./functions/helcim-payment-webhook/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/helcim-payment-webhook/*.html" ]
+
+[functions.payment-webhook]
+enabled = true
+verify_jwt = false
+import_map = "./functions/payment-webhook/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/payment-webhook/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/payment-webhook/*.html" ]
 
 [functions.helcim-confirm]
 enabled = true
@@ -56,8 +112,492 @@ entrypoint = "./functions/mail-event-webhook/index.ts"
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/mail-event-webhook/*.html" ]
 
-[functions."mail-domain-manager"]
+[functions."mail-track-open"]
 enabled = true
 verify_jwt = false
+entrypoint = "./functions/mail-track-open/index.ts"
+
+[functions."mail-track-click"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/mail-track-click/index.ts"
+
+[functions."mail-domain-manager"]
+enabled = true
+verify_jwt = true
 import_map = "./functions/mail-domain-manager/deno.json"
 entrypoint = "./functions/mail-domain-manager/index.ts"
+
+[functions."mail-send"]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/mail-send/index.ts"
+
+[functions."mail-process-queue"]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/mail-process-queue/index.ts"
+
+[functions."mail-process-schedules"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/mail-process-schedules/index.ts"
+
+[functions."mail-rollout-manager"]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/mail-rollout-manager/index.ts"
+
+[functions.voice-agent-webhook]
+enabled = true
+verify_jwt = false
+import_map = "./functions/voice-agent-webhook/deno.json"
+entrypoint = "./functions/voice-agent-webhook/index.ts"
+
+[functions.voice-agent-create]
+enabled = true
+verify_jwt = false
+import_map = "./functions/voice-agent-create/deno.json"
+entrypoint = "./functions/voice-agent-create/index.ts"
+
+[functions.voice-agent-update]
+enabled = true
+verify_jwt = true
+import_map = "./functions/voice-agent-update/deno.json"
+entrypoint = "./functions/voice-agent-update/index.ts"
+
+# Inbound email webhook: called by AWS SNS (no JWT). Do not require auth.
+[functions.receive-email]
+enabled = true
+verify_jwt = false
+import_map = "./functions/receive-email/deno.json"
+entrypoint = "./functions/receive-email/index.ts"
+
+# Called by receive-email with service role key; allow unauthenticated invoke.
+[functions.accounting-process-inbound-invoice]
+enabled = true
+verify_jwt = false
+import_map = "./functions/accounting-process-inbound-invoice/deno.json"
+entrypoint = "./functions/accounting-process-inbound-invoice/index.ts"
+
+# Regenerate email-body PDF from stored body_html; called from Queue. JWT validated inside so OPTIONS works.
+[functions.accounting-regenerate-email-body-pdf]
+enabled = true
+verify_jwt = false
+import_map = "./functions/accounting-regenerate-email-body-pdf/deno.json"
+entrypoint = "./functions/accounting-regenerate-email-body-pdf/index.ts"
+
+[functions.accounting-reextract-from-pdf]
+enabled = true
+verify_jwt = true
+import_map = "./functions/accounting-reextract-from-pdf/deno.json"
+entrypoint = "./functions/accounting-reextract-from-pdf/index.ts"
+
+[functions.tavari-ai-chat]
+enabled = true
+verify_jwt = true
+import_map = "./functions/tavari-ai-chat/deno.json"
+entrypoint = "./functions/tavari-ai-chat/index.ts"
+
+# Waiver kiosk attract images: service role signs storage URLs (no storage.objects RLS).
+[functions.waiver-kiosk-ad-urls]
+enabled = true
+verify_jwt = true
+import_map = "./functions/waiver-kiosk-ad-urls/deno.json"
+entrypoint = "./functions/waiver-kiosk-ad-urls/index.ts"
+
+# Browser kiosk: single-transaction waiver + participants + consents (anon + service RPC).
+[functions.waiver-kiosk-atomic-submit]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/waiver-kiosk-atomic-submit/index.ts"
+
+# Portal / app: same atomic package as kiosk (session JWT optional; uses service role RPC).
+[functions.waiver-submit-core]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/waiver-submit-core/index.ts"
+
+[functions.manage-booking-self-service]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/manage-booking-self-service/index.ts"
+
+[functions.customer-portal-data]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/customer-portal-data/index.ts"
+
+[functions."mail-consent-action"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/mail-consent-action/index.ts"
+
+[functions.reputation-google-oauth]
+enabled = true
+verify_jwt = true
+import_map = "./functions/reputation-google-oauth/deno.json"
+entrypoint = "./functions/reputation-google-oauth/index.ts"
+
+[functions.reputation-google-bp]
+enabled = true
+verify_jwt = true
+import_map = "./functions/reputation-google-bp/deno.json"
+entrypoint = "./functions/reputation-google-bp/index.ts"
+
+# Waiver check-in → Mail; pg_cron calls processQueue with x-waiver-review-queue-secret. User invokes use session JWT in code.
+[functions."mail-waiver-check-in-automation"]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/mail-waiver-check-in-automation/index.ts"
+
+# Customer portal funnel (anon) + pg_cron processor (shared secret)
+[functions.record-booking-funnel-activity]
+enabled = true
+verify_jwt = false
+import_map = "./functions/record-booking-funnel-activity/deno.json"
+entrypoint = "./functions/record-booking-funnel-activity/index.ts"
+
+[functions.process-booking-abandoned-carts]
+enabled = true
+verify_jwt = false
+import_map = "./functions/process-booking-abandoned-carts/deno.json"
+entrypoint = "./functions/process-booking-abandoned-carts/index.ts"
+
+# Daily mail stats digest: cron invokes with x-mail-digest-cron-secret; test send uses user JWT in body.
+[functions.mail-daily-digest]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/mail-daily-digest/index.ts"
+
+# Name of the Day: cron or manual invoke with Bearer service role or x-name-of-day-secret
+[functions.mail-name-of-day]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/mail-name-of-day/index.ts"
+
+# Customer portal: anon invokes after HelcimPay SUCCESS (hash-validated server-side).
+[functions.helcim-pay-finalize]
+enabled = true
+verify_jwt = false
+import_map = "./functions/helcim-pay-finalize/deno.json"
+entrypoint = "./functions/helcim-pay-finalize/index.ts"
+
+# Cron / manual POST with Authorization: Bearer SERVICE_ROLE_KEY only (handled in function).
+[functions.scheduling-dispatch-shift-reminders]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/scheduling-dispatch-shift-reminders/index.ts"
+
+# Self-serve ordering kiosk: POS catalog by business_id (service role; anon-safe field list).
+[functions.self-serve-kiosk-catalog]
+enabled = true
+verify_jwt = false
+import_map = "./functions/self-serve-kiosk-catalog/deno.json"
+entrypoint = "./functions/self-serve-kiosk-catalog/index.ts"
+
+# Tavari APIs: public business name (Dashboard → Settings → Basic Information).
+[functions.tavari-api-business-name]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-name/deno.json"
+entrypoint = "./functions/tavari-api-business-name/index.ts"
+
+[functions.tavari-api-business-email]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-email/deno.json"
+entrypoint = "./functions/tavari-api-business-email/index.ts"
+
+[functions.tavari-api-business-phone]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-phone/deno.json"
+entrypoint = "./functions/tavari-api-business-phone/index.ts"
+
+[functions.tavari-api-business-address]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-address/deno.json"
+entrypoint = "./functions/tavari-api-business-address/index.ts"
+
+[functions.tavari-api-business-logo]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-logo/deno.json"
+entrypoint = "./functions/tavari-api-business-logo/index.ts"
+
+[functions.tavari-api-business-favicon]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-favicon/deno.json"
+entrypoint = "./functions/tavari-api-business-favicon/index.ts"
+
+[functions.tavari-api-business-hours]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-hours/deno.json"
+entrypoint = "./functions/tavari-api-business-hours/index.ts"
+
+[functions.tavari-api-business-products]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-products/deno.json"
+entrypoint = "./functions/tavari-api-business-products/index.ts"
+
+[functions.tavari-api-admission-rates]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-admission-rates/deno.json"
+entrypoint = "./functions/tavari-api-admission-rates/index.ts"
+
+[functions.tavari-api-party-guest-list]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-party-guest-list/deno.json"
+entrypoint = "./functions/tavari-api-party-guest-list/index.ts"
+
+[functions.tavari-api-camp-registration]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-camp-registration/deno.json"
+entrypoint = "./functions/tavari-api-camp-registration/index.ts"
+
+[functions.tavari-api-party-packages]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-party-packages/deno.json"
+entrypoint = "./functions/tavari-api-party-packages/index.ts"
+
+[functions.tavari-api-booking-catalog]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-booking-catalog/deno.json"
+entrypoint = "./functions/tavari-api-booking-catalog/index.ts"
+
+[functions.tavari-api-booking-availability]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-booking-availability/deno.json"
+entrypoint = "./functions/tavari-api-booking-availability/index.ts"
+
+[functions.tavari-api-camp-sessions]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-camp-sessions/deno.json"
+entrypoint = "./functions/tavari-api-camp-sessions/index.ts"
+
+[functions.tavari-api-waiver-status]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-waiver-status/deno.json"
+entrypoint = "./functions/tavari-api-waiver-status/index.ts"
+
+[functions.tavari-api-waiver-embed]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-waiver-embed/deno.json"
+entrypoint = "./functions/tavari-api-waiver-embed/index.ts"
+
+[functions.tavari-api-reputation-feed]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-reputation-feed/deno.json"
+entrypoint = "./functions/tavari-api-reputation-feed/index.ts"
+
+[functions.tavari-api-business-links]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-business-links/deno.json"
+entrypoint = "./functions/tavari-api-business-links/index.ts"
+
+[functions.tavari-api-website-promotions]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-website-promotions/deno.json"
+entrypoint = "./functions/tavari-api-website-promotions/index.ts"
+
+[functions.tavari-api-manage-booking]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-manage-booking/deno.json"
+entrypoint = "./functions/tavari-api-manage-booking/index.ts"
+
+[functions.tavari-api-storybook-adventure]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-storybook-adventure/deno.json"
+entrypoint = "./functions/tavari-api-storybook-adventure/index.ts"
+
+[functions.tavari-api-live-capacity]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-live-capacity/deno.json"
+entrypoint = "./functions/tavari-api-live-capacity/index.ts"
+
+[functions.tavari-api-website-hero-slides]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-website-hero-slides/deno.json"
+entrypoint = "./functions/tavari-api-website-hero-slides/index.ts"
+
+[functions.tavari-api-website-faqs]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-website-faqs/deno.json"
+entrypoint = "./functions/tavari-api-website-faqs/index.ts"
+
+[functions.tavari-api-website-copy-tokens]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-website-copy-tokens/deno.json"
+entrypoint = "./functions/tavari-api-website-copy-tokens/index.ts"
+
+[functions.tavari-api-website-menu]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-website-menu/deno.json"
+entrypoint = "./functions/tavari-api-website-menu/index.ts"
+
+[functions.tavari-api-holiday-pages]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-holiday-pages/deno.json"
+entrypoint = "./functions/tavari-api-holiday-pages/index.ts"
+
+[functions.tavari-api-website-gallery]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-website-gallery/deno.json"
+entrypoint = "./functions/tavari-api-website-gallery/index.ts"
+
+[functions.tavari-api-website-builder-pages]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-website-builder-pages/deno.json"
+entrypoint = "./functions/tavari-api-website-builder-pages/index.ts"
+
+[functions.tavari-api-digital-signage]
+enabled = true
+verify_jwt = false
+import_map = "./functions/tavari-api-digital-signage/deno.json"
+entrypoint = "./functions/tavari-api-digital-signage/index.ts"
+
+[functions.party-guest-list-reminder-dispatch]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/party-guest-list-reminder-dispatch/index.ts"
+
+[functions.website-public-profile]
+enabled = true
+verify_jwt = false
+import_map = "./functions/website-public-profile/deno.json"
+entrypoint = "./functions/website-public-profile/index.ts"
+
+# ChargeNow / Bajie shared power bank — authenticated dashboard proxy (JWT required).
+[functions.chargenow-api]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/chargenow-api/index.ts"
+
+# ChargeNow rent callback (vendor POST; no JWT).
+[functions.chargenow-rent-callback]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/chargenow-rent-callback/index.ts"
+
+# ChargeNow cabinet event push (vendor POST; no JWT).
+[functions.chargenow-cabinet-event]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/chargenow-cabinet-event/index.ts"
+
+# Dashboard: create/link employee with Auth + DB in one server flow (rollback on failure).
+[functions.create-employee-for-business]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/create-employee-for-business/index.ts"
+
+# Stripe module billing (CAD monthly): sync catalog prices (Tavari staff or service role).
+[functions.stripe-sync-module-prices]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/stripe-sync-module-prices/index.ts"
+
+# Stripe subscription checkout for module bundles (business managers / Tavari staff / service role).
+[functions.stripe-create-module-subscription-checkout]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/stripe-create-module-subscription-checkout/index.ts"
+
+# Recompute billable seat quantities on Stripe subscription items (prorated).
+[functions.stripe-update-subscription-seats]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/stripe-update-subscription-seats/index.ts"
+
+# Stripe webhooks (raw body signature verification inside handler).
+[functions.stripe-webhook-module-billing]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/stripe-webhook-module-billing/index.ts"
+
+[functions.stripe-add-module-to-subscription]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/stripe-add-module-to-subscription/index.ts"
+
+# Cron secret + service role for hourly dispatch; staff JWT for dashboard test send.
+[functions.reminder-dispatch]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/reminder-dispatch/index.ts"
+
+[functions.reminder-action]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/reminder-action/index.ts"
+
+[functions.forms-send-alert-email]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/forms-send-alert-email/index.ts"
+
+[functions.pullcoparent-notify-expense]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/pullcoparent-notify-expense/index.ts"
+
+[functions.pullcoparent-notify-settlement]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/pullcoparent-notify-settlement/index.ts"
+
+[functions.pullcoparent-notify-child-want]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/pullcoparent-notify-child-want/index.ts"
+
+[functions.pullcoparent-revenuecat-webhook]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/pullcoparent-revenuecat-webhook/index.ts"
+
+[functions.pullcoparent-sync-subscription]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/pullcoparent-sync-subscription/index.ts"
+
+# Portal: preview gift card balance for online booking checkout (no JWT; service role lookup).
+[functions.booking-gift-card-preview]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/booking-gift-card-preview/index.ts"
+
+# Portal: complete booking when gift card covers full amount due (no Helcim).
+[functions.booking-complete-gift-card]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/booking-complete-gift-card/index.ts"
+
+

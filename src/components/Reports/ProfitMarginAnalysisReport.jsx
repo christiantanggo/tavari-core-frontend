@@ -4,6 +4,7 @@ import { supabase } from '../../supabaseClient';
 import { TavariStyles } from '../../utils/TavariStyles';
 import TavariCheckbox from '../UI/TavariCheckbox';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
+import { resolveSaleLineUnitCost } from '../../utils/posLineFoodCost';
 
 /**
  * Profit Margin Analysis Report Component
@@ -109,8 +110,8 @@ const ProfitMarginAnalysisReport = ({
         .select(`
           id, subtotal, tax, discount, loyalty_discount, total, created_at, user_id, payment_status,
           pos_sale_items (
-            id, inventory_id, name, quantity, unit_price, total_price, category_id,
-            pos_inventory!inner(id, name, cost, price, category_id)
+            id, inventory_id, name, quantity, unit_price, total_price, unit_cost, food_cost_total, category_id, modifiers,
+            pos_inventory(id, name, cost, price, category_id)
           )
         `)
         .eq('business_id', businessId)
@@ -145,7 +146,7 @@ const ProfitMarginAnalysisReport = ({
           const inventory = item.pos_inventory;
           const quantity = Number(item.quantity) || 0;
           const unitPrice = Number(item.unit_price) || 0;
-          const costPrice = Number(inventory?.cost) || 0; // FIXED: changed from cost_price to cost
+          const costPrice = resolveSaleLineUnitCost(item);
           
           const itemRevenue = quantity * unitPrice;
           const itemCost = quantity * costPrice;
@@ -216,7 +217,7 @@ const ProfitMarginAnalysisReport = ({
         
         const saleRevenue = Number(sale.subtotal) || 0;
         const saleCost = sale.pos_sale_items?.reduce((sum, item) => {
-          const costPrice = Number(item.pos_inventory?.cost) || 0; // FIXED: changed from cost_price to cost
+          const costPrice = resolveSaleLineUnitCost(item);
           const quantity = Number(item.quantity) || 0;
           return sum + (costPrice * quantity);
         }, 0) || 0;

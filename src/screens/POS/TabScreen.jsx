@@ -1438,7 +1438,7 @@ const TabScreen = () => {
     >
       <POSAuthWrapper
         requireBusiness={true}
-        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         componentName="Tab Management"
         onAuthReady={handleAuthReady}
       >

@@ -1,6 +1,7 @@
 // screens/Mail/ContactsDashboard.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { supabase } from '../../supabaseClient';
 import { 
   FiUsers, FiUserPlus, FiUserCheck, FiUserX, FiUpload, 
   FiSearch, FiFilter, FiAlertCircle 
@@ -13,6 +14,8 @@ import PermissionGate from '../../components/Auth/PermissionGate';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MailModuleTabs } from '../../components/Mail/MailModuleNavigation';
 import toast from 'react-hot-toast';
 
 const ContactsDashboard = () => {
@@ -47,6 +50,12 @@ const ContactsDashboard = () => {
     requireBusiness: true,
     componentName: 'ContactsDashboard'
   });
+
+  const businessId =
+    selectedBusinessId ||
+    businessData?.id ||
+    localStorage.getItem('currentBusinessId') ||
+    localStorage.getItem('businessId');
 
   // Permission system
   const { 
@@ -102,30 +111,67 @@ const ContactsDashboard = () => {
 
       await logSecurityEvent('contacts_dashboard_access', {
         action: 'load_contact_statistics',
-        business_id: selectedBusinessId,
+        business_id: businessId,
         user_id: authUser?.id
       }, 'low');
 
-      // TODO: Replace with actual Supabase calls
-      // const { data: contacts, error } = await supabase
-      //   .from('mail_contacts')
-      //   .select('id, subscribed, created_at')
-      //   .eq('business_id', selectedBusinessId);
-      
-      // Mock data for now
-      const mockStats = {
-        totalContacts: 1247,
-        subscribedContacts: 1189,
-        unsubscribedContacts: 58,
-        newContactsThisMonth: 143,
-        growthPercentage: 12.9
-      };
-      
-      setStats(mockStats);
-      await recordAction('contact_stats_loaded', true, selectedBusinessId);
+      if (!businessId) {
+        throw new Error('No business selected');
+      }
+
+      const { count: totalContacts, error: totalError } = await supabase
+        .from('mail_contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('business_id', businessId);
+
+      if (totalError) throw totalError;
+
+      const { count: subscribedContacts, error: subscribedError } = await supabase
+        .from('mail_contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('business_id', businessId)
+        .eq('subscribed', true);
+
+      if (subscribedError) throw subscribedError;
+
+      const now = new Date();
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+      const startOfPreviousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString();
+
+      const { count: newContactsThisMonth, error: newContactsError } = await supabase
+        .from('mail_contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('business_id', businessId)
+        .gte('created_at', startOfMonth);
+
+      if (newContactsError) throw newContactsError;
+
+      const { count: previousMonthContacts, error: previousMonthError } = await supabase
+        .from('mail_contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('business_id', businessId)
+        .gte('created_at', startOfPreviousMonth)
+        .lt('created_at', startOfMonth);
+
+      if (previousMonthError) throw previousMonthError;
+
+      const previous = previousMonthContacts || 0;
+      const current = newContactsThisMonth || 0;
+      const growthPercentage = previous > 0
+        ? ((current - previous) / previous) * 100
+        : (current > 0 ? 100 : 0);
+
+      setStats({
+        totalContacts: totalContacts || 0,
+        subscribedContacts: subscribedContacts || 0,
+        unsubscribedContacts: Math.max((totalContacts || 0) - (subscribedContacts || 0), 0),
+        newContactsThisMonth: current,
+        growthPercentage
+      });
+      await recordAction('contact_stats_loaded', true, businessId);
     } catch (error) {
       console.error('Error loading contact stats:', error);
-      await recordAction('contact_stats_loaded', false, selectedBusinessId);
+      await recordAction('contact_stats_loaded', false, businessId);
     } finally {
       setLoading(false);
     }
@@ -135,7 +181,7 @@ const ContactsDashboard = () => {
     logSecurityEvent('contacts_dashboard_navigation', {
       action: 'navigate',
       target_path: path,
-      business_id: selectedBusinessId,
+      business_id: businessId,
       user_id: authUser?.id
     }, 'low');
 
@@ -154,11 +200,11 @@ const ContactsDashboard = () => {
     
     logSecurityEvent('contacts_import_navigation', {
       action: 'navigate_to_import',
-      business_id: selectedBusinessId,
+      business_id: businessId,
       user_id: authUser?.id
     }, 'medium');
 
-    navigateTo('/dashboard/mail/contacts/import');
+    navigateTo('/dashboard/mail/contacts');
   };
 
   const handleAddContact = () => {
@@ -173,17 +219,22 @@ const ContactsDashboard = () => {
     
     logSecurityEvent('contacts_add_navigation', {
       action: 'navigate_to_add',
-      business_id: selectedBusinessId,
+      business_id: businessId,
       user_id: authUser?.id
     }, 'low');
 
-    navigateTo('/dashboard/mail/contacts/add');
+    navigateTo('/dashboard/mail/contacts');
   };
 
   if (authLoading || permissionsLoading || loading) {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner 
+            customMessage="Contact imports and email notifications are currently blocked. Go to Mail Settings to enable sending."
+          />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.loading}>Loading contact data...</div>
         </div>
       </POSAuthWrapper>
@@ -194,6 +245,11 @@ const ContactsDashboard = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner 
+            customMessage="Contact imports and email notifications are currently blocked. Go to Mail Settings to enable sending."
+          />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.errorState}>
             <FiAlertCircle style={styles.errorIcon} />
             <h2>Authentication Error</h2>
@@ -213,11 +269,8 @@ const ContactsDashboard = () => {
             customMessage="Contact imports and email notifications are currently blocked. Go to Mail Settings to enable sending."
           />
 
-          {/* Header */}
-          <div style={styles.header}>
-            <h1 style={styles.title}>Contact Management</h1>
-            <p style={styles.subtitle}>Manage your email subscribers and grow your audience</p>
-          </div>
+          <MailModuleHeader />
+          <MailModuleTabs />
 
           {/* Permission Warning */}
           {!canImportContacts && (
@@ -266,65 +319,60 @@ const ContactsDashboard = () => {
             </div>
           </div>
 
-          {/* Quick Actions */}
-          <div style={styles.quickActionsSection}>
-            <h2 style={styles.sectionTitle}>Quick Actions</h2>
-            
-            <div style={styles.buttonGrid}>
-              <PermissionGate 
-                permission="mail.contacts.import"
-                fallback={
-                  <button 
-                    style={styles.disabledButton}
-                    disabled
-                    title="You don't have permission to add contacts"
-                  >
-                    <FiUserPlus style={styles.buttonIcon} />
-                    <span style={styles.buttonText}>Add Contact</span>
-                    <span style={styles.permissionLabel}>No Permission</span>
-                  </button>
-                }
-              >
+          <div style={styles.buttonGrid}>
+            <PermissionGate 
+              permission="mail.contacts.import"
+              fallback={
                 <button 
-                  style={styles.primaryButton}
-                  onClick={handleAddContact}
+                  style={styles.disabledButton}
+                  disabled
+                  title="You don't have permission to add contacts"
                 >
                   <FiUserPlus style={styles.buttonIcon} />
                   <span style={styles.buttonText}>Add Contact</span>
+                  <span style={styles.permissionLabel}>No Permission</span>
                 </button>
-              </PermissionGate>
-              
-              <PermissionGate 
-                permission="mail.contacts.import"
-                fallback={
-                  <button 
-                    style={styles.disabledButton}
-                    disabled
-                    title="You don't have permission to import contacts"
-                  >
-                    <FiUpload style={styles.buttonIcon} />
-                    <span style={styles.buttonText}>Import Contacts</span>
-                    <span style={styles.permissionLabel}>No Permission</span>
-                  </button>
-                }
+              }
+            >
+              <button 
+                style={styles.primaryButton}
+                onClick={handleAddContact}
               >
+                <FiUserPlus style={styles.buttonIcon} />
+                <span style={styles.buttonText}>Add Contact</span>
+              </button>
+            </PermissionGate>
+            
+            <PermissionGate 
+              permission="mail.contacts.import"
+              fallback={
                 <button 
-                  style={styles.primaryButton}
-                  onClick={handleImportContacts}
+                  style={styles.disabledButton}
+                  disabled
+                  title="You don't have permission to import contacts"
                 >
                   <FiUpload style={styles.buttonIcon} />
                   <span style={styles.buttonText}>Import Contacts</span>
+                  <span style={styles.permissionLabel}>No Permission</span>
                 </button>
-              </PermissionGate>
-              
+              }
+            >
               <button 
                 style={styles.primaryButton}
-                onClick={() => navigateTo('/dashboard/mail/contacts')}
+                onClick={handleImportContacts}
               >
-                <FiUsers style={styles.buttonIcon} />
-                <span style={styles.buttonText}>View All Contacts</span>
+                <FiUpload style={styles.buttonIcon} />
+                <span style={styles.buttonText}>Import Contacts</span>
               </button>
-            </div>
+            </PermissionGate>
+            
+            <button 
+              style={styles.primaryButton}
+              onClick={() => navigateTo('/dashboard/mail/contacts')}
+            >
+              <FiUsers style={styles.buttonIcon} />
+              <span style={styles.buttonText}>View All Contacts</span>
+            </button>
           </div>
 
           {/* Contact Management Tools */}
@@ -406,7 +454,7 @@ const ContactsDashboard = () => {
               <div style={styles.insightAction}>
                 <button 
                   style={styles.insightButton}
-                  onClick={() => navigateTo('/dashboard/mail/analytics')}
+                  onClick={() => navigateTo('/dashboard/reports?tab=mail')}
                 >
                   View Detailed Analytics
                 </button>

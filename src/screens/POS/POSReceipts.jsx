@@ -14,13 +14,14 @@ import { logAction } from '../../helpers/posAudit';
 import dayjs from 'dayjs';
 import { SecurityWrapper } from '../../Security';
 import { useSecurityContext } from '../../Security';
+import { buildSaleAttributionDisplay } from '../../utils/posSaleAttribution';
 
 const POSReceipts = () => {
   const navigate = useNavigate();
   
   // Authentication
   const auth = usePOSAuth({
-    requiredRoles: ['cashier', 'manager', 'owner'],
+    requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'POSReceipts'
   });
@@ -51,11 +52,11 @@ const POSReceipts = () => {
   const canViewReceipts = hasAnyPermission([
     'pos.receipts.view',
     'pos.receipts.reprint',
-    'pos.receipts.refund'
+    'pos.sales.refund'
   ]) || hasElevatedPrivileges();
 
   const canReprintReceipts = hasPermission('pos.receipts.reprint') || hasElevatedPrivileges();
-  const canRefundReceipts = hasPermission('pos.receipts.refund') || hasElevatedPrivileges();
+  const canRefundReceipts = hasPermission('pos.sales.refund') || hasElevatedPrivileges();
   const canSearchReceipts = hasPermission('pos.receipts.search') || hasElevatedPrivileges();
 
   // Tax calculations for receipt details
@@ -156,8 +157,33 @@ const POSReceipts = () => {
 
       if (salesError) throw salesError;
 
+      const userIds = [
+        ...new Set(
+          (salesData || [])
+            .flatMap((sale) => [sale.user_id, sale.operator_user_id, sale.login_user_id])
+            .filter(Boolean)
+        )
+      ];
+
+      let usersById = {};
+      if (userIds.length > 0) {
+        const { data: userRows, error: usersError } = await supabase
+          .from('users')
+          .select('id, full_name, email')
+          .in('id', userIds);
+
+        if (usersError) throw usersError;
+
+        usersById = (userRows || []).reduce((acc, user) => {
+          acc[user.id] = user;
+          return acc;
+        }, {});
+      }
+
       // Get related data separately
       const processedReceipts = await Promise.all((salesData || []).map(async (sale) => {
+        const attribution = buildSaleAttributionDisplay(sale, usersById);
+
         // Get sale items
         const { data: items } = await supabase
           .from('pos_sale_items')
@@ -170,53 +196,96 @@ const POSReceipts = () => {
           .select('*')
           .eq('sale_id', sale.id);
 
-        // Get cashier info
-        const { data: cashier } = await supabase
-          .from('users')
-          .select('full_name, email')
-          .eq('id', sale.user_id)
-          .single();
+        // Get receipt record for fallback item/payment data and receipt metadata
+        const { data: receiptRecord } = await supabase
+          .from('pos_receipts')
+          .select(`
+            receipt_number,
+            receipt_type,
+            email_sent_to,
+            customer_name,
+            customer_phone,
+            customer_email,
+            employee_name,
+            operator_user_name,
+            login_user_name,
+            items,
+            payment_methods,
+            subtotal,
+            discount_amount,
+            loyalty_redemption,
+            tax_amount,
+            tip_amount,
+            change_given,
+            aggregated_taxes,
+            aggregated_rebates,
+            indian_status_gst_only,
+            indian_status_certificate_number,
+            created_at
+          `)
+          .eq('sale_id', sale.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const fallbackReceiptItems = Array.isArray(receiptRecord?.items) ? receiptRecord.items : [];
+        const receiptItems = (items && items.length > 0 ? items : fallbackReceiptItems);
+        const fallbackPaymentMethods = Array.isArray(receiptRecord?.payment_methods) ? receiptRecord.payment_methods : [];
+        const receiptPayments = (payments && payments.length > 0 ? payments : fallbackPaymentMethods);
+        const normalizedItems = (receiptItems || []).map(item => ({
+          name: item.name,
+          quantity: item.quantity,
+          price: item.unit_price ?? item.price ?? 0,
+          sku: item.sku,
+          modifiers: item.modifiers || []
+        }));
+        const recordedItemCount = Number(sale.item_count ?? normalizedItems.length ?? 0) || 0;
 
         return {
           id: sale.id,
           sale_id: sale.id,
-          receipt_number: sale.sale_number,
-          created_at: sale.created_at,
+          receipt_number: receiptRecord?.receipt_number || sale.sale_number,
+          created_at: receiptRecord?.created_at || sale.created_at,
           total: sale.total,
-          subtotal: sale.subtotal,
-          tax_amount: sale.tax,
-          discount_amount: sale.discount,
-          loyalty_redemption: sale.loyalty_discount,
-          tip_amount: sale.tip_amount || 0,
-          change_given: sale.change_given || 0,
-          receipt_type: sale.receipt_type || 'Standard',
-          email_sent_to: sale.customer_email,
-          customer_name: sale.customer_name || 'Walk-in',
-          customer_phone: sale.customer_phone,
-          customer_email: sale.customer_email,
-          cashier_name: cashier?.full_name || cashier?.email || 'Unknown',
-          items: (items || []).map(item => ({
-            name: item.name,
-            quantity: item.quantity,
-            price: item.unit_price,
-            sku: item.sku,
-            modifiers: item.modifiers || []
-          })),
-          payment_methods: (payments || []).map(payment => ({
-            method: payment.payment_method,
-            payment_method: payment.payment_method,
+          subtotal: receiptRecord?.subtotal ?? sale.subtotal,
+          tax_amount: receiptRecord?.tax_amount ?? sale.tax,
+          discount_amount: receiptRecord?.discount_amount ?? sale.discount,
+          loyalty_redemption: receiptRecord?.loyalty_redemption ?? sale.loyalty_discount,
+          tip_amount: receiptRecord?.tip_amount ?? sale.tip_amount ?? 0,
+          change_given: receiptRecord?.change_given ?? sale.change_given ?? 0,
+          receipt_type: receiptRecord?.receipt_type || sale.receipt_type || 'Standard',
+          email_sent_to: receiptRecord?.email_sent_to || sale.customer_email,
+          customer_name: receiptRecord?.customer_name || sale.customer_name || 'Walk-in',
+          customer_phone: receiptRecord?.customer_phone || sale.customer_phone,
+          customer_email: receiptRecord?.customer_email || sale.customer_email,
+          cashier_name: receiptRecord?.operator_user_name || receiptRecord?.employee_name || attribution.displayName,
+          cashier_display: attribution.displayWithContext,
+          operator_user_id: attribution.operatorUserId,
+          operator_user_name: receiptRecord?.operator_user_name || attribution.operatorUserName,
+          login_user_id: attribution.loginUserId,
+          login_user_name: receiptRecord?.login_user_name || attribution.loginUserName,
+          show_dual_attribution: attribution.showBoth || !!receiptRecord?.login_user_name,
+          items: normalizedItems,
+          item_count: normalizedItems.length || recordedItemCount,
+          missing_item_details: normalizedItems.length === 0 && recordedItemCount > 0,
+          payment_methods: (receiptPayments || []).map(payment => ({
+            method: payment.payment_method || payment.method,
+            payment_method: payment.payment_method || payment.method,
             amount: payment.amount,
             custom_method_name: payment.custom_method_name
           })),
-          payments: (payments || []).map(payment => ({
-            method: payment.payment_method,
-            payment_method: payment.payment_method,
+          payments: (receiptPayments || []).map(payment => ({
+            method: payment.payment_method || payment.method,
+            payment_method: payment.payment_method || payment.method,
             amount: payment.amount,
             custom_method_name: payment.custom_method_name
           })),
           status: 'completed',
-          aggregated_taxes: sale.aggregated_taxes || {},
-          aggregated_rebates: sale.aggregated_rebates || {}
+          aggregated_taxes: receiptRecord?.aggregated_taxes || sale.aggregated_taxes || {},
+          aggregated_rebates: receiptRecord?.aggregated_rebates || sale.aggregated_rebates || {},
+          indian_status_gst_only: receiptRecord?.indian_status_gst_only === true || sale.indian_status_gst_only === true,
+          indian_status_certificate_number: receiptRecord?.indian_status_certificate_number || sale.indian_status_certificate_number || null,
+          sale_notes: sale.notes || null
         };
       }));
 
@@ -302,6 +371,17 @@ const POSReceipts = () => {
     }
   };
 
+  const handleRefundReceipt = async (receipt) => {
+    if (!canRefundReceipts) {
+      setError('You do not have permission to process refunds');
+      return;
+    }
+
+    navigate('/dashboard/pos/refunds', {
+      state: { transactionId: receipt.sale_id || receipt.id }
+    });
+  };
+
   const handleReprintReceipt = async (receipt) => {
     if (!canReprintReceipts) {
       setError('You do not have permission to reprint receipts');
@@ -336,6 +416,50 @@ const POSReceipts = () => {
         earn_rate_percentage: businessSettings.earn_rate_percentage || 3
       };
 
+      // Try to enrich with full payment rows + sale notes (for accurate receipts + H-ID)
+      let paymentsForReceipt = Array.isArray(receipt.payments) ? receipt.payments : [];
+      let saleNotesForReceipt = receipt.sale_notes || receipt.notes || null;
+      let indianOnlyForReceipt = receipt.indian_status_gst_only === true;
+      let indianCertForReceipt = receipt.indian_status_certificate_number || null;
+      if (receipt.sale_id) {
+        try {
+          const [{ data: payRows, error: payErr }, { data: saleRow, error: saleErr }] = await Promise.all([
+            supabase
+              .from('pos_payments')
+              .select('payment_method, amount, custom_method_name, reference_number, notes, created_at')
+              .eq('sale_id', receipt.sale_id)
+              .order('created_at', { ascending: true }),
+            supabase
+              .from('pos_sales')
+              .select('notes, indian_status_gst_only, indian_status_certificate_number')
+              .eq('id', receipt.sale_id)
+              .maybeSingle()
+          ]);
+
+          if (!payErr && Array.isArray(payRows) && payRows.length > 0) {
+            paymentsForReceipt = payRows.map((p) => ({
+              payment_method: p.payment_method,
+              amount: Number(p.amount || 0),
+              custom_method_name: p.custom_method_name || null,
+              reference_number: p.reference_number || null,
+              notes: p.notes || null,
+            }));
+          }
+
+          if (!saleErr && saleRow) {
+            if (saleRow.notes) saleNotesForReceipt = saleRow.notes;
+            if (saleRow.indian_status_gst_only) {
+              indianOnlyForReceipt = true;
+              indianCertForReceipt =
+                saleRow.indian_status_certificate_number || indianCertForReceipt;
+            }
+          }
+        } catch (enrichErr) {
+          // Non-fatal; fallback to whatever we already have
+          console.warn('[POSReceipts] Failed to enrich receipt:', enrichErr?.message || enrichErr);
+        }
+      }
+
       // Format sale data for ReceiptBuilder
       const formattedSaleData = {
         sale_number: receipt.receipt_number || receipt.sale_number || 'N/A',
@@ -344,13 +468,21 @@ const POSReceipts = () => {
         subtotal: receipt.subtotal || 0,
         final_total: receipt.total || receipt.final_total || 0,
         tax_amount: receipt.tax_amount || receipt.final_tax_amount || 0,
-        payments: receipt.payment_methods || receipt.payments || [],
+        payments: paymentsForReceipt,
         tip_amount: receipt.tip_amount || 0,
         change_given: receipt.change_given || 0,
         discount_amount: receipt.discount_amount || 0,
         loyalty_redemption: receipt.loyalty_redemption || 0,
         aggregated_taxes: receipt.aggregated_taxes || {},
         aggregated_rebates: receipt.aggregated_rebates || {},
+        notes: saleNotesForReceipt,
+        indian_status_gst_only: indianOnlyForReceipt,
+        indian_status_certificate_number: indianCertForReceipt,
+        cashier_name: receipt.cashier_name,
+        operator_user_id: receipt.operator_user_id || null,
+        operator_user_name: receipt.operator_user_name || receipt.cashier_name,
+        login_user_id: receipt.login_user_id || null,
+        login_user_name: receipt.login_user_name || null,
         loyaltyCustomer: receipt.customer_name && receipt.customer_name !== 'Walk-in' ? {
           customer_name: receipt.customer_name,
           customer_email: receipt.customer_email,
@@ -360,14 +492,19 @@ const POSReceipts = () => {
       };
 
       // Generate and print receipt
-      const receiptHTML = generateReceiptHTML(
+      const receiptHTML = await generateReceiptHTML(
         formattedSaleData, 
         RECEIPT_TYPES.REPRINT, 
         formattedBusinessSettings,
         { reprintReason: 'Manager/Cashier Request' }
       );
 
-      printReceipt(receiptHTML);
+      await printReceipt(receiptHTML, {
+        saleData: formattedSaleData,
+        receiptType: RECEIPT_TYPES.REPRINT,
+        businessSettings: formattedBusinessSettings,
+        escposOptions: { reprintReason: 'Manager/Cashier Request' },
+      });
 
       await logSecurityEvent('receipt_reprinted', {
         transaction_id: receipt.id,
@@ -426,7 +563,9 @@ const POSReceipts = () => {
     const matchesSearch = searchTerm === '' || 
       receipt.receipt_number?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       receipt.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      receipt.cashier_name?.toLowerCase().includes(searchTerm.toLowerCase());
+      receipt.cashier_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      receipt.cashier_display?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      receipt.login_user_name?.toLowerCase().includes(searchTerm.toLowerCase());
     
     const matchesType = filterType === 'all' || 
       (filterType === 'email' && receipt.email_sent_to) ||
@@ -514,6 +653,7 @@ const POSReceipts = () => {
             <thead>
               <tr style={styles.headerRow}>
                 <th style={styles.th}>Receipt #</th>
+                <th style={styles.th}>Type</th>
                 <th style={styles.th}>Date</th>
                 <th style={styles.th}>Customer</th>
                 <th style={styles.th}>Cashier</th>
@@ -524,7 +664,7 @@ const POSReceipts = () => {
             <tbody>
               {filteredReceipts.length === 0 ? (
                 <tr>
-                  <td colSpan="6" style={styles.emptyCell}>
+                  <td colSpan="7" style={styles.emptyCell}>
                     {searchTerm || filterType !== 'all' 
                       ? 'No receipts match your search criteria' 
                       : 'No receipts found for the selected date range'
@@ -545,13 +685,29 @@ const POSReceipts = () => {
                       </span>
                     </td>
                     <td style={styles.td}>
+                      {receipt.indian_status_gst_only ? (
+                        <span style={{
+                          fontSize: TavariStyles.typography.fontSize.xs,
+                          fontWeight: TavariStyles.typography.fontWeight.semibold,
+                          color: TavariStyles.colors.primary
+                        }}>Indian GST</span>
+                      ) : (
+                        <span style={{ color: TavariStyles.colors.gray500, fontSize: TavariStyles.typography.fontSize.xs }}>—</span>
+                      )}
+                    </td>
+                    <td style={styles.td}>
                       {dayjs(receipt.created_at).format('MMM D, h:mm A')}
                     </td>
                     <td style={styles.td}>
                       {receipt.customer_name}
                     </td>
                     <td style={styles.td}>
-                      {receipt.cashier_name}
+                      <div>{receipt.cashier_name}</div>
+                      {receipt.show_dual_attribution && (
+                        <div style={{ fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray500 }}>
+                          Logged in as {receipt.login_user_name}
+                        </div>
+                      )}
                     </td>
                     <td style={styles.td}>
                       ${parseFloat(receipt.total).toFixed(2)}
@@ -579,7 +735,7 @@ const POSReceipts = () => {
     return (
       <SecurityWrapper>
         <POSAuthWrapper
-          requiredRoles={['cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="POS Receipts"
         >
@@ -599,7 +755,7 @@ const POSReceipts = () => {
   return (
     <SecurityWrapper>
       <POSAuthWrapper
-        requiredRoles={['cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         requireBusiness={true}
         componentName="POS Receipts"
       >
@@ -720,6 +876,12 @@ const POSReceipts = () => {
                       <span style={styles.detailLabel}>Cashier:</span>
                       <span style={styles.detailValue}>{selectedReceipt.cashier_name}</span>
                     </div>
+                    {selectedReceipt.show_dual_attribution && (
+                      <div style={styles.detailRow}>
+                        <span style={styles.detailLabel}>Logged In As:</span>
+                        <span style={styles.detailValue}>{selectedReceipt.login_user_name}</span>
+                      </div>
+                    )}
                     <div style={styles.detailRow}>
                       <span style={styles.detailLabel}>Type:</span>
                       <span style={styles.detailValue}>{selectedReceipt.receipt_type}</span>
@@ -733,7 +895,7 @@ const POSReceipts = () => {
                   </div>
 
                   <div style={styles.itemsSection}>
-                    <h4 style={styles.sectionTitle}>Items ({selectedReceipt.items?.length || 0})</h4>
+                    <h4 style={styles.sectionTitle}>Items ({selectedReceipt.item_count ?? (selectedReceipt.items?.length || 0)})</h4>
                     <div style={styles.itemsContainer}>
                       {selectedReceipt.items && selectedReceipt.items.length > 0 ? (
                         <table style={styles.itemsTable}>
@@ -761,7 +923,11 @@ const POSReceipts = () => {
                           </tbody>
                         </table>
                       ) : (
-                        <div style={styles.noItems}>No item details available</div>
+                        <div style={styles.noItems}>
+                          {selectedReceipt.missing_item_details
+                            ? `This sale recorded ${selectedReceipt.item_count} item${selectedReceipt.item_count === 1 ? '' : 's'}, but the line-item details were not stored.`
+                            : 'No item details available'}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -776,14 +942,14 @@ const POSReceipts = () => {
                       </div>
                     )}
                     
-                    {selectedReceipt.discount_amount && parseFloat(selectedReceipt.discount_amount) > 0 && (
+                    {Number(selectedReceipt.discount_amount || 0) > 0 && (
                       <div style={styles.summaryRow}>
                         <span>Discount:</span>
                         <span>-${parseFloat(selectedReceipt.discount_amount).toFixed(2)}</span>
                       </div>
                     )}
                     
-                    {selectedReceipt.loyalty_redemption && parseFloat(selectedReceipt.loyalty_redemption) > 0 && (
+                    {Number(selectedReceipt.loyalty_redemption || 0) > 0 && (
                       <div style={styles.summaryRow}>
                         <span>Loyalty Redemption:</span>
                         <span>-${parseFloat(selectedReceipt.loyalty_redemption).toFixed(2)}</span>
@@ -805,19 +971,18 @@ const POSReceipts = () => {
                 </div>
                 
                 <div style={styles.modalFooter}>
-                  {canReprintReceipts && (
-                    <PermissionGate
-                      permissions={['pos.receipts.reprint']}
-                      requireElevated
-                    >
-                      <button 
-                        style={styles.reprintButton} 
-                        onClick={() => handleReprintReceipt(selectedReceipt)}
-                      >
-                        Reprint Receipt
-                      </button>
-                    </PermissionGate>
-                  )}
+                  <button
+                    style={styles.viewButton}
+                    onClick={() => handleRefundReceipt(selectedReceipt)}
+                  >
+                    Refund
+                  </button>
+                  <button 
+                    style={styles.reprintButton} 
+                    onClick={() => handleReprintReceipt(selectedReceipt)}
+                  >
+                    Reprint Receipt
+                  </button>
                   <button 
                     style={styles.closeModalButton} 
                     onClick={closeReceiptModal}

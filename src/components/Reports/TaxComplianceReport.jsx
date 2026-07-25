@@ -43,7 +43,15 @@ const TaxComplianceReport = ({
     refundedTax: 0,
     netTaxOwed: 0,
     aggregatedTaxes: {},
-    aggregatedRebates: {}
+    aggregatedRebates: {},
+    indianStatusTransactions: [],
+    indianStatusSummary: {
+      transactionCount: 0,
+      subtotal: 0,
+      taxCollected: 0,
+      total: 0,
+      rebates: 0
+    }
   });
   
   const [loading, setLoading] = useState(false);
@@ -72,6 +80,7 @@ const TaxComplianceReport = ({
         .from('pos_sales')
         .select(`
           id, subtotal, tax, total, created_at, user_id, aggregated_taxes, aggregated_rebates,
+          indian_status_gst_only, indian_status_certificate_number,
           pos_sale_items (
             id, inventory_id, name, quantity, unit_price, total_price, 
             category_id, tax_rate, tax_exempt, tax_amount, tax_details,
@@ -138,6 +147,14 @@ const TaxComplianceReport = ({
     const salesTaxBreakdown = [];
     const aggregatedTaxes = {};
     const aggregatedRebates = {};
+    const indianStatusTransactions = [];
+    const indianStatusSummary = {
+      transactionCount: 0,
+      subtotal: 0,
+      taxCollected: 0,
+      total: 0,
+      rebates: 0
+    };
 
     // First pass: calculate totals for effective tax rate
     sales.forEach(sale => {
@@ -170,6 +187,31 @@ const TaxComplianceReport = ({
         Object.entries(sale.aggregated_rebates).forEach(([rebateType, amount]) => {
           aggregatedRebates[rebateType] = (aggregatedRebates[rebateType] || 0) + Number(amount);
         });
+      }
+
+      if (sale.indian_status_gst_only || sale.indian_status_certificate_number) {
+        const saleRebates = sale.aggregated_rebates && typeof sale.aggregated_rebates === 'object'
+          ? Object.values(sale.aggregated_rebates).reduce((sum, amount) => sum + Number(amount || 0), 0)
+          : 0;
+
+        indianStatusTransactions.push({
+          saleId: sale.id,
+          date: sale.created_at,
+          certificateNumber: sale.indian_status_certificate_number || 'Not provided',
+          gstOnly: !!sale.indian_status_gst_only,
+          subtotal: Number(sale.subtotal) || 0,
+          taxCollected: saleTax,
+          total: Number(sale.total) || 0,
+          aggregatedTaxes: sale.aggregated_taxes || {},
+          aggregatedRebates: sale.aggregated_rebates || {},
+          rebateTotal: saleRebates
+        });
+
+        indianStatusSummary.transactionCount += 1;
+        indianStatusSummary.subtotal += Number(sale.subtotal) || 0;
+        indianStatusSummary.taxCollected += saleTax;
+        indianStatusSummary.total += Number(sale.total) || 0;
+        indianStatusSummary.rebates += saleRebates;
       }
 
       // Process individual items for detailed breakdown
@@ -257,7 +299,9 @@ const TaxComplianceReport = ({
       refundedTax,
       netTaxOwed,
       aggregatedTaxes,
-      aggregatedRebates
+      aggregatedRebates,
+      indianStatusTransactions: indianStatusTransactions.sort((a, b) => new Date(b.date) - new Date(a.date)),
+      indianStatusSummary
     };
   };
 
@@ -308,6 +352,12 @@ const TaxComplianceReport = ({
   const formatCurrency = (amount) => `$${(amount || 0).toFixed(2)}`;
   const formatPercentage = (percent) => `${(percent * 100 || 0).toFixed(2)}%`;
   const formatDate = (dateString) => new Date(dateString).toLocaleDateString();
+  const formatTaxMap = (values = {}) => {
+    if (!values || Object.keys(values).length === 0) return 'None';
+    return Object.entries(values)
+      .map(([type, amount]) => `${type}: ${formatCurrency(Number(amount) || 0)}`)
+      .join(' | ');
+  };
 
   const exportData = {
     csv: () => {
@@ -356,6 +406,15 @@ const TaxComplianceReport = ({
         });
         csvContent += "\n";
       }
+
+      if (taxData.indianStatusTransactions.length > 0) {
+        csvContent += "Indian Status Transactions\n";
+        csvContent += "Date,Certificate Number,GST Only,Subtotal,Tax Collected,Total,Tax Breakdown,Tax Rebates\n";
+        taxData.indianStatusTransactions.forEach((transaction) => {
+          csvContent += `${formatDate(transaction.date)},${transaction.certificateNumber},${transaction.gstOnly ? 'Yes' : 'No'},${transaction.subtotal.toFixed(2)},${transaction.taxCollected.toFixed(2)},${transaction.total.toFixed(2)},"${formatTaxMap(transaction.aggregatedTaxes)}","${formatTaxMap(transaction.aggregatedRebates)}"\n`;
+        });
+        csvContent += "\n";
+      }
       
       // Daily Breakdown
       csvContent += "Daily Tax Breakdown\n";
@@ -398,6 +457,18 @@ ${Object.keys(taxData.aggregatedTaxes).length > 0 ? `
 AGGREGATED TAXES:
 ${Object.entries(taxData.aggregatedTaxes).map(([type, amount]) => 
   `• ${type}: ${formatCurrency(amount)}`
+).join('\n')}
+` : ''}
+
+${taxData.indianStatusTransactions.length > 0 ? `
+INDIAN STATUS TRANSACTIONS:
+- Count: ${taxData.indianStatusSummary.transactionCount}
+- Subtotal: ${formatCurrency(taxData.indianStatusSummary.subtotal)}
+- Tax Collected: ${formatCurrency(taxData.indianStatusSummary.taxCollected)}
+- Tax Rebates: ${formatCurrency(taxData.indianStatusSummary.rebates)}
+
+${taxData.indianStatusTransactions.map((transaction) =>
+  `• ${formatDate(transaction.date)} | Cert ${transaction.certificateNumber} | GST Only: ${transaction.gstOnly ? 'Yes' : 'No'} | Tax: ${formatCurrency(transaction.taxCollected)} | Taxes: ${formatTaxMap(transaction.aggregatedTaxes)} | Rebates: ${formatTaxMap(transaction.aggregatedRebates)}`
 ).join('\n')}
 ` : ''}
 
@@ -612,6 +683,12 @@ Note: Tax refunded amounts are estimated based on effective tax rate.
       borderRadius: TavariStyles.borderRadius.sm,
       border: `1px solid ${TavariStyles.colors.gray200}`
     },
+
+    noteText: {
+      fontSize: TavariStyles.typography.fontSize.xs,
+      color: TavariStyles.colors.gray600,
+      marginTop: TavariStyles.spacing.xs
+    },
     
     noData: {
       textAlign: 'center',
@@ -754,6 +831,60 @@ Note: Tax refunded amounts are estimated based on effective tax rate.
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Indian Status Transactions */}
+      {taxData.indianStatusTransactions.length > 0 && (
+        <div style={styles.section}>
+          <h4 style={styles.sectionTitle}>Indian Status Transactions</h4>
+          <div style={styles.summaryGrid}>
+            <div style={styles.summaryCard}>
+              <div style={styles.summaryValue}>{taxData.indianStatusSummary.transactionCount}</div>
+              <div style={styles.summaryLabel}>Transactions</div>
+            </div>
+            <div style={styles.summaryCard}>
+              <div style={styles.summaryValue}>{formatCurrency(taxData.indianStatusSummary.subtotal)}</div>
+              <div style={styles.summaryLabel}>Subtotal</div>
+            </div>
+            <div style={styles.summaryCard}>
+              <div style={styles.summaryValue}>{formatCurrency(taxData.indianStatusSummary.taxCollected)}</div>
+              <div style={styles.summaryLabel}>Tax Collected</div>
+            </div>
+            <div style={styles.summaryCard}>
+              <div style={styles.summaryValue}>{formatCurrency(taxData.indianStatusSummary.rebates)}</div>
+              <div style={styles.summaryLabel}>Tax Rebates</div>
+            </div>
+          </div>
+          <p style={styles.noteText}>
+            These transactions include the saved Indian status certificate number and the exact tax and rebate breakdown stored on each sale.
+          </p>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Date</th>
+                <th style={styles.th}>Certificate #</th>
+                <th style={styles.th}>GST Only</th>
+                <th style={styles.th}>Subtotal</th>
+                <th style={styles.th}>Tax Collected</th>
+                <th style={styles.th}>Tax Breakdown</th>
+                <th style={styles.th}>Rebates</th>
+              </tr>
+            </thead>
+            <tbody>
+              {taxData.indianStatusTransactions.map((transaction) => (
+                <tr key={transaction.saleId}>
+                  <td style={styles.td}>{formatDate(transaction.date)}</td>
+                  <td style={styles.td}>{transaction.certificateNumber}</td>
+                  <td style={styles.td}>{transaction.gstOnly ? 'Yes' : 'No'}</td>
+                  <td style={styles.td}>{formatCurrency(transaction.subtotal)}</td>
+                  <td style={styles.td}>{formatCurrency(transaction.taxCollected)}</td>
+                  <td style={styles.td}>{formatTaxMap(transaction.aggregatedTaxes)}</td>
+                  <td style={styles.td}>{formatTaxMap(transaction.aggregatedRebates)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 

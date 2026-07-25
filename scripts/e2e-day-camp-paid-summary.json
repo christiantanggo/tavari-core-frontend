@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "ok": true,
+      "msg": "Logged in via portal session (Christian + Helcim CST7595)"
+    },
+    {
+      "ok": true,
+      "msg": "Selected Aug 21"
+    },
+    {
+      "ok": true,
+      "msg": "Selected 8:30"
+    },
+    {
+      "ok": true,
+      "msg": "Picked birthdate 2021-09-01 for new child"
+    },
+    {
+      "ok": true,
+      "msg": "Added child E2E Campkid1266"
+    },
+    {
+      "ok": true,
+      "msg": "Reached waiver step"
+    },
+    {
+      "ok": true,
+      "msg": "Waiver flow completed / returned"
+    },
+    {
+      "ok": false,
+      "msg": "Did not reach camper registration for new child",
+      "detail": "Have all children been added?\n\nPlease confirm that every child has been added, including babies and any child who is not playing.\n\nBack\nYes, continue\nAdd Children\n\nAdd every child who needs a waiver before continuing to the waiver review.\n\nChild Waiver Reminder\n\nBefore you continue, make sure every child has been added, including babies and any child who is not playing.\n\nAdded So Far\nPRIMARY ADULT"
+    },
+    {
+      "ok": true,
+      "msg": "Checkout amount text sample: n/a"
+    },
+    {
+      "ok": false,
+      "msg": "Pay with card stayed disabled",
+      "detail": "Session About to Expire\n\nYour session will return to the start in 0 seconds due to inactivity.\n\n0 seconds remaining\nEnd Session\nExtend Session\nHave all children been added?\n\nPlease confirm that every child has been added, including babies and any child who is not playing.\n\nBack\nYes, continue\nAdd Children\n\nAdd every child who needs a waiver before continuing to the waiver review.\n\nChild Waiver Remi"
+    },
+    {
+      "ok": false,
+      "msg": "Helcim payment did not reach Booking Confirmed",
+      "detail": "Session About to Expire\n\nYour session will return to the start in 0 seconds due to inactivity.\n\n0 seconds remaining\nEnd Session\nExtend Session\nHave all children been added?\n\nPlease confirm that every child has been added, including babies and any child who is not playing.\n\nBack\nYes, continue\nAdd Children\n\nAdd every child who needs a waiver before continuing to the waiver review.\n\nChild Waiver Reminder\n\nBefore you continue, make sure every child has been added, including babies and any child who "
+    }
+  ],
+  "child": {
+    "firstName": "E2E",
+    "lastName": "Campkid1266",
+    "year": "2021",
+    "monthIndex": 8,
+    "day": "1"
+  },
+  "prefillChecks": {},
+  "url": "http://localhost:5174/waiver-from-booking/cb982fca-cf7a-4f59-b9c7-55ca0364eddc/off-the-wall-kids-london-liability-waiver-test-2?returnUrl=http%3A%2F%2Flocalhost%3A5174%2Fcustomer-portal%2Fcb982fca-cf7a-4f59-b9c7-55ca0364eddc%2Fportal%2F6df2118d-d593-4b10-8253-b121a367027b%3FwaiverDone%3D1"
+}

@@ -8,6 +8,9 @@ import {
   FiTag, FiCalendar, FiUserCheck, FiUserX, FiTrash2, FiRefreshCw, 
   FiSend, FiAlertCircle
 } from 'react-icons/fi';
+import TavariCheckbox from '../../components/UI/TavariCheckbox';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MailModuleTabs } from '../../components/Mail/MailModuleNavigation';
 
 // Permission System Imports
 import { usePermissions } from '../../hooks/usePermissions';
@@ -16,6 +19,7 @@ import { usePOSAuth } from '../../hooks/usePOSAuth';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
 import toast from 'react-hot-toast';
+import { logConsentAction, syncResubscribeState } from '../../helpers/Mail/subscriptionSync';
 
 const ContactDetails = () => {
   const navigate = useNavigate();
@@ -67,12 +71,16 @@ const ContactDetails = () => {
   const [errors, setErrors] = useState({});
   const [engagementHistory, setEngagementHistory] = useState([]);
 
-  const businessId = selectedBusinessId;
+  const businessId =
+    selectedBusinessId ||
+    businessData?.id ||
+    localStorage.getItem('currentBusinessId') ||
+    localStorage.getItem('businessId');
 
   // Permission checks
   const canViewContacts = hasPermission('mail.contacts.view') || hasElevatedPrivileges();
-  const canEditContacts = hasPermission('mail.contacts.import') || hasElevatedPrivileges();
-  const canDeleteContacts = hasPermission('mail.contacts.export') || hasElevatedPrivileges();
+  const canEditContacts = hasPermission('mail.contacts.edit') || hasElevatedPrivileges();
+  const canDeleteContacts = hasPermission('mail.contacts.delete') || hasElevatedPrivileges();
   const canSendEmails = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
 
   // Check permissions on mount
@@ -147,26 +155,119 @@ const ContactDetails = () => {
 
   const loadEngagementHistory = async () => {
     try {
-      // TODO: Load engagement history when campaign sending is implemented
-      // For now, show placeholder data structure
-      setEngagementHistory([
-        {
-          id: '1',
-          type: 'campaign_sent',
-          campaign_name: 'Summer Special Offer',
-          date: '2024-08-10T14:30:00Z',
-          status: 'delivered'
-        },
-        {
-          id: '2', 
-          type: 'subscription_change',
-          action: 'subscribed',
-          date: '2024-08-01T10:15:00Z',
-          source: 'manual'
-        }
+      if (!businessId || !id) {
+        setEngagementHistory([]);
+        return;
+      }
+
+      const [sendsResult, consentResult] = await Promise.all([
+        supabase
+          .from('mail_campaign_sends')
+          .select(`
+            id,
+            status,
+            sent_at,
+            delivered_at,
+            opened_at,
+            clicked_at,
+            unsubscribed_at,
+            error_message,
+            created_at,
+            mail_campaigns(name)
+          `)
+          .eq('contact_id', id)
+          .order('created_at', { ascending: false })
+          .limit(25),
+        supabase
+          .from('mail_consent_log')
+          .select('id, action, consent_source, consent_method, timestamp')
+          .eq('contact_id', id)
+          .eq('business_id', businessId)
+          .order('timestamp', { ascending: false })
+          .limit(25)
       ]);
+
+      if (sendsResult.error) throw sendsResult.error;
+      if (consentResult.error) throw consentResult.error;
+
+      const sendEvents = (sendsResult.data || []).flatMap((entry) => {
+        const campaignName = entry.mail_campaigns?.name || 'Campaign';
+        const events = [];
+
+        if (entry.sent_at || entry.created_at) {
+          events.push({
+            id: `${entry.id}-sent`,
+            type: 'campaign_sent',
+            campaign_name: campaignName,
+            date: entry.sent_at || entry.created_at,
+            status: entry.status
+          });
+        }
+
+        if (entry.opened_at) {
+          events.push({
+            id: `${entry.id}-opened`,
+            type: 'campaign_opened',
+            campaign_name: campaignName,
+            date: entry.opened_at,
+            status: 'opened'
+          });
+        }
+
+        if (entry.clicked_at) {
+          events.push({
+            id: `${entry.id}-clicked`,
+            type: 'campaign_clicked',
+            campaign_name: campaignName,
+            date: entry.clicked_at,
+            status: 'clicked'
+          });
+        }
+
+        if (entry.unsubscribed_at) {
+          events.push({
+            id: `${entry.id}-unsubscribed`,
+            type: 'subscription_change',
+            action: 'unsubscribe',
+            source: 'campaign_link',
+            method: 'self_service',
+            date: entry.unsubscribed_at,
+            status: 'unsubscribed'
+          });
+        }
+
+        if (entry.status === 'failed' && entry.error_message) {
+          events.push({
+            id: `${entry.id}-failed`,
+            type: 'campaign_failed',
+            campaign_name: campaignName,
+            date: entry.created_at || entry.sent_at,
+            status: entry.error_message
+          });
+        }
+
+        return events;
+      });
+
+      const consentEvents = (consentResult.data || []).map((entry) => ({
+        id: `consent-${entry.id}`,
+        type: 'subscription_change',
+        action: entry.action,
+        source: entry.consent_source || 'unknown',
+        method: entry.consent_method || 'unknown',
+        date: entry.timestamp,
+        status: entry.action
+      }));
+
+      const combinedHistory = [...sendEvents, ...consentEvents]
+        .filter((entry) => entry.date)
+        .sort((a, b) => new Date(b.date) - new Date(a.date))
+        .slice(0, 30);
+
+      setEngagementHistory(combinedHistory);
     } catch (error) {
       console.error('Error loading engagement history:', error);
+      setEngagementHistory([]);
     }
   };
 
@@ -249,6 +350,25 @@ const ContactDetails = () => {
         .eq('id', id);
 
       if (error) throw error;
+
+      if (editData.subscribed !== contact.subscribed) {
+        if (editData.subscribed) {
+          await syncResubscribeState({
+            businessId,
+            contactId: id,
+            emailAddress: updates.email,
+            source: 'contact_details_edit'
+          });
+        } else {
+          await logConsentAction({
+            businessId,
+            contactId: id,
+            emailAddress: updates.email,
+            action: 'unsubscribe',
+            source: 'contact_details_edit'
+          });
+        }
+      }
 
       // Log audit event
       await supabase.from('audit_logs').insert({
@@ -374,6 +494,23 @@ const ContactDetails = () => {
 
       if (error) throw error;
 
+      if (newSubscribed) {
+        await syncResubscribeState({
+          businessId,
+          contactId: id,
+          emailAddress: contact.email,
+          source: 'contact_details_toggle'
+        });
+      } else {
+        await logConsentAction({
+          businessId,
+          contactId: id,
+          emailAddress: contact.email,
+          action: 'unsubscribe',
+          source: 'contact_details_toggle'
+        });
+      }
+
       // Log audit event
       await supabase.from('audit_logs').insert({
         business_id: businessId,
@@ -413,8 +550,12 @@ const ContactDetails = () => {
       user_id: authUser?.id
     }, 'medium');
 
-    // TODO: Implement direct email sending functionality
-    toast.info('Direct email sending functionality will be implemented when email service is ready.');
+    const subject = encodeURIComponent(`Hello ${contact.first_name || contact.last_name || ''}`.trim() || 'Hello');
+    const mailtoUrl = `mailto:${encodeURIComponent(contact.email)}?subject=${subject}`;
+
+    window.location.href = mailtoUrl;
+    toast.success('Opened an email draft addressed to this contact.');
+    await recordAction('direct_email_opened', true, id);
   };
 
   const handleAddToCampaign = async () => {
@@ -457,6 +598,11 @@ const ContactDetails = () => {
     switch (type) {
       case 'campaign_sent':
         return <FiMail style={{ color: 'teal' }} />;
+      case 'campaign_opened':
+      case 'campaign_clicked':
+        return <FiSend style={{ color: '#4caf50' }} />;
+      case 'campaign_failed':
+        return <FiAlertCircle style={{ color: '#f44336' }} />;
       case 'subscription_change':
         return <FiRefreshCw style={{ color: '#666' }} />;
       default:
@@ -467,9 +613,15 @@ const ContactDetails = () => {
   const getEngagementDescription = (item) => {
     switch (item.type) {
       case 'campaign_sent':
-        return `Received campaign: ${item.campaign_name}`;
+        return `Campaign sent: ${item.campaign_name}`;
+      case 'campaign_opened':
+        return `Opened campaign: ${item.campaign_name}`;
+      case 'campaign_clicked':
+        return `Clicked campaign: ${item.campaign_name}`;
+      case 'campaign_failed':
+        return `Send failed: ${item.campaign_name}`;
       case 'subscription_change':
-        return `${item.action === 'subscribed' ? 'Subscribed' : 'Unsubscribed'} via ${item.source}`;
+        return `${item.action === 'subscribe' || item.action === 'resubscribe' ? 'Subscribed' : 'Unsubscribed'} via ${item.source}${item.method ? ` (${item.method})` : ''}`;
       default:
         return item.description || 'Activity';
     }
@@ -480,6 +632,8 @@ const ContactDetails = () => {
       <POSAuthWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.loading}>Loading contact...</div>
         </div>
       </POSAuthWrapper>
@@ -491,6 +645,8 @@ const ContactDetails = () => {
       <POSAuthWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.errorState}>
             <FiAlertCircle style={styles.errorIcon} />
             <h2>Authentication Error</h2>
@@ -506,6 +662,8 @@ const ContactDetails = () => {
       <POSAuthWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.notFound}>Contact not found</div>
         </div>
       </POSAuthWrapper>
@@ -517,6 +675,8 @@ const ContactDetails = () => {
       <SecurityWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           
           {/* Header */}
           <div style={styles.header}>
@@ -555,7 +715,7 @@ const ContactDetails = () => {
                       onClick={handleSendDirectEmail}
                     >
                       <FiSend style={styles.buttonIcon} />
-                      Send Email
+                      Open Email Draft
                     </button>
                     <button 
                       style={styles.campaignButton}
@@ -568,7 +728,7 @@ const ContactDetails = () => {
                 )}
               </PermissionGate>
               
-              <PermissionGate permission="mail.contacts.import">
+              <PermissionGate permission="mail.contacts.edit">
                 <button 
                   style={styles.subscriptionButton}
                   onClick={handleSubscriptionToggle}
@@ -578,7 +738,7 @@ const ContactDetails = () => {
                 </button>
               </PermissionGate>
 
-              <PermissionGate permission="mail.contacts.import">
+              <PermissionGate permission="mail.contacts.edit">
                 {!editing ? (
                   <button 
                     style={styles.editButton}
@@ -631,7 +791,7 @@ const ContactDetails = () => {
                 
                 {editing ? (
                   <PermissionGate 
-                    permission="mail.contacts.import"
+                    permission="mail.contacts.edit"
                     fallback={
                       <div style={styles.permissionDenied}>
                         <FiAlertCircle style={styles.permissionIcon} />
@@ -717,15 +877,15 @@ const ContactDetails = () => {
                       </div>
 
                       <div style={styles.formGroup}>
-                        <label style={styles.checkboxLabel}>
-                          <input
-                            type="checkbox"
+                        <div style={styles.checkboxLabel}>
+                          <TavariCheckbox
                             checked={editData.subscribed}
-                            onChange={(e) => setEditData(prev => ({ ...prev, subscribed: e.target.checked }))}
+                            onChange={(checked) => setEditData(prev => ({ ...prev, subscribed: checked }))}
+                            id="contact-details-subscribed"
+                            label="Subscribed to emails"
                             style={styles.checkbox}
                           />
-                          Subscribed to emails
-                        </label>
+                        </div>
                       </div>
 
                       {errors.submit && (
@@ -832,7 +992,7 @@ const ContactDetails = () => {
 
             {/* Danger Zone */}
             <PermissionGate 
-              permission="mail.contacts.export"
+              permission="mail.contacts.delete"
               fallback={
                 <div style={styles.dangerZone}>
                   <h3 style={styles.dangerTitle}>Delete Contact</h3>

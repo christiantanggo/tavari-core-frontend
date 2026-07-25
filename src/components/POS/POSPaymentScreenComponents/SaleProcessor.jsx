@@ -2,6 +2,7 @@
 import React from 'react';
 import { supabase } from '../../../supabaseClient';
 import { logAction } from '../../../helpers/posAudit';
+import { formatPosUserName } from '../../../utils/posSaleAttribution';
 
 export const useSaleProcessor = (auth, taxCalc, businessSettings) => {
   // Generate receipt number with retry logic to prevent duplicates
@@ -66,9 +67,21 @@ export const useSaleProcessor = (auth, taxCalc, businessSettings) => {
     return `${receiptNumber}-${auth.selectedBusinessId.slice(-8)}`;
   };
 
-  const createReceiptRecord = async (saleId, receiptNumber, qrCode, saleData, payments, tipAmount, changeOwed, displayTotal, taxCalculation, finalTaxAmount, saleSubtotal, discountAmount, loyaltyRedemption) => {
+  const createReceiptRecord = async (saleId, receiptNumber, qrCode, saleData, payments, tipAmount, changeOwed, displayTotal, taxCalculation, finalTaxAmount, saleSubtotal, discountAmount, loyaltyRedemption, attribution = {}) => {
     try {
       console.log('Creating receipt record for sale:', saleId);
+
+      const normalizedOperatorName = formatPosUserName(
+        attribution.operatorUserName,
+        auth.activePOSUser,
+        auth.authUser?.user_metadata,
+        auth.authUser
+      );
+      const normalizedLoginName = formatPosUserName(
+        attribution.loginUserName,
+        auth.authUser?.user_metadata,
+        auth.authUser
+      );
       
       const receiptData = {
         business_id: auth.selectedBusinessId,
@@ -90,9 +103,15 @@ export const useSaleProcessor = (auth, taxCalc, businessSettings) => {
         customer_name: saleData.loyaltyCustomer?.customer_name || null,
         customer_phone: saleData.loyaltyCustomer?.customer_phone || null,
         customer_email: saleData.loyaltyCustomer?.customer_email || null,
-        employee_name: auth.authUser?.email || 'Unknown',
+        employee_name: normalizedOperatorName,
+        login_user_id: attribution.loginUserId || auth.authUser?.id || null,
+        operator_user_id: attribution.operatorUserId || auth.activePOSUser?.id || auth.authUser?.id || null,
+        login_user_name: normalizedLoginName,
+        operator_user_name: normalizedOperatorName,
         business_name: businessSettings?.name || 'Business',
-        cash_rounding_applied: taxCalc.applyCashRounding(displayTotal, 'cash') !== displayTotal
+        cash_rounding_applied: taxCalc.applyCashRounding(displayTotal, 'cash') !== displayTotal,
+        indian_status_gst_only: !!saleData?.indian_status_gst_only,
+        indian_status_certificate_number: saleData?.indian_status_certificate_number?.trim() || null
       };
 
       const { data: receipt, error: receiptError } = await supabase

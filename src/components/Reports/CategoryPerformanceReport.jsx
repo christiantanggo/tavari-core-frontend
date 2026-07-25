@@ -27,7 +27,7 @@ const CategoryPerformanceReport = ({
     if (sale.pos_sale_items) {
       sale.pos_sale_items.forEach(item => {
         const categoryId = item.category_id || 'uncategorized';
-        const categoryName = item.category_name || 'Uncategorized';
+        const categoryName = item.category_name || item.pos_categories?.name || 'Uncategorized';
         
         if (!categoryStats[categoryId]) {
           categoryStats[categoryId] = {

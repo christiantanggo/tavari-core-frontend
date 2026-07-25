@@ -3,6 +3,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../../supabaseClient';
 import { usePOSAuth } from '../../../hooks/usePOSAuth';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import { insertAuditLog } from '../../../utils/auditLogInsert';
+import { fetchRegisterStations, resolveStationLabel } from '../../../services/posRegisterStationsService';
 import bcrypt from 'bcryptjs';
 
 const POSDepositHistoryComponent = ({ 
@@ -39,6 +41,15 @@ const POSDepositHistoryComponent = ({
   
   // Export state
   const [exporting, setExporting] = useState(false);
+  const [registerStations, setRegisterStations] = useState([]);
+
+  useEffect(() => {
+    if (businessId) {
+      fetchRegisterStations(businessId, { activeOnly: false }).then(({ data }) => {
+        setRegisterStations(data || []);
+      });
+    }
+  }, [businessId]);
 
   useEffect(() => {
     if (hasAccess && businessId) {
@@ -53,11 +64,7 @@ const POSDepositHistoryComponent = ({
       
       let query = supabase
         .from('pos_daily_deposits')
-        .select(`
-          *,
-          counted_by_user:counted_by(full_name, email),
-          verified_by_user:verified_by(full_name, email)
-        `)
+        .select('*')
         .eq('business_id', businessId)
         .order('deposit_date', { ascending: false });
 
@@ -107,7 +114,30 @@ const POSDepositHistoryComponent = ({
 
       if (depositError) throw depositError;
 
-      setDeposits(data || []);
+      const rows = data || [];
+      const userIds = [
+        ...new Set(
+          rows.flatMap((deposit) => [deposit.counted_by, deposit.verified_by].filter(Boolean))
+        ),
+      ];
+
+      let userMap = {};
+      if (userIds.length > 0) {
+        const { data: users } = await supabase
+          .from('users')
+          .select('id, full_name, email')
+          .in('id', userIds);
+
+        userMap = Object.fromEntries((users || []).map((user) => [user.id, user]));
+      }
+
+      setDeposits(
+        rows.map((deposit) => ({
+          ...deposit,
+          counted_by_user: userMap[deposit.counted_by] || null,
+          verified_by_user: userMap[deposit.verified_by] || null,
+        }))
+      );
       
     } catch (err) {
       console.error('Error loading deposit history:', err);
@@ -160,18 +190,16 @@ const POSDepositHistoryComponent = ({
           setManagerPinError('');
           
           // Log access
-          await supabase
-            .from('audit_logs')
-            .insert({
-              business_id: businessId,
-              user_id: userId,
+          await insertAuditLog({
+            userId,
+            businessId,
+            details: {
               action: 'deposit_history_accessed',
               context: 'POSDepositHistory',
-              metadata: {
-                accessed_by: manager.full_name || manager.email,
-                access_time: new Date().toISOString()
-              }
-            });
+              accessed_by: manager.full_name || manager.email,
+              access_time: new Date().toISOString(),
+            },
+          });
           
           return;
         }
@@ -199,19 +227,17 @@ const POSDepositHistoryComponent = ({
       if (error) throw error;
 
       // Log the change
-      await supabase
-        .from('audit_logs')
-        .insert({
-          business_id: businessId,
-          user_id: userId,
+      await insertAuditLog({
+        userId,
+        businessId,
+        details: {
           action: 'deposit_bank_status_changed',
           context: 'POSDepositHistory',
-          metadata: {
-            deposit_id: depositId,
-            new_status: !currentStatus ? 'submitted' : 'pending',
-            changed_by: auth.authUser?.email
-          }
-        });
+          deposit_id: depositId,
+          new_status: !currentStatus ? 'submitted' : 'pending',
+          changed_by: auth.authUser?.email,
+        },
+      });
 
       await loadDepositHistory();
       showToast(
@@ -247,19 +273,17 @@ const POSDepositHistoryComponent = ({
       if (error) throw error;
 
       // Log bulk submission
-      await supabase
-        .from('audit_logs')
-        .insert({
-          business_id: businessId,
-          user_id: userId,
+      await insertAuditLog({
+        userId,
+        businessId,
+        details: {
           action: 'deposits_bulk_submitted',
           context: 'POSDepositHistory',
-          metadata: {
-            deposit_ids: depositIds,
-            count: depositIds.length,
-            submitted_by: auth.authUser?.email
-          }
-        });
+          deposit_ids: depositIds,
+          count: depositIds.length,
+          submitted_by: auth.authUser?.email,
+        },
+      });
 
       setSelectedDeposits(new Set());
       await loadDepositHistory();
@@ -316,20 +340,18 @@ const POSDepositHistoryComponent = ({
       if (updateError) throw updateError;
 
       // Log upload
-      await supabase
-        .from('audit_logs')
-        .insert({
-          business_id: businessId,
-          user_id: userId,
+      await insertAuditLog({
+        userId,
+        businessId,
+        details: {
           action: 'deposit_slip_uploaded',
           context: 'POSDepositHistory',
-          metadata: {
-            deposit_id: depositId,
-            file_name: fileName,
-            file_size: file.size,
-            uploaded_by: auth.authUser?.email
-          }
-        });
+          deposit_id: depositId,
+          file_name: fileName,
+          file_size: file.size,
+          uploaded_by: auth.authUser?.email,
+        },
+      });
 
       await loadDepositHistory();
       showToast('Deposit slip uploaded successfully', 'success');
@@ -350,7 +372,7 @@ const POSDepositHistoryComponent = ({
       // Prepare export data
       const exportData = deposits.map(deposit => ({
         'Deposit Date': new Date(deposit.deposit_date).toLocaleDateString(),
-        'Till': deposit.terminal_id?.slice(-4)?.toUpperCase() || 'Unknown',
+        'Till': resolveStationLabel(deposit.terminal_id, registerStations),
         'Expected Total': formatCurrency(deposit.expected_total),
         'Counted Total': formatCurrency(deposit.counted_total),
         'Variance': formatCurrency(deposit.variance_amount),
@@ -432,19 +454,17 @@ const POSDepositHistoryComponent = ({
       }
 
       // Log export action
-      await supabase
-        .from('audit_logs')
-        .insert({
-          business_id: businessId,
-          user_id: userId,
+      await insertAuditLog({
+        userId,
+        businessId,
+        details: {
           action: 'deposit_history_exported',
           context: 'POSDepositHistory',
-          metadata: {
-            format,
-            record_count: exportData.length,
-            exported_by: auth.authUser?.email
-          }
-        });
+          format,
+          record_count: exportData.length,
+          exported_by: auth.authUser?.email,
+        },
+      });
 
       showToast(`Deposit history exported to ${format.toUpperCase()}`, 'success');
       
@@ -458,11 +478,17 @@ const POSDepositHistoryComponent = ({
 
   // Get unique tills for filter
   const getAvailableTills = () => {
-    const tills = [...new Set(deposits.map(d => d.terminal_id).filter(Boolean))];
-    return tills.map(tillId => ({
-      id: tillId,
-      name: `Till ${tillId.slice(-4).toUpperCase()}`
+    const depositTillIds = [...new Set(deposits.map((d) => d.terminal_id).filter(Boolean))];
+    const configured = registerStations.map((station) => ({
+      id: station.terminal_id,
+      name: station.terminal_name,
     }));
+    depositTillIds.forEach((tillId) => {
+      if (!configured.some((station) => station.id === tillId)) {
+        configured.push({ id: tillId, name: resolveStationLabel(tillId, registerStations) });
+      }
+    });
+    return configured;
   };
 
   const showToast = (message, type = 'info') => {
@@ -734,7 +760,7 @@ const POSDepositHistoryComponent = ({
                     {new Date(deposit.deposit_date).toLocaleDateString()}
                   </td>
                   <td style={styles.td}>
-                    {deposit.terminal_id?.slice(-4)?.toUpperCase() || 'Unknown'}
+                    {resolveStationLabel(deposit.terminal_id, registerStations)}
                   </td>
                   <td style={styles.td}>
                     {formatCurrency(deposit.expected_total)}

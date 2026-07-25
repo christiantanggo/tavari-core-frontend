@@ -3,6 +3,8 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { hasHRPermission, HR_PERMISSIONS } from '../../utils/hrPermissions';
 import { handleHRError, useHRError } from '../../utils/hrErrorHandling';
+import PositionLabel from './PositionLabel';
+import { updateBusinessEmploymentStatus } from '../../utils/businessEmploymentStatus';
 
 const EmployeeStatusManager = ({ 
   employee, 
@@ -195,28 +197,61 @@ const EmployeeStatusManager = ({
 
       const selectedStatus = statusOptions.find(opt => opt.value === newStatus);
       
-      // Prepare update data
-      const updateData = {
-        employment_status: newStatus,
-        updated_at: new Date().toISOString()
-      };
-
-      // Add status-specific fields
-      if (newStatus === 'terminated') {
-        updateData.termination_date = effectiveDate;
-      } else if (currentStatus === 'terminated' && newStatus !== 'terminated') {
-        updateData.termination_date = null; // Clear termination date
+      const businessId = userContext?.businessId;
+      if (!businessId) {
+        throw new Error('Business context is required to change employment status.');
       }
 
-      // Update employee record
-      const { data: updatedEmployee, error: updateError } = await supabase
-        .from('users')
-        .update(updateData)
-        .eq('id', employee.id)
-        .select()
-        .single();
+      const statusPatch = {
+        employment_status: newStatus,
+      };
+      if (newStatus === 'terminated') {
+        statusPatch.termination_date = effectiveDate;
+      } else if (currentStatus === 'terminated' && newStatus !== 'terminated') {
+        statusPatch.termination_date = null;
+      }
 
-      if (updateError) throw updateError;
+      console.log('[EmployeeStatusManager] Attempting to update employee status:', {
+        employee_id: employee.id,
+        employee_email: employee.email,
+        business_id: businessId,
+        current_status: currentStatus,
+        new_status: newStatus,
+        update_data: statusPatch,
+      });
+
+      const { data: updatedMembership, error: updateError } = await updateBusinessEmploymentStatus(
+        supabase,
+        {
+          userId: employee.id,
+          businessId,
+          ...statusPatch,
+        },
+      );
+
+      if (updateError) {
+        console.error('[EmployeeStatusManager] Error updating employee status:', {
+          error: updateError,
+          employee_id: employee.id,
+          employee_email: employee.email,
+        });
+        throw updateError;
+      }
+
+      if (!updatedMembership) {
+        console.warn('[EmployeeStatusManager] Update returned no rows. Employee ID may not exist:', employee.id);
+        throw new Error('Employee membership not found for this business.');
+      }
+
+      const updatedEmployee = {
+        ...employee,
+        employment_status: updatedMembership.employment_status,
+        termination_date: updatedMembership.termination_date,
+        business_employment_status: updatedMembership.employment_status,
+        business_termination_date: updatedMembership.termination_date,
+      };
+
+      console.log('[EmployeeStatusManager] Employee status updated successfully:', updatedEmployee);
 
       // Create audit log entry
       const auditEntry = {
@@ -420,11 +455,9 @@ const EmployeeStatusManager = ({
               }}>
                 Current: {currentStatusOption.label}
               </span>
-              {employee.position && (
-                <span style={{ fontSize: '14px', color: '#6b7280' }}>
-                  {employee.position}
-                </span>
-              )}
+              <span style={{ fontSize: '14px', color: '#6b7280' }}>
+                <PositionLabel businessId={userContext?.businessId} value={employee.position} emptyFallback="" />
+              </span>
               {employee.employee_number && (
                 <span style={{ fontSize: '14px', color: '#6b7280' }}>
                   #{employee.employee_number}

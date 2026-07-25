@@ -1,6 +1,7 @@
 // src/screens/POS/POSModifiers.jsx - Simplified modifier groups with automatic item addition
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { FiChevronDown, FiChevronRight, FiSearch } from 'react-icons/fi';
 import { supabase } from '../../supabaseClient';
 import { logAction } from '../../helpers/posAudit';
 
@@ -8,10 +9,19 @@ import { logAction } from '../../helpers/posAudit';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { usePermissions } from '../../hooks/usePermissions';
-import PermissionGate from '../../components/Auth/PermissionGate';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
+import POSInventoryManagementTabs from '../../components/POS/POSInventoryManagementTabs';
+import {
+  sortModifierGroupsBySortOrder,
+  sortModifierGroupItemsBySortOrder,
+} from '../../utils/posModifierGroupsLoader';
+import {
+  DEFAULT_RECIPE_MARGIN_PERCENT,
+  suggestedPriceFromCost,
+} from '../../utils/posLineFoodCost';
+import { formatCurrency, formatFoodCost } from '../../utils/recipeSupplierPricing';
 import { SecurityWrapper } from '../../Security';
 import { useSecurityContext } from '../../Security';
 
@@ -47,17 +57,21 @@ const POSModifiers = () => {
     loading: permissionsLoading
   } = usePermissions();
 
-  // Permission checks
+  // Permission checks — match POSInventory: managers/owners can manage when granular keys aren't configured
+  const canManageModifiersByRole = auth.isReady && auth.hasRole && (auth.hasRole('manager') || auth.hasRole('owner'));
+
   const canViewModifiers = hasAnyPermission([
     'pos.modifiers.view',
     'pos.modifiers.create',
     'pos.modifiers.edit'
-  ]) || hasElevatedPrivileges();
+  ]) || hasElevatedPrivileges() || canManageModifiersByRole || (
+    auth.isReady && auth.userRole && ['employee', 'manager', 'owner'].includes(auth.userRole)
+  );
 
-  const canCreateModifiers = hasPermission('pos.modifiers.create') || hasElevatedPrivileges();
-  const canEditModifiers = hasPermission('pos.modifiers.edit') || hasElevatedPrivileges();
-  const canDeleteModifiers = hasPermission('pos.modifiers.delete') || hasElevatedPrivileges();
-  const canManageItems = hasPermission('pos.modifiers.manage_items') || hasElevatedPrivileges();
+  const canCreateModifiers = hasPermission('pos.modifiers.create') || hasElevatedPrivileges() || canManageModifiersByRole;
+  const canEditModifiers = hasPermission('pos.modifiers.edit') || hasElevatedPrivileges() || canManageModifiersByRole;
+  const canDeleteModifiers = hasPermission('pos.modifiers.delete') || hasElevatedPrivileges() || canManageModifiersByRole;
+  const canManageItems = hasPermission('pos.modifiers.manage_items') || hasElevatedPrivileges() || canManageModifiersByRole;
 
   // State
   const [modifierGroups, setModifierGroups] = useState([]);
@@ -81,6 +95,10 @@ const POSModifiers = () => {
   const [editGroupMinSelections, setEditGroupMinSelections] = useState('');
   const [editGroupMaxSelections, setEditGroupMaxSelections] = useState('');
   const [editGroupMaxFree, setEditGroupMaxFree] = useState('');
+  const [editGroupShowWhenInventoryId, setEditGroupShowWhenInventoryId] = useState('');
+  const [editModalError, setEditModalError] = useState(null);
+  const [editGroupSaving, setEditGroupSaving] = useState(false);
+  const [editGroupItems, setEditGroupItems] = useState([]);
 
   // States for adding items to groups
   const [selectedGroupId, setSelectedGroupId] = useState(null);
@@ -88,6 +106,7 @@ const POSModifiers = () => {
   const [selectedInventoryId, setSelectedInventoryId] = useState('');
   const [addItemType, setAddItemType] = useState('existing');
   const [priceOverride, setPriceOverride] = useState('');
+  const [recipeMarginsByInventoryId, setRecipeMarginsByInventoryId] = useState({});
 
   // States for creating new inventory items
   const [showInventoryModal, setShowInventoryModal] = useState(false);
@@ -100,6 +119,60 @@ const POSModifiers = () => {
 
   // Expanded groups for showing items
   const [expandedGroups, setExpandedGroups] = useState(new Set());
+  const [createGroupExpanded, setCreateGroupExpanded] = useState(false);
+  const [groupSearchTerm, setGroupSearchTerm] = useState('');
+
+  const filteredModifierGroups = useMemo(() => {
+    const q = String(groupSearchTerm || '').trim().toLowerCase();
+    if (!q) return modifierGroups;
+    return modifierGroups.filter((group) => {
+      const nameMatch = String(group?.name || '').toLowerCase().includes(q);
+      if (nameMatch) return true;
+      return (group?.pos_modifier_group_items || []).some((item) =>
+        String(item?.pos_inventory?.name || '').toLowerCase().includes(q),
+      );
+    });
+  }, [modifierGroups, groupSearchTerm]);
+
+  const getModifierItemPricing = (inventoryRow) => {
+    if (!inventoryRow) {
+      return { cost: 0, margin: DEFAULT_RECIPE_MARGIN_PERCENT, suggestedPrice: null };
+    }
+    const cost = parseFloat(inventoryRow.cost) || 0;
+    const margin =
+      recipeMarginsByInventoryId[inventoryRow.id] ?? DEFAULT_RECIPE_MARGIN_PERCENT;
+    return {
+      cost,
+      margin,
+      suggestedPrice: suggestedPriceFromCost(cost, margin),
+    };
+  };
+
+  const fetchRecipeMargins = async () => {
+    if (!auth.selectedBusinessId) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('pos_modifier_groups')
+        .select('pos_inventory_id, target_margin_percent')
+        .eq('business_id', auth.selectedBusinessId)
+        .eq('group_type', 'recipe_dish')
+        .not('pos_inventory_id', 'is', null);
+
+      if (error) throw error;
+
+      const map = {};
+      for (const row of data || []) {
+        if (row.pos_inventory_id) {
+          map[row.pos_inventory_id] =
+            parseFloat(row.target_margin_percent) || DEFAULT_RECIPE_MARGIN_PERCENT;
+        }
+      }
+      setRecipeMarginsByInventoryId(map);
+    } catch (err) {
+      console.warn('Could not load recipe margins for modifier pricing:', err.message);
+    }
+  };
 
   // Load data when authenticated
   useEffect(() => {
@@ -107,6 +180,7 @@ const POSModifiers = () => {
       fetchModifierGroups();
       fetchCategories();
       fetchInventoryItems();
+      fetchRecipeMargins();
     }
   }, [auth.selectedBusinessId, auth.authUser, canViewModifiers]);
 
@@ -142,10 +216,10 @@ const POSModifiers = () => {
         `)
         .eq('business_id', auth.selectedBusinessId)
         .eq('is_active', true)
-        .order('sort_order', { ascending: true });
+        .order('sort_order', { ascending: true, nullsFirst: false });
 
       if (error) throw error;
-      setModifierGroups(data || []);
+      setModifierGroups(sortModifierGroupsBySortOrder(data || []));
 
       await logAction({
         action: 'pos_modifier_groups_loaded',
@@ -210,9 +284,9 @@ const POSModifiers = () => {
     }
 
     // Validate input
-    const nameValidation = validateInput(newGroupName, 'text', 'group_name');
+    const nameValidation = await validateInput(newGroupName, 'text', 'group_name');
     if (!nameValidation.valid || !newGroupName.trim()) {
-      setError('Group name is required');
+      setError(nameValidation.error || 'Group name is required');
       return;
     }
 
@@ -279,6 +353,7 @@ const POSModifiers = () => {
       setNewGroupMinSelections('');
       setNewGroupMaxSelections('');
       setNewGroupMaxFree('');
+      setCreateGroupExpanded(false);
       fetchModifierGroups();
       showToast('Modifier group created successfully!', 'success');
     } catch (err) {
@@ -292,6 +367,20 @@ const POSModifiers = () => {
     }
   };
 
+  const buildEditGroupItemDrafts = (group) =>
+    sortModifierGroupItemsBySortOrder(group.pos_modifier_group_items || []).map((item) => ({
+      id: item.id,
+      inventory_id: item.inventory_id,
+      name: item.pos_inventory?.name || 'Unknown item',
+      inventory_price: Number(item.pos_inventory?.price || 0),
+      food_cost: Number(item.pos_inventory?.cost || 0),
+      price_override:
+        item.price_override !== null && item.price_override !== undefined
+          ? String(item.price_override)
+          : '',
+      is_free: Boolean(item.is_free),
+    }));
+
   const openEditModal = (group) => {
     if (!canEditModifiers) {
       setError('You do not have permission to edit modifier groups');
@@ -304,39 +393,135 @@ const POSModifiers = () => {
     setEditGroupMinSelections(group.min_selections || '');
     setEditGroupMaxSelections(group.max_selections || '');
     setEditGroupMaxFree(group.max_free_items || '');
+    setEditGroupShowWhenInventoryId(group.show_when_inventory_id || '');
+    setEditGroupItems(buildEditGroupItemDrafts(group));
+    setEditModalError(null);
+    setExpandedGroups((prev) => new Set([...prev, group.id]));
     setShowEditModal(true);
+  };
+
+  const closeEditModal = () => {
+    setShowEditModal(false);
+    setEditGroupId(null);
+    setEditGroupItems([]);
+    setEditModalError(null);
+  };
+
+  const updateEditGroupItemDraft = (itemId, updates) => {
+    setEditGroupItems((prev) =>
+      prev.map((row) => (row.id === itemId ? { ...row, ...updates } : row)),
+    );
+  };
+
+  const persistEditGroupItems = async () => {
+    for (const item of editGroupItems) {
+      let priceOverrideValue = null;
+      if (item.is_free) {
+        priceOverrideValue = 0;
+      } else if (item.price_override !== '' && item.price_override != null) {
+        const parsed = parseFloat(item.price_override);
+        if (Number.isFinite(parsed)) priceOverrideValue = parsed;
+      }
+
+      const { error } = await supabase
+        .from('pos_modifier_group_items')
+        .update({
+          price_override: priceOverrideValue,
+          is_free: item.is_free,
+        })
+        .eq('id', item.id);
+
+      if (error) throw error;
+    }
+  };
+
+  const reopenEditModalIfNeeded = async (groupId) => {
+    if (!groupId) return;
+    const { data: refreshedGroup } = await supabase
+      .from('pos_modifier_groups')
+      .select(`
+        *,
+        pos_modifier_group_items (
+          id,
+          inventory_id,
+          price_override,
+          is_free,
+          is_default_selected,
+          sort_order,
+          pos_inventory ( id, name, price, cost )
+        )
+      `)
+      .eq('id', groupId)
+      .single();
+    if (refreshedGroup) {
+      setEditGroupId(groupId);
+      setEditGroupItems(buildEditGroupItemDrafts(refreshedGroup));
+      setShowEditModal(true);
+    }
+  };
+
+  const openAddItemFromEditModal = () => {
+    if (!canManageItems || !editGroupId) return;
+    setShowEditModal(false);
+    setSelectedGroupId(editGroupId);
+    setShowAddItemModal(true);
+  };
+
+  const removeEditGroupItem = async (item) => {
+    if (!canManageItems) return;
+    if (!window.confirm(`Remove "${item.name}" from this modifier group?`)) return;
+
+    try {
+      const { error } = await supabase
+        .from('pos_modifier_group_items')
+        .delete()
+        .eq('id', item.id);
+      if (error) throw error;
+
+      setEditGroupItems((prev) => prev.filter((row) => row.id !== item.id));
+      await logSecurityEvent('modifier_item_removed', {
+        group_item_id: item.id,
+        item_name: item.name,
+        business_id: auth.selectedBusinessId,
+        removed_by: auth.authUser?.id,
+      }, 'low');
+      await recordAction('modifier_item_removed', { item_name: item.name }, true);
+      fetchModifierGroups();
+      showToast(`Removed ${item.name}`, 'success');
+    } catch (err) {
+      setEditModalError(`Could not remove item: ${err.message}`);
+    }
   };
 
   const updateModifierGroup = async () => {
     if (!canEditModifiers) {
-      setError('You do not have permission to edit modifier groups');
+      setEditModalError('You do not have permission to edit modifier groups');
       return;
     }
 
-    // Validate input
-    const nameValidation = validateInput(editGroupName, 'text', 'group_name');
+    const nameValidation = await validateInput(editGroupName, 'text', 'group_name');
     if (!nameValidation.valid || !editGroupName.trim()) {
-      setError('Group name is required');
+      setEditModalError(nameValidation.error || 'Group name is required');
       return;
     }
 
-    // Rate limiting check
     const rateLimitCheck = await checkRateLimit('modifier_group_update', 15, 60000);
     if (!rateLimitCheck.allowed) {
-      setError('Too many update attempts. Please wait a moment.');
+      setEditModalError('Too many update attempts. Please wait a moment.');
       return;
     }
 
-    const minSel = parseInt(editGroupMinSelections) || 0;
-    const maxSel = parseInt(editGroupMaxSelections) || 0;
-    const maxFree = parseInt(editGroupMaxFree) || 0;
+    const minSel = parseInt(editGroupMinSelections, 10) || 0;
+    const maxSel = parseInt(editGroupMaxSelections, 10) || 0;
+    const maxFree = parseInt(editGroupMaxFree, 10) || 0;
 
     if (editGroupRequired && minSel === 0) {
-      setError('Required groups must have minimum selections > 0');
+      setEditModalError('Required groups must have minimum selections > 0');
       return;
     }
 
-    setError(null);
+    setEditModalError(null);
+    setEditGroupSaving(true);
     try {
       const { error } = await supabase
         .from('pos_modifier_groups')
@@ -346,11 +531,16 @@ const POSModifiers = () => {
           min_selections: minSel || null,
           max_selections: maxSel || null,
           max_free_items: maxFree || null,
+          show_when_inventory_id: editGroupShowWhenInventoryId || null,
           updated_at: new Date().toISOString()
         })
         .eq('id', editGroupId);
 
       if (error) throw error;
+
+      if (canManageItems && editGroupItems.length > 0) {
+        await persistEditGroupItems();
+      }
 
       await logSecurityEvent('modifier_group_updated', {
         group_id: editGroupId,
@@ -370,9 +560,8 @@ const POSModifiers = () => {
 
       await recordAction('modifier_group_updated', { group_id: editGroupId }, true);
 
-      setShowEditModal(false);
-      setEditGroupId(null);
       fetchModifierGroups();
+      closeEditModal();
       showToast('Modifier group updated successfully!', 'success');
     } catch (err) {
       await logSecurityEvent('modifier_group_update_error', {
@@ -380,8 +569,10 @@ const POSModifiers = () => {
         group_id: editGroupId,
         business_id: auth.selectedBusinessId
       }, 'medium');
-      
-      setError('Error updating modifier group: ' + err.message);
+
+      setEditModalError('Error updating modifier group: ' + err.message);
+    } finally {
+      setEditGroupSaving(false);
     }
   };
 
@@ -395,6 +586,19 @@ const POSModifiers = () => {
     setExpandedGroups(newExpanded);
   };
 
+  const resolveShowWhenInventoryName = (inventoryId) => {
+    const id = String(inventoryId || '').trim();
+    if (!id) return 'Selected option';
+    for (const g of modifierGroups) {
+      const item = (g.pos_modifier_group_items || []).find(
+        (row) => String(row.inventory_id || row.pos_inventory?.id || '') === id
+      );
+      if (item?.pos_inventory?.name) return item.pos_inventory.name;
+    }
+    const fromInventory = inventoryItems.find((inv) => String(inv.id) === id);
+    return fromInventory?.name || 'Selected option';
+  };
+
   const createInventoryItem = async () => {
     if (!canManageItems) {
       setError('You do not have permission to create inventory items');
@@ -402,7 +606,7 @@ const POSModifiers = () => {
     }
 
     // Validate input
-    const nameValidation = validateInput(newInventoryName, 'text', 'item_name');
+    const nameValidation = await validateInput(newInventoryName, 'text', 'item_name');
     if (!nameValidation.valid || !newInventoryName.trim()) {
       setError('Item name is required');
       return;
@@ -438,6 +642,7 @@ const POSModifiers = () => {
           stock_quantity: newInventoryTrackStock ? 0 : null,
           low_stock_threshold: newInventoryTrackStock ? 5 : null,
           is_modifier_item: true,
+          display_on_pos: false,
           created_at: new Date().toISOString()
         }])
         .select()
@@ -519,10 +724,12 @@ const POSModifiers = () => {
       await recordAction('modifier_item_created_and_added', { item_name: newInventoryName.trim() }, true);
 
       setShowAddItemModal(false);
-      setSelectedGroupId(null);
       setPriceOverride('');
+      const addedToGroupId = selectedGroupId;
+      setSelectedGroupId(null);
       fetchModifierGroups();
-      setExpandedGroups(prev => new Set([...prev, selectedGroupId]));
+      setExpandedGroups((prev) => new Set([...prev, addedToGroupId]));
+      await reopenEditModalIfNeeded(editGroupId || addedToGroupId);
       showToast('Inventory item created and added to modifier group!', 'success');
       
     } catch (err) {
@@ -597,10 +804,12 @@ const POSModifiers = () => {
       setSelectedInventoryId('');
       setPriceOverride('');
       setShowAddItemModal(false);
+      const addedToGroupId = selectedGroupId;
       setSelectedGroupId(null);
-      
+
       fetchModifierGroups();
-      setExpandedGroups(prev => new Set([...prev, selectedGroupId]));
+      setExpandedGroups((prev) => new Set([...prev, addedToGroupId]));
+      await reopenEditModalIfNeeded(editGroupId || addedToGroupId);
       showToast('Item added to modifier group!', 'success');
     } catch (err) {
       await logSecurityEvent('modifier_add_item_error', {
@@ -760,8 +969,65 @@ const POSModifiers = () => {
     addSection: {
       ...TavariStyles.layout.card,
       padding: TavariStyles.spacing.xl,
-      marginBottom: TavariStyles.spacing['2xl'],
+      marginBottom: TavariStyles.spacing.xl,
       border: `2px solid ${TavariStyles.colors.primary}`
+    },
+
+    createSectionHeader: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      width: '100%',
+      gap: TavariStyles.spacing.md,
+      padding: 0,
+      margin: 0,
+      border: 'none',
+      background: 'transparent',
+      cursor: 'pointer',
+      textAlign: 'left',
+    },
+
+    createSectionTitle: {
+      fontSize: TavariStyles.typography.fontSize.xl,
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray800,
+      margin: 0,
+    },
+
+    createSectionChevron: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      color: TavariStyles.colors.primary,
+      flexShrink: 0,
+    },
+
+    searchSection: {
+      marginBottom: TavariStyles.spacing.xl,
+    },
+
+    searchInputWrap: {
+      position: 'relative',
+      width: '100%',
+    },
+
+    searchIcon: {
+      position: 'absolute',
+      left: 14,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      color: TavariStyles.colors.gray500,
+      pointerEvents: 'none',
+    },
+
+    searchInput: {
+      width: '100%',
+      boxSizing: 'border-box',
+      padding: `${TavariStyles.spacing.md} ${TavariStyles.spacing.md} ${TavariStyles.spacing.md} 42px`,
+      border: `2px solid ${TavariStyles.colors.gray300}`,
+      borderRadius: TavariStyles.borderRadius?.md || '8px',
+      fontSize: TavariStyles.typography.fontSize.base,
+      fontFamily: 'inherit',
+      outline: 'none',
     },
     
     sectionTitle: {
@@ -776,7 +1042,8 @@ const POSModifiers = () => {
     form: {
       display: 'flex',
       flexDirection: 'column',
-      gap: TavariStyles.spacing.xl
+      gap: TavariStyles.spacing.xl,
+      marginTop: TavariStyles.spacing.xl,
     },
     
     formRow: {
@@ -825,6 +1092,18 @@ const POSModifiers = () => {
       fontSize: TavariStyles.typography.fontSize.sm,
       color: TavariStyles.colors.gray600,
       marginBottom: TavariStyles.spacing.md
+    },
+
+    nestedBadge: {
+      display: 'inline-block',
+      fontSize: TavariStyles.typography.fontSize.xs,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      color: TavariStyles.colors.primary,
+      backgroundColor: `${TavariStyles.colors.primary}14`,
+      border: `1px solid ${TavariStyles.colors.primary}40`,
+      borderRadius: TavariStyles.borderRadius.sm,
+      padding: `2px ${TavariStyles.spacing.sm}`,
+      marginBottom: TavariStyles.spacing.sm,
     },
     
     actionButtons: {
@@ -890,6 +1169,34 @@ const POSModifiers = () => {
       color: TavariStyles.colors.gray600,
       marginBottom: TavariStyles.spacing.sm
     },
+
+    pricingHint: {
+      fontSize: TavariStyles.typography.fontSize.xs,
+      color: TavariStyles.colors.gray500,
+    },
+
+    suggestedPrice: {
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      color: TavariStyles.colors.primary,
+    },
+
+    pricingPreview: {
+      marginTop: TavariStyles.spacing.md,
+      padding: TavariStyles.spacing.md,
+      backgroundColor: TavariStyles.colors.gray50,
+      borderRadius: TavariStyles.borderRadius?.md || '8px',
+      border: `1px solid ${TavariStyles.colors.gray200}`,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray700,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '4px',
+    },
+
+    pricingPreviewTitle: {
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      marginBottom: '2px',
+    },
     
     removeButton: {
       ...TavariStyles.components.button.base,
@@ -905,6 +1212,69 @@ const POSModifiers = () => {
     modalContent: {
       ...TavariStyles.components.modal.content,
       maxWidth: '600px'
+    },
+
+    editModalContent: {
+      maxWidth: '760px',
+      maxHeight: '90vh',
+      overflow: 'auto',
+    },
+
+    editItemsSection: {
+      marginTop: TavariStyles.spacing.lg,
+      paddingTop: TavariStyles.spacing.lg,
+      borderTop: `1px solid ${TavariStyles.colors.gray200}`,
+    },
+
+    editItemsHeader: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: '12px',
+      marginBottom: TavariStyles.spacing.md,
+    },
+
+    editItemsTitle: {
+      margin: 0,
+      fontSize: TavariStyles.typography.fontSize.base,
+      color: TavariStyles.colors.gray800,
+    },
+
+    editItemsList: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '10px',
+    },
+
+    editItemRow: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px',
+      padding: TavariStyles.spacing.md,
+      border: `1px solid ${TavariStyles.colors.gray200}`,
+      borderRadius: '8px',
+      backgroundColor: TavariStyles.colors.gray50,
+    },
+
+    editItemMain: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+    },
+
+    editItemFields: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '10px',
+    },
+
+    editItemPriceInput: {
+      width: '120px',
+      padding: '6px 8px',
+      border: `1px solid ${TavariStyles.colors.gray300}`,
+      borderRadius: '6px',
+      fontSize: TavariStyles.typography.fontSize.sm,
     },
     
     modalHeader: TavariStyles.components.modal.header,
@@ -993,26 +1363,31 @@ const POSModifiers = () => {
         <div style={styles.container}>
           <div style={styles.header}>
             <h2 style={styles.title}>POS Modifiers</h2>
-            <p style={styles.subtitle}>Create modifier groups and add items for customer customization</p>
+            <p style={styles.subtitle}>
+              Create modifier groups and add items for customer customization. Food cost comes from Recipe Manager;
+              suggested prices use each item&apos;s recipe margin.
+            </p>
           </div>
+
+          <POSInventoryManagementTabs />
 
           {error && <div style={styles.errorBanner}>{error}</div>}
 
           {/* Add New Modifier Group */}
-          {canCreateModifiers && (
-            <PermissionGate
-              permissions={['pos.modifiers.create']}
-              requireElevated
-              fallback={
-                <div style={styles.noAccessContainer}>
-                  <p style={styles.noAccessText}>
-                    ⚠️ You do not have permission to create modifier groups
-                  </p>
-                </div>
-              }
-            >
+          {canCreateModifiers ? (
               <div style={styles.addSection}>
-                <h3 style={styles.sectionTitle}>Create New Modifier Group</h3>
+                <button
+                  type="button"
+                  style={styles.createSectionHeader}
+                  onClick={() => setCreateGroupExpanded((open) => !open)}
+                  aria-expanded={createGroupExpanded}
+                >
+                  <h3 style={styles.createSectionTitle}>Create New Modifier Group</h3>
+                  <span style={styles.createSectionChevron}>
+                    {createGroupExpanded ? <FiChevronDown size={20} /> : <FiChevronRight size={20} />}
+                  </span>
+                </button>
+                {createGroupExpanded ? (
                 <div style={styles.form}>
                   <div style={styles.formRow}>
                     <div style={styles.formGroup}>
@@ -1084,9 +1459,22 @@ const POSModifiers = () => {
                     Create Modifier Group
                   </button>
                 </div>
+                ) : null}
               </div>
-            </PermissionGate>
-          )}
+          ) : null}
+
+          <div style={styles.searchSection}>
+            <div style={styles.searchInputWrap}>
+              <FiSearch size={18} style={styles.searchIcon} />
+              <input
+                type="text"
+                placeholder="Search modifier groups or items…"
+                value={groupSearchTerm}
+                onChange={(e) => setGroupSearchTerm(e.target.value)}
+                style={styles.searchInput}
+              />
+            </div>
+          </div>
 
           {/* Modifier Groups List */}
           {loading || permissionsLoading ? (
@@ -1099,8 +1487,15 @@ const POSModifiers = () => {
                 Create your first modifier group above to get started
               </div>
             </div>
+          ) : filteredModifierGroups.length === 0 ? (
+            <div style={styles.emptyState}>
+              <div style={styles.emptyTitle}>No groups match your search</div>
+              <div style={{ fontSize: TavariStyles.typography.fontSize.base }}>
+                Try a different group or item name
+              </div>
+            </div>
           ) : (
-            modifierGroups.map(group => (
+            filteredModifierGroups.map(group => (
               <div key={group.id} style={styles.groupCard}>
                 <div style={styles.groupHeader} onClick={() => toggleGroupExpanded(group.id)}>
                   <div>
@@ -1117,6 +1512,11 @@ const POSModifiers = () => {
                       {group.max_free_items > 0 && `${group.max_free_items} free items • `}
                       {group.pos_modifier_group_items?.length || 0} items
                     </div>
+                    {group.show_when_inventory_id && (
+                      <div style={styles.nestedBadge}>
+                        Shows after: {resolveShowWhenInventoryName(group.show_when_inventory_id)}
+                      </div>
+                    )}
                   </div>
                   <div style={styles.actionButtons}>
                     {canEditModifiers && (
@@ -1160,17 +1560,38 @@ const POSModifiers = () => {
                   <div>
                     {group.pos_modifier_group_items && group.pos_modifier_group_items.length > 0 ? (
                       <div style={styles.itemsList}>
-                        {group.pos_modifier_group_items.map(item => (
+                        {sortModifierGroupItemsBySortOrder(group.pos_modifier_group_items).map(item => {
+                          const pricing = getModifierItemPricing(item.pos_inventory);
+                          const sellPrice = item.is_free
+                            ? 0
+                            : item.price_override !== null
+                              ? Number(item.price_override)
+                              : Number(item.pos_inventory?.price || 0);
+
+                          return (
                           <div key={item.id} style={styles.itemCard}>
                             <div style={styles.itemName}>
                               {item.pos_inventory?.name || 'Unknown Item'}
                             </div>
                             <div style={styles.itemDetails}>
-                              Price: {item.is_free ? 'Free' : 
-                               item.price_override !== null ? `$${Number(item.price_override).toFixed(2)}` :
-                               `$${Number(item.pos_inventory?.price || 0).toFixed(2)}`}
+                              Sell price: {item.is_free ? 'Free' : formatCurrency(sellPrice)}
                               <br />
-                              Cost: ${Number(item.pos_inventory?.cost || 0).toFixed(2)}
+                              Food cost: {formatFoodCost(pricing.cost)}
+                              <span style={styles.pricingHint}> (from Recipe Manager)</span>
+                              <br />
+                              {pricing.suggestedPrice != null ? (
+                                <>
+                                  Suggested price:{' '}
+                                  <span style={styles.suggestedPrice}>
+                                    {formatCurrency(pricing.suggestedPrice)}
+                                  </span>
+                                  <span style={styles.pricingHint}> ({pricing.margin}% margin)</span>
+                                </>
+                              ) : (
+                                <span style={styles.pricingHint}>
+                                  Add a recipe in Recipe Manager to see suggested price
+                                </span>
+                              )}
                             </div>
                             {canManageItems && (
                               <button
@@ -1181,7 +1602,8 @@ const POSModifiers = () => {
                               </button>
                             )}
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     ) : (
                       <div style={styles.noItems}>
@@ -1197,19 +1619,23 @@ const POSModifiers = () => {
           {/* Edit Group Modal */}
           {showEditModal && canEditModifiers && (
             <div style={styles.modal}>
-              <div style={styles.modalContent}>
+              <div style={{ ...styles.modalContent, ...styles.editModalContent }}>
                 <div style={styles.modalHeader}>
                   <h3 style={{ margin: 0 }}>Edit Modifier Group</h3>
                   <button 
                     style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer' }}
-                    onClick={() => {
-                      setShowEditModal(false);
-                      setEditGroupId(null);
-                    }}
+                    onClick={closeEditModal}
+                    type="button"
                   >
                     ×
                   </button>
                 </div>
+
+                {editModalError && (
+                  <div style={{ ...styles.errorBanner, margin: `0 ${TavariStyles.spacing.lg}` }}>
+                    {editModalError}
+                  </div>
+                )}
                 
                 <div style={styles.modalBody}>
                   <div style={styles.formGroup}>
@@ -1265,24 +1691,139 @@ const POSModifiers = () => {
                       />
                     </div>
                   </div>
+
+                  <div style={styles.formGroup}>
+                    <label style={styles.label}>Show only when selected</label>
+                    <select
+                      value={editGroupShowWhenInventoryId || ''}
+                      onChange={(e) => setEditGroupShowWhenInventoryId(e.target.value)}
+                      style={styles.input}
+                    >
+                      <option value="">Always show this group</option>
+                      {modifierGroups.flatMap((g) =>
+                        (g.pos_modifier_group_items || [])
+                          .filter((item) => item.pos_inventory?.id)
+                          .map((item) => (
+                            <option key={`${g.id}-${item.inventory_id}`} value={item.pos_inventory.id}>
+                              {g.name}: {item.pos_inventory.name}
+                            </option>
+                          ))
+                      )}
+                    </select>
+                    <p style={{ fontSize: 24, color: TavariStyles.colors.gray600, margin: '6px 0 0' }}>
+                      Second-layer modifiers: hide this group until staff pick a specific option in another
+                      group on the same item. Examples: show &quot;Cheese type&quot; after &quot;Poutine&quot; upgrade,
+                      or &quot;Bubly flavours&quot; after &quot;Bubly&quot;. Also works for size → toppings.
+                    </p>
+                  </div>
+
+                  <div style={styles.editItemsSection}>
+                    <div style={styles.editItemsHeader}>
+                      <h4 style={styles.editItemsTitle}>
+                        Items in this group ({editGroupItems.length})
+                      </h4>
+                      {canManageItems && (
+                        <button
+                          type="button"
+                          style={styles.smallButton}
+                          onClick={openAddItemFromEditModal}
+                        >
+                          + Add item
+                        </button>
+                      )}
+                    </div>
+
+                    {editGroupItems.length === 0 ? (
+                      <p style={styles.pricingHint}>
+                        No items attached yet.
+                        {canManageItems ? ' Click "+ Add item" to attach modifier options.' : ''}
+                      </p>
+                    ) : (
+                      <div style={styles.editItemsList}>
+                        {editGroupItems.map((item) => (
+                          <div key={item.id} style={styles.editItemRow}>
+                            <div style={styles.editItemMain}>
+                              <strong>{item.name}</strong>
+                              <span style={styles.pricingHint}>
+                                Menu price {formatCurrency(item.inventory_price)}
+                                {' · '}
+                                Food cost {formatFoodCost(item.food_cost)}
+                              </span>
+                            </div>
+                            {canManageItems ? (
+                              <div style={styles.editItemFields}>
+                                <TavariCheckbox
+                                  checked={item.is_free}
+                                  onChange={(checked) =>
+                                    updateEditGroupItemDraft(item.id, {
+                                      is_free: checked,
+                                      price_override: checked ? '0' : item.price_override,
+                                    })
+                                  }
+                                  label="Free"
+                                  size="sm"
+                                />
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="0"
+                                  disabled={item.is_free}
+                                  value={item.is_free ? '0' : item.price_override}
+                                  placeholder={`Default ${formatCurrency(item.inventory_price)}`}
+                                  onChange={(e) =>
+                                    updateEditGroupItemDraft(item.id, {
+                                      price_override: e.target.value,
+                                      is_free: false,
+                                    })
+                                  }
+                                  style={styles.editItemPriceInput}
+                                  title="Price override (blank uses menu price)"
+                                />
+                                <button
+                                  type="button"
+                                  style={styles.removeButton}
+                                  onClick={() => removeEditGroupItem(item)}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            ) : (
+                              <span style={styles.pricingHint}>
+                                {item.is_free
+                                  ? 'Free'
+                                  : item.price_override
+                                    ? formatCurrency(parseFloat(item.price_override))
+                                    : formatCurrency(item.inventory_price)}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {canManageItems && editGroupItems.length > 0 && (
+                      <p style={styles.pricingHint}>
+                        Item price changes save when you click Update Group.
+                      </p>
+                    )}
+                  </div>
                 </div>
 
                 <div style={styles.modalFooter}>
                   <button
                     style={TavariStyles.components.button.variants.secondary}
-                    onClick={() => {
-                      setShowEditModal(false);
-                      setEditGroupId(null);
-                    }}
+                    onClick={closeEditModal}
+                    type="button"
+                    disabled={editGroupSaving}
                   >
                     Cancel
                   </button>
                   <button
                     style={TavariStyles.components.button.variants.primary}
                     onClick={updateModifierGroup}
-                    disabled={!editGroupName.trim()}
+                    disabled={!editGroupName.trim() || editGroupSaving}
+                    type="button"
                   >
-                    Update Group
+                    {editGroupSaving ? 'Saving...' : 'Update Group'}
                   </button>
                 </div>
               </div>
@@ -1319,7 +1860,7 @@ const POSModifiers = () => {
                       <option value="">-- Select Item --</option>
                       {inventoryItems.map(item => (
                         <option key={item.id} value={item.id}>
-                          {item.name} - ${Number(item.price).toFixed(2)} (Cost: ${Number(item.cost || 0).toFixed(2)})
+                          {item.name} - {formatCurrency(item.price)} (Cost: {formatFoodCost(item.cost || 0)})
                         </option>
                       ))}
                     </select>
@@ -1344,6 +1885,31 @@ const POSModifiers = () => {
                       min="0"
                     />
                   </div>
+
+                  {selectedInventoryId && (() => {
+                    const selectedItem = inventoryItems.find((item) => item.id === selectedInventoryId);
+                    const pricing = getModifierItemPricing(selectedItem);
+                    return (
+                      <div style={styles.pricingPreview}>
+                        <div style={styles.pricingPreviewTitle}>From Recipe Manager</div>
+                        <div>Food cost: {formatFoodCost(pricing.cost)}</div>
+                        {pricing.suggestedPrice != null ? (
+                          <div>
+                            Suggested price:{' '}
+                            <strong>{formatCurrency(pricing.suggestedPrice)}</strong>
+                            <span style={styles.pricingHint}> ({pricing.margin}% margin)</span>
+                          </div>
+                        ) : (
+                          <div style={styles.pricingHint}>
+                            No recipe cost yet — build the recipe under Recipe Manager → Modifier items.
+                          </div>
+                        )}
+                        <div style={styles.pricingHint}>
+                          Set sell price here or on the inventory item. Cost updates when you save the recipe.
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div style={styles.modalFooter}>
@@ -1377,7 +1943,7 @@ const POSModifiers = () => {
                 <div style={styles.modalHeader}>
                   <h3 style={{ margin: 0 }}>Create New Inventory Item</h3>
                   <button 
-                    style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer' }}
+                    style={{ background: 'none', border: 'none', fontSize: '19px', cursor: 'pointer' }}
                     onClick={() => {
                       setShowInventoryModal(false);
                       setNewInventoryName('');

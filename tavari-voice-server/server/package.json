@@ -18,6 +18,8 @@
   "author": "Tavari",
   "license": "MIT",
   "dependencies": {
+    "@aws-sdk/client-connect": "^3.654.0",
+    "@aws-sdk/client-lambda": "^3.654.0",
     "@supabase/supabase-js": "^2.39.0",
     "axios": "^1.6.2",
     "dotenv": "^16.3.1",

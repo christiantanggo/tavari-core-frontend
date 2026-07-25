@@ -12,14 +12,16 @@ export const EETRT_detectPaymentFrequency = (entries) => {
     return { frequency: 'bi_weekly', confidence: 50, analysis: 'Defaulting to bi-weekly (insufficient real entries)' };
   }
 
-  const sortedEntries = [...realEntries].sort((a, b) => 
-    new Date(a.hrpayroll_runs.pay_date) - new Date(b.hrpayroll_runs.pay_date)
-  );
+  const sortedEntries = [...realEntries].sort((a, b) => {
+    const dateA = new Date(a.hrpayroll_runs?.pay_date || a.pay_date);
+    const dateB = new Date(b.hrpayroll_runs?.pay_date || b.pay_date);
+    return dateA - dateB;
+  });
 
   const gaps = [];
   for (let i = 1; i < sortedEntries.length; i++) {
-    const prevDate = new Date(sortedEntries[i - 1].hrpayroll_runs.pay_date);
-    const currDate = new Date(sortedEntries[i].hrpayroll_runs.pay_date);
+    const prevDate = new Date(sortedEntries[i - 1].hrpayroll_runs?.pay_date || sortedEntries[i - 1].pay_date);
+    const currDate = new Date(sortedEntries[i].hrpayroll_runs?.pay_date || sortedEntries[i].pay_date);
     const daysDiff = Math.round((currDate - prevDate) / (1000 * 60 * 60 * 24));
     gaps.push(daysDiff);
   }
@@ -78,33 +80,21 @@ export const EETRT_calculateROEData = (entries) => {
   // HARD CODED: Get the last 53 pay periods (ALWAYS 53)
   const last53Periods = entries.slice(0, 53);
   
-  const totalInsurableEarnings = last53Periods.reduce((sum, entry) => {
-    const grossPay = parseFloat(entry.gross_pay || 0);
-    const vacationPay = parseFloat(entry.vacation_pay || 0);
-    
-    let premiumPay = 0;
-    try {
-      const premiums = typeof entry.premiums === 'string' ? 
-        JSON.parse(entry.premiums) : (entry.premiums || {});
-      
-      Object.values(premiums).forEach(premium => {
-        if (premium.total_pay) {
-          premiumPay += parseFloat(premium.total_pay);
-        }
-      });
-    } catch (e) {
-      premiumPay = 0;
-    }
-
-    const totalEarnings = grossPay + vacationPay + premiumPay;
-    const maxWeeklyInsurable = 1263; // 2025 EI maximum
-    return sum + Math.min(totalEarnings, maxWeeklyInsurable);
-  }, 0);
-
+  // Calculate total hours from entries
   const totalHours = last53Periods.reduce((sum, entry) => {
     return sum + parseFloat(entry.regular_hours || 0) + 
            parseFloat(entry.overtime_hours || 0) + 
            parseFloat(entry.lieu_hours || 0);
+  }, 0);
+
+  // Calculate total insurable earnings (should equal total earnings, no cap)
+  // NOTE: gross_pay already includes premium pay, so we only add vacation_pay
+  const totalInsurableEarnings = last53Periods.reduce((sum, entry) => {
+    const grossPay = parseFloat(entry.gross_pay || 0);
+    const vacationPay = parseFloat(entry.vacation_pay || 0);
+    
+    // gross_pay already includes premium pay, so insurable earnings = gross_pay + vacation_pay
+    return sum + grossPay + vacationPay;
   }, 0);
 
   const firstPayPeriod = last53Periods[last53Periods.length - 1];
@@ -114,21 +104,51 @@ export const EETRT_calculateROEData = (entries) => {
     totalInsurableEarnings,
     totalHours,
     payPeriods: last53Periods.length,
-    firstPayPeriodStart: firstPayPeriod?.hrpayroll_runs.pay_period_start,
-    lastPayPeriodEnd: lastPayPeriod?.hrpayroll_runs.pay_period_end,
+    firstPayPeriodStart: firstPayPeriod?.hrpayroll_runs?.pay_period_start,
+    lastPayPeriodEnd: lastPayPeriod?.hrpayroll_runs?.pay_period_end,
     averageWeeklyEarnings: totalInsurableEarnings / Math.max(last53Periods.length, 1),
     syntheticPeriodsUsed: last53Periods.filter(e => e.is_synthetic).length
   };
 };
 
-export const EETRT_calculateT4Data = (entries) => {
+// CRA T4 box 24/26 cap tables (Maximum Insurable Earnings & YMPE).
+// Update annually as new CRA T4127 editions are published.
+const T4_BOX_LIMITS = {
+  2024: { ei_max_insurable: 63200, cpp_ympe: 68500 },
+  2025: { ei_max_insurable: 65700, cpp_ympe: 71300 },
+  2026: { ei_max_insurable: 68900, cpp_ympe: 74600 }
+};
+
+export const EETRT_calculateT4Data = (entries, taxYear = null) => {
+  console.log('[EETRT] calculateT4Data called with:', {
+    entryCount: entries.length,
+    taxYear,
+    sampleEntries: entries.slice(0, 3).map(e => ({
+      id: e.id,
+      gross_pay: e.gross_pay,
+      federal_tax: e.federal_tax,
+      provincial_tax: e.provincial_tax,
+      cpp_deduction: e.cpp_deduction,
+      ei_deduction: e.ei_deduction
+    }))
+  });
+
   const totals = entries.reduce((acc, entry) => {
-    acc.grossIncome += parseFloat(entry.gross_pay || 0);
-    acc.vacationPay += parseFloat(entry.vacation_pay || 0);
-    acc.federalTax += parseFloat(entry.federal_tax || 0);
-    acc.provincialTax += parseFloat(entry.provincial_tax || 0);
-    acc.cppContributions += parseFloat(entry.cpp_deduction || 0);
-    acc.eiPremiums += parseFloat(entry.ei_deduction || 0);
+    const grossPay = parseFloat(entry.gross_pay || 0);
+    const vacationPay = parseFloat(entry.vacation_pay || 0);
+    const federalTax = parseFloat(entry.federal_tax || 0);
+    const provincialTax = parseFloat(entry.provincial_tax || 0) + parseFloat(entry.ontario_health_premium || 0);
+    const additionalTax = parseFloat(entry.additional_tax || 0);
+    const cpp = parseFloat(entry.cpp_deduction || 0);
+    const ei = parseFloat(entry.ei_deduction || 0);
+
+    acc.grossIncome += grossPay;
+    acc.vacationPay += vacationPay;
+    acc.federalTax += federalTax;
+    acc.provincialTax += provincialTax;
+    acc.additionalTax += additionalTax;
+    acc.cppContributions += cpp;
+    acc.eiPremiums += ei;
     
     try {
       const premiums = typeof entry.premiums === 'string' ?
@@ -145,19 +165,24 @@ export const EETRT_calculateT4Data = (entries) => {
     return acc;
   }, {
     grossIncome: 0, vacationPay: 0, premiumPay: 0,
-    federalTax: 0, provincialTax: 0, cppContributions: 0, eiPremiums: 0
+    federalTax: 0, provincialTax: 0, additionalTax: 0, cppContributions: 0, eiPremiums: 0
   });
 
   const employmentIncome = totals.grossIncome + totals.vacationPay + totals.premiumPay;
-  const totalTax = totals.federalTax + totals.provincialTax;
-  
-  return {
+  const totalTax = totals.federalTax + totals.provincialTax + totals.additionalTax;
+
+  // Resolve T4 box 24/26 caps for the requested tax year (defaults to current calendar year)
+  const resolvedYear = taxYear || new Date().getFullYear();
+  const limits = T4_BOX_LIMITS[resolvedYear] || T4_BOX_LIMITS[2026];
+
+  const result = {
     box14_employmentIncome: employmentIncome,
     box16_cppContributions: totals.cppContributions,
     box18_eiPremiums: totals.eiPremiums,
     box22_incomeTax: totalTax,
-    box24_eiInsurableEarnings: Math.min(employmentIncome, 68500),
-    box26_cppPensionableEarnings: Math.min(employmentIncome, 71300),
+    box24_eiInsurableEarnings: Math.min(employmentIncome, limits.ei_max_insurable),
+    box26_cppPensionableEarnings: Math.min(employmentIncome, limits.cpp_ympe),
+    box_limits_used: { tax_year: resolvedYear, ...limits },
     breakdown: {
       grossIncome: totals.grossIncome,
       vacationPay: totals.vacationPay,
@@ -166,15 +191,38 @@ export const EETRT_calculateT4Data = (entries) => {
       provincialTax: totals.provincialTax
     }
   };
+
+  console.log('[EETRT] calculateT4Data result:', {
+    totals: totals,
+    result: result
+  });
+
+  return result;
 };
 
 export const EETRT_processPayrollForROE = (entries) => {
+  console.log('[EETRT] Processing payroll for ROE breakdown:', {
+    totalEntries: entries.length,
+    sample: entries.slice(0, 5).map(e => ({
+      id: e.id,
+      pay_date: e.hrpayroll_runs?.pay_date || e.pay_date,
+      gross_pay: e.gross_pay,
+      is_migration: e.is_migration_entry || false,
+      is_synthetic: e.is_synthetic || false
+    })),
+    breakdown: {
+      regular: entries.filter(e => !e.is_migration_entry && !e.is_synthetic).length,
+      migration: entries.filter(e => e.is_migration_entry).length,
+      synthetic: entries.filter(e => e.is_synthetic).length
+    }
+  });
+
   const weeklyData = {};
 
   entries.forEach(entry => {
-    const payDate = new Date(entry.hrpayroll_runs.pay_date);
-    const weekStart = new Date(entry.hrpayroll_runs.pay_period_start);
-    const weekEnd = new Date(entry.hrpayroll_runs.pay_period_end);
+    const payDate = new Date(entry.hrpayroll_runs?.pay_date || entry.pay_date);
+    const weekStart = new Date(entry.hrpayroll_runs?.pay_period_start || entry.period_start_date || entry.pay_date);
+    const weekEnd = new Date(entry.hrpayroll_runs?.pay_period_end || entry.period_end_date || entry.pay_date);
     
     const year = payDate.getFullYear();
     const weekNumber = getISOWeek(payDate);
@@ -197,9 +245,10 @@ export const EETRT_processPayrollForROE = (entries) => {
       // Premium parsing failed
     }
 
-    const totalEarnings = grossPay + vacationPay + premiumPay;
-    const maxWeeklyInsurable = 1263; // 2025 EI maximum
-    const insurableEarnings = Math.min(totalEarnings, maxWeeklyInsurable);
+    // gross_pay already includes premium pay, so total earnings = gross_pay + vacation_pay
+    const totalEarnings = grossPay + vacationPay;
+    // Insurable earnings should equal total earnings (no cap applied)
+    const insurableEarnings = totalEarnings;
 
     const regularHours = parseFloat(entry.regular_hours || 0);
     const overtimeHours = parseFloat(entry.overtime_hours || 0);
@@ -223,16 +272,36 @@ export const EETRT_processPayrollForROE = (entries) => {
     weeklyData[weekKey].regularHours += regularHours;
     weeklyData[weekKey].overtimeHours += overtimeHours;
     weeklyData[weekKey].lieuHours += lieuHours;
+    // grossEarnings should be gross_pay + vacation_pay (premium is already in gross_pay)
     weeklyData[weekKey].grossEarnings += totalEarnings;
     weeklyData[weekKey].insurableEarnings += insurableEarnings;
     weeklyData[weekKey].vacationPay += vacationPay;
+    // premiumPay is extracted for display, but not added to totals (already in gross_pay)
     weeklyData[weekKey].premiumPay += premiumPay;
     weeklyData[weekKey].entries.push(entry);
   });
 
-  return Object.values(weeklyData).sort((a, b) => 
+  const sortedWeeks = Object.values(weeklyData).sort((a, b) => 
     new Date(b.payDate) - new Date(a.payDate)
   );
+
+  console.log('[EETRT] ROE weekly breakdown created:', {
+    totalWeeks: sortedWeeks.length,
+    sample: sortedWeeks.slice(0, 5).map(w => ({
+      weekKey: w.weekKey,
+      payDate: w.payDate,
+      grossEarnings: w.grossEarnings,
+      insurableEarnings: w.insurableEarnings,
+      entriesCount: w.entries.length,
+      entryTypes: {
+        regular: w.entries.filter(e => !e.is_migration_entry && !e.is_synthetic).length,
+        migration: w.entries.filter(e => e.is_migration_entry).length,
+        synthetic: w.entries.filter(e => e.is_synthetic).length
+      }
+    }))
+  });
+
+  return sortedWeeks;
 };
 
 const getISOWeek = (date) => {

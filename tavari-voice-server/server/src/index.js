@@ -1,9 +1,13 @@
 // index.js
-// Main Express server for AWS Chime SIP Media App voice agent
+// Main Express server for Twilio voice agent
 
 import express from 'express';
 import dotenv from 'dotenv';
-import { handleChimeWebhook } from './chimeRouter.js';
+import { 
+  handleIncomingCall, 
+  handleCallStatus, 
+  handleAIConversation 
+} from './twilioRouter.js';
 
 // Load environment variables
 dotenv.config();

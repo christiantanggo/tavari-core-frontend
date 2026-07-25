@@ -1,5 +1,5 @@
 // components/HR/HRPayrollComponents/PET-EmployeeEntryModal.jsx - COMPLETE REWRITE WITH WORKING HOLIDAY PAY
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { SecurityWrapper } from '../../../Security';
 import { useSecurityContext } from '../../../Security';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
@@ -10,6 +10,12 @@ import { useCanadianTaxCalculations } from '../../../hooks/useCanadianTaxCalcula
 import { useOntarioHealthPremium } from '../../../hooks/useOntarioHealthPremium';
 import { usePayrollCalculations } from '../../../hooks/usePayrollCalculations';
 import WagePeriodHoursModal from './WagePeriodHoursModal';
+import { calculatePayFrequencyFromDates } from '../../../utils/calculatePayPeriodNumber';
+import { computeAutoLieuForPeriod } from '../../../helpers/Payroll/computeAutoLieuForPeriod';
+import {
+  clampLieuHoursForPeriod
+} from '../../../helpers/Payroll/lieuTimeLedger';
+import { getCanadianStatHolidaysForPeriod } from '../../../utils/canadianStatHolidays';
 
 const PETEmployeeEntryModal = ({ 
   isOpen, 
@@ -54,6 +60,8 @@ const PETEmployeeEntryModal = ({
   const [showWagePeriodModal, setShowWagePeriodModal] = useState(false);
   const [wagePeriods, setWagePeriods] = useState([]);
   const [hasWageChange, setHasWageChange] = useState(false);
+  /** When true, auto-lieu effect must not overwrite lieu_earned/lieu_used the user typed. */
+  const lieuManuallyEditedRef = useRef(false);
 
   const {
     validateInput,
@@ -78,9 +86,33 @@ const PETEmployeeEntryModal = ({
 
   useEffect(() => {
     if (isOpen && hours) {
-      setLocalHours(hours);
+      lieuManuallyEditedRef.current = false;
+      const statWorked =
+        parseFloat(hours.stat_worked_hours ?? statHolidayPay ?? 0) || 0;
+      const holidayPayAmount =
+        holidayPayEnabled && !missedShiftBefore && !missedShiftAfter ? localHolidayPay : 0;
+      if (employee?.lieu_time_enabled) {
+        const auto = computeAutoLieuForPeriod({
+          employee,
+          totalWorkedHours: hours.total_hours,
+          statHolidayHours: statWorked,
+          holidayPayAmount
+        });
+        setLocalHours({
+          ...hours,
+          stat_worked_hours: statWorked,
+          lieu_earned: auto.lieuEarned,
+          lieu_used: auto.lieuUsed,
+          lieu_balance: auto.lieuBalanceAfter
+        });
+      } else {
+        setLocalHours({
+          ...hours,
+          stat_worked_hours: statWorked
+        });
+      }
     }
-  }, [isOpen, hours]);
+  }, [isOpen, hours, statHolidayPay, employee?.id, employee?.lieu_time_enabled, employee?.lieu_time_balance, employee?.max_paid_hours_per_period]);
 
   useEffect(() => {
     if (isOpen && additionalFedTax !== undefined) {
@@ -104,30 +136,52 @@ const PETEmployeeEntryModal = ({
     }
   }, [isOpen, employee?.id, employeeHolidayPay, employeeHolidayDetails]);
 
+  // When this pay period includes a stat holiday, pre-enable public holiday pay.
   useEffect(() => {
-    if (!isOpen || !employee || !getEmployeePreview) return;
+    if (!isOpen || !employee?.id || !payPeriod?.start || !payPeriod?.end) return;
+    if (employeeHolidayPay?.[employee.id] > 0) return;
 
-    const calculateLieu = async () => {
-      try {
-        const tempHours = { ...localHours, holiday_pay: localHolidayPay };
-        const preview = await getEmployeePreview(employee.id, tempHours, localAdditionalFedTax, 0);
-        
-        if (preview) {
-          setLocalHours(prev => ({
-            ...prev,
-            lieu_earned: preview.lieu_earned || 0,
-            lieu_used: preview.lieu_used || 0,
-            lieu_balance: preview.lieu_balance_after || prev.lieu_balance || 0
-          }));
-        }
-      } catch (error) {
-        console.error('Lieu calc error:', error);
-      }
-    };
+    const workedHours =
+      (parseFloat(localHours.total_hours) || 0) +
+      (parseFloat(localHours.stat_worked_hours) || 0) +
+      (parseFloat(hours?.total_hours) || 0) +
+      (parseFloat(hours?.stat_worked_hours) || 0) +
+      (parseFloat(statHolidayPay) || 0);
+    if (workedHours <= 0) return;
+    if (holidayPayEnabled && holidayDate) return;
 
-    const timer = setTimeout(calculateLieu, 300);
-    return () => clearTimeout(timer);
-  }, [localHours.total_hours, localHours.overtime_hours, localHours.stat_worked_hours, localHolidayPay, employee?.id, isOpen, getEmployeePreview]);
+    const holidaysInPeriod = getCanadianStatHolidaysForPeriod({
+      jurisdiction: settings?.tax_jurisdiction || 'ON',
+      periodStart: payPeriod.start,
+      periodEnd: payPeriod.end
+    });
+    if (!holidaysInPeriod.length) return;
+
+    // Only auto-enable for a holiday that actually falls in this pay period
+    const pick =
+      holidaysInPeriod.find((h) => h.name === 'Canada Day') || holidaysInPeriod[0];
+    setHolidayPayEnabled(true);
+    setHolidayDate(pick.date);
+  }, [
+    isOpen,
+    employee?.id,
+    payPeriod?.start,
+    payPeriod?.end,
+    localHours.total_hours,
+    localHours.stat_worked_hours,
+    hours?.total_hours,
+    hours?.stat_worked_hours,
+    statHolidayPay,
+    settings?.tax_jurisdiction,
+    employeeHolidayPay,
+    holidayPayEnabled,
+    holidayDate
+  ]);
+
+  // Lieu auto-fill is driven by calculatedPreview (see sync effect below). The previous async path
+  // duplicated that work via the parent's getEmployeePreview and raced with it, occasionally writing
+  // 0s back into localHours.lieu_earned/lieu_used and leaving the inputs blank even though the
+  // preview block showed the correct lieu values. Removed intentionally.
 
   const handleClose = () => {
     setLocalHours({ 
@@ -210,28 +264,19 @@ const PETEmployeeEntryModal = ({
       const totalWorkedHours = parseFloat(localHours.total_hours || 0);
       const overtimeHours = parseFloat(localHours.overtime_hours || 0);
       const statHolidayHours = parseFloat(localHours.stat_worked_hours || 0);
-      const currentLieuBalance = parseFloat(employee.lieu_time_balance || 0);
-      const holidayPayHours = localHolidayPay > 0 && wage > 0 ? (localHolidayPay / wage) : 0;
-      
-      let lieuEarned = 0;
-      let lieuUsed = 0;
-      let lieuBalanceAfter = currentLieuBalance;
-      
-      if (employee?.lieu_time_enabled) {
-        const maxHours = parseFloat(employee.max_paid_hours_per_period || 0);
-        const totalCompensationHours = totalWorkedHours + statHolidayHours + holidayPayHours;
-        
-        if (maxHours > 0) {
-          if (totalCompensationHours > maxHours) {
-            lieuEarned = totalCompensationHours - maxHours;
-            lieuBalanceAfter = currentLieuBalance + lieuEarned;
-          } else {
-            const shortfall = maxHours - totalCompensationHours;
-            lieuUsed = Math.min(shortfall, currentLieuBalance);
-            lieuBalanceAfter = currentLieuBalance - lieuUsed;
-          }
-        }
-      }
+      const holidayPayAmount =
+        holidayPayEnabled && !missedShiftBefore && !missedShiftAfter ? localHolidayPay : 0;
+
+      const clampedLieu = clampLieuHoursForPeriod({
+        employee,
+        lieuEarned: localHours.lieu_earned,
+        lieuUsed: localHours.lieu_used
+      });
+      const lieuEarned = clampedLieu.lieuEarned;
+      const lieuUsed = clampedLieu.lieuUsed;
+      const lieuBalanceAfter = clampedLieu.lieuBalanceAfter;
+      const currentLieuBalance = clampedLieu.lieuBalanceBefore;
+      const holidayPayHours = holidayPayAmount > 0 && wage > 0 ? holidayPayAmount / wage : 0;
 
       let regularHours = totalWorkedHours - overtimeHours - statHolidayHours;
       if (regularHours < 0) regularHours = 0;
@@ -304,37 +349,162 @@ const PETEmployeeEntryModal = ({
       const lieuPay = lieuUsed * wage;
       const grossPay = regularPay + overtimePay + lieuPay + statHolidayPay + premiumPay;
       
-      // FIXED: Get vacation_percent directly from database to bypass cached data
-      let vacationPercent = parseFloat(employee.vacation_percent || settings?.default_vacation_percent || 0.04);
+      // Calculate vacation percent based on years of service (ESA requirement: 4% for <5 years, 6% for 5+ years)
+      const calculateVacationPercent = (employee, defaultVacationPercent = 0.04) => {
+        // If vacation_percent is explicitly set (not null/undefined), use it (might be an override)
+        if (employee.vacation_percent != null) {
+          let percent = parseFloat(employee.vacation_percent);
+          // If it looks like a percentage (>= 1.0), convert to decimal
+          if (percent >= 1.0) {
+            percent = percent / 100;
+          }
+          return percent;
+        }
+        
+        // If not set, calculate based on years of service (ESA requirement)
+        if (employee.hire_date) {
+          const hireDate = new Date(employee.hire_date);
+          const currentDate = new Date();
+          const yearsOfService = (currentDate - hireDate) / (365.25 * 24 * 60 * 60 * 1000);
+          
+          // ESA minimum: 4% for <5 years, 6% for 5+ years
+          if (yearsOfService >= 5) {
+            return 0.06;
+          }
+        }
+        
+        // Fall back to default (usually 4%)
+        // Normalize defaultVacationPercent - if it's stored as percentage (>= 1.0), convert to decimal
+        let defaultPercent = parseFloat(defaultVacationPercent || 0.04);
+        if (defaultPercent >= 1.0) {
+          defaultPercent = defaultPercent / 100;
+        }
+        return defaultPercent;
+      };
       
-      // If vacation_percent looks like a percentage (>= 1.0), convert it to decimal
-      if (vacationPercent >= 1.0) {
-        console.log('🔄 FIXING: Converting vacation_percent from percentage to decimal:', vacationPercent, '->', vacationPercent / 100);
-        vacationPercent = vacationPercent / 100;
-      }
+      let vacationPercent = calculateVacationPercent(employee, settings?.default_vacation_percent);
       
       const vacationPay = grossPay * vacationPercent;
       const vacationPercentDisplay = (vacationPercent * 100).toFixed(2);  // For display as percentage
-      
-      const holidayPayAmount = (holidayPayEnabled && !missedShiftBefore && !missedShiftAfter) ? localHolidayPay : 0;
       
       const totalIncome = grossPay + vacationPay + holidayPayAmount;
 
       const claimCode = parseInt(employee.claim_code || 1);
       const jurisdiction = settings?.tax_jurisdiction || 'ON';
-      const payFrequency = settings?.pay_frequency || 'bi_weekly';
-      const payPeriods = payFrequency === 'weekly' ? 52 : payFrequency === 'bi_weekly' ? 26 : payFrequency === 'monthly' ? 12 : 24;
+      
+      // Determine pay frequency: Use business settings as primary source, period dates as fallback
+      // Business settings are authoritative since period dates can vary (e.g., bi-weekly might be 13-15 days)
+      let payFrequency, payPeriods;
+      
+      // CRITICAL FIX: Always check settings.pay_frequency first - it's the source of truth
+      // Check multiple possible sources for pay_frequency
+      const businessPayFrequency = settings?.pay_frequency || 
+                                   payrollCalc?.settings?.pay_frequency ||
+                                   canadianTax?.taxSettings?.pay_frequency;
+      
+      console.log('[PET-EmployeeEntryModal] Pay frequency sources:', {
+        'settings.pay_frequency': settings?.pay_frequency,
+        'payrollCalc.settings.pay_frequency': payrollCalc?.settings?.pay_frequency,
+        'canadianTax.taxSettings.pay_frequency': canadianTax?.taxSettings?.pay_frequency,
+        'selected businessPayFrequency': businessPayFrequency
+      });
+      
+      // Priority 1: Use business settings (most reliable)
+      if (businessPayFrequency) {
+        payFrequency = businessPayFrequency;
+        payPeriods = payFrequency === 'weekly' ? 52 : 
+                    (payFrequency === 'bi_weekly' || payFrequency === 'bi-weekly') ? 26 : 
+                    payFrequency === 'monthly' ? 12 : 
+                    payFrequency === 'semi_monthly' ? 24 : 26;
+        
+        console.log('[PET-EmployeeEntryModal] Using business pay frequency:', {
+          payFrequency,
+          payPeriods,
+          source: 'business_settings'
+        });
+      } else {
+        // Priority 2: Calculate from period dates if available
+        const periodStart = payPeriod?.pay_period_start || payPeriod?.start;
+        const periodEnd = payPeriod?.pay_period_end || payPeriod?.end;
+        
+        if (periodStart && periodEnd) {
+          const calculated = calculatePayFrequencyFromDates(periodStart, periodEnd);
+          payFrequency = calculated.frequency || 'bi_weekly';
+          payPeriods = calculated.periodsPerYear || 26;
+          
+          console.log('[PET-EmployeeEntryModal] Pay frequency calculated from period dates:', {
+            periodStart,
+            periodEnd,
+            calculatedFrequency: calculated.frequency,
+            calculatedPeriods: calculated.periodsPerYear,
+            finalFrequency: payFrequency,
+            finalPeriods: payPeriods
+          });
+        } else {
+          // Priority 3: Default fallback - BUT LOG A WARNING
+          payFrequency = 'bi_weekly';
+          payPeriods = 26;
+          
+          console.error('[PET-EmployeeEntryModal] ⚠️ WARNING: Pay frequency using default (no settings or dates):', {
+            finalFrequency: payFrequency,
+            finalPeriods: payPeriods,
+            warning: 'This may be incorrect! Check business payroll settings.'
+          });
+        }
+      }
 
+      // Get tax year from canadianTax hook (which loads from database) or fall back to settings prop.
+      // Defaults to 2026 (current CRA T4127 122nd Edition).
+      const effectiveTaxYear = canadianTax?.taxSettings?.tax_year || settings?.tax_year || 2026;
+      // Removed excessive logging - only log if calculation inputs actually changed
+      // This reduces console spam when premium hours or other UI elements update
+
+      // Get period end date from payPeriod prop or use current date
+      const periodEndDate = payPeriod?.pay_period_end || payPeriod?.end || new Date().toISOString().split('T')[0];
+      
+      // Get year-to-date totals (for now defaulting to 0, but structure is ready for actual YTD data)
+      // TODO: Integrate with useYTDCalculations hook to get actual year-to-date tax amounts
+      const yearToDateFederalTax = 0; // Will be populated from YTD calculations
+      const yearToDateProvincialTax = 0; // Will be populated from YTD calculations
+      const yearToDateGross = 0; // Will be populated from YTD calculations
+
+      // DEBUG: Log what we're passing to the calculation
+      console.log('[PET-EmployeeEntryModal] DEBUG - Tax calculation inputs:', {
+        totalIncome,
+        payPeriods,
+        payFrequency,
+        expectedAnnualIncome: totalIncome * payPeriods,
+        claimCode,
+        jurisdiction,
+        effectiveTaxYear
+      });
+      
       const craCalculation = canadianTax.calculateCRACompliantTaxes({
         grossPay: totalIncome,
         payPeriods: payPeriods,
         claimCode: claimCode,
         jurisdiction: jurisdiction,
         yearToDateTotals: {
-          yearToDateGross: 0,
+          yearToDateGross: yearToDateGross,
           yearToDateEI: 0,
-          yearToDateCPP: 0
-        }
+          yearToDateCPP: 0,
+          yearToDateFederalTax: yearToDateFederalTax,
+          yearToDateProvincialTax: yearToDateProvincialTax
+        },
+        taxYear: effectiveTaxYear,
+        periodEndDate: periodEndDate,
+        useCumulativeAveraging: true // Enable Option 2: Cumulative Averaging
+      });
+
+      // Debug: Log calculation results
+      console.log('[PET-EmployeeEntryModal] CRA Calculation Result:', {
+        federal_tax_period: craCalculation.federal_tax_period,
+        provincial_tax_period: craCalculation.provincial_tax_period,
+        ei_premium: craCalculation.ei_premium,
+        cpp_contribution: craCalculation.cpp_contribution,
+        cpp2_contribution: craCalculation.cpp2_contribution,
+        tax_year_used: craCalculation.cra_compliance?.tax_year,
+        document_reference: craCalculation.cra_compliance?.document_reference
       });
 
       const baseFederalTax = craCalculation.federal_tax_period || 0;
@@ -342,21 +512,37 @@ const PETEmployeeEntryModal = ({
       const totalFederalTax = baseFederalTax + additionalTax;
 
       const baseProvincialTax = craCalculation.provincial_tax_period || 0;
-      let ohp = 0;
-      
-      if (jurisdiction === 'ON' && ontarioHealthPremium && typeof ontarioHealthPremium === 'function') {
-        const annualIncome = totalIncome * payPeriods;
-        ohp = ontarioHealthPremium(annualIncome, payPeriods);
-      }
-
-      const totalProvincialTax = baseProvincialTax + ohp;
+      // CRITICAL FIX: OHP (Ontario Health Premium) is already included in provincial_tax_period from CRA calculation
+      // The CRA calculation includes V2 (OHP) in the final provincial tax: T2 = T4 + V1 + V2 - S
+      // So we should NOT add it again here - that would double it!
+      // Extract OHP from the CRA calculation result if available for display purposes
+      const ohp = craCalculation.provincial_calculation?.ontario_details?.V2_per_period ||
+                  craCalculation.provincial_calculation?.ontario_health_premium_period || 0;
+      // OHP is already included in baseProvincialTax, so totalProvincialTax = baseProvincialTax
+      const totalProvincialTax = baseProvincialTax;
       const eiPremium = craCalculation.ei_premium || 0;
+      // cppContribution is the COMBINED total (base + first additional + CPP2) actually deducted from the paycheque.
+      // Surface CPP2 separately in case downstream UI/T4 reporting needs it.
       const cppContribution = craCalculation.cpp_contribution || 0;
+      const cpp2Contribution = craCalculation.cpp2_contribution || 0;
+      const cppBaseContribution = craCalculation.cpp_base_contribution || (cppContribution - cpp2Contribution);
 
       const totalDeductions = totalFederalTax + totalProvincialTax + eiPremium + cppContribution;
       const netPay = Math.max(0, totalIncome - totalDeductions);
 
-      const newLieuBalance = currentLieuBalance + lieuEarned - lieuUsed;
+      // DEBUG: Log the calculation
+      console.log('[PET-EmployeeEntryModal] CALCULATED DEDUCTIONS:', {
+        baseFederalTax,
+        additionalTax,
+        totalFederalTax,
+        baseProvincialTax,
+        totalProvincialTax,
+        eiPremium,
+        cppContribution,
+        totalDeductions,
+        totalIncome,
+        netPay
+      });
 
       return {
         regular_hours: regularHours,
@@ -387,8 +573,10 @@ const PETEmployeeEntryModal = ({
         provincial_tax_total: totalProvincialTax,
         ei_premium: eiPremium,
         ei_deduction: eiPremium,
-        cpp_contribution: cppContribution,
-        cpp_deduction: cppContribution,
+        cpp_contribution: cppContribution,             // base + first additional + CPP2 (combined for paycheque deduction)
+        cpp_base_contribution: cppBaseContribution,    // base + first additional only
+        cpp2_contribution: cpp2Contribution,           // second additional (T4 box 16A)
+        cpp_deduction: cppContribution,                // legacy field name; mirrors cpp_contribution for DB compatibility
         total_deductions: totalDeductions,
         net_pay: netPay,
         wage_breakdown: wageBreakdown,
@@ -467,6 +655,15 @@ const PETEmployeeEntryModal = ({
 
   const updateHours = (field, value, premiumName = null) => {
     const sanitized = parseFloat(value) || 0;
+    if (field === 'lieu_earned' || field === 'lieu_used') {
+      lieuManuallyEditedRef.current = true;
+    } else if (
+      field === 'total_hours' ||
+      field === 'overtime_hours' ||
+      field === 'stat_worked_hours'
+    ) {
+      lieuManuallyEditedRef.current = false;
+    }
     if (premiumName) {
       setLocalHours(prev => ({
         ...prev,
@@ -475,6 +672,19 @@ const PETEmployeeEntryModal = ({
           [premiumName]: sanitized
         }
       }));
+    } else if (field === 'lieu_earned' || field === 'lieu_used') {
+      setLocalHours((prev) => {
+        const earned =
+          field === 'lieu_earned' ? sanitized : parseFloat(prev.lieu_earned || 0);
+        const used = field === 'lieu_used' ? sanitized : parseFloat(prev.lieu_used || 0);
+        const clamped = clampLieuHoursForPeriod({ employee, lieuEarned: earned, lieuUsed: used });
+        return {
+          ...prev,
+          lieu_earned: clamped.lieuEarned,
+          lieu_used: clamped.lieuUsed,
+          lieu_balance: clamped.lieuBalanceAfter
+        };
+      });
     } else {
       setLocalHours(prev => ({
         ...prev,
@@ -510,16 +720,84 @@ const PETEmployeeEntryModal = ({
   const isHolidayPayEligible = useMemo(() => {
     return holidayPayEnabled && holidayDate && !missedShiftBefore && !missedShiftAfter;
   }, [holidayPayEnabled, holidayDate, missedShiftBefore, missedShiftAfter]);
+
+  const lieuCapSummary = useMemo(() => {
+    if (!employee?.lieu_time_enabled) return null;
+    const maxHours = parseFloat(employee.max_paid_hours_per_period) || 0;
+    if (maxHours <= 0) return null;
+
+    const worked = parseFloat(localHours.total_hours) || 0;
+    const holidayPayAmount =
+      holidayPayEnabled && !missedShiftBefore && !missedShiftAfter ? localHolidayPay : 0;
+    const auto = computeAutoLieuForPeriod({
+      employee,
+      totalWorkedHours: worked,
+      statHolidayHours: localHours.stat_worked_hours,
+      holidayPayAmount,
+    });
+
+    if (auto.lieuEarned <= 0) return null;
+    return {
+      maxHours,
+      worked,
+      lieuEarned: auto.lieuEarned,
+    };
+  }, [
+    employee,
+    localHours.total_hours,
+    localHours.stat_worked_hours,
+    holidayPayEnabled,
+    localHolidayPay,
+    missedShiftBefore,
+    missedShiftAfter,
+  ]);
   
+  // Auto-fill lieu earned/used when worked hours or holiday pay change (not after manual lieu edits).
   useEffect(() => {
-    if (calculatedPreview && employee?.lieu_time_enabled) {
-      setLocalHours(prev => ({
-        ...prev,
-        lieu_earned: calculatedPreview.lieu_earned || 0,
-        lieu_used: calculatedPreview.lieu_used || 0
-      }));
-    }
-  }, [calculatedPreview.lieu_earned, calculatedPreview.lieu_used, employee?.lieu_time_enabled]);
+    if (!isOpen || !employee?.lieu_time_enabled || lieuManuallyEditedRef.current) return;
+
+    const holidayPayAmount =
+      holidayPayEnabled && !missedShiftBefore && !missedShiftAfter ? localHolidayPay : 0;
+    const autoLieu = computeAutoLieuForPeriod({
+      employee,
+      totalWorkedHours: localHours.total_hours,
+      statHolidayHours: localHours.stat_worked_hours,
+      holidayPayAmount,
+    });
+
+    setLocalHours((prev) => ({
+      ...prev,
+      lieu_earned: autoLieu.lieuEarned,
+      lieu_used: autoLieu.lieuUsed,
+      lieu_balance: autoLieu.lieuBalanceAfter
+    }));
+  }, [
+    isOpen,
+    employee?.id,
+    employee?.lieu_time_enabled,
+    employee?.lieu_time_balance,
+    employee?.max_paid_hours_per_period,
+    localHours.total_hours,
+    localHours.stat_worked_hours,
+    localHolidayPay,
+    holidayPayEnabled,
+    missedShiftBefore,
+    missedShiftAfter
+  ]);
+
+  const maxLieuUsableThisPeriod = useMemo(() => {
+    if (!employee?.lieu_time_enabled) return 0;
+    const clamped = clampLieuHoursForPeriod({
+      employee,
+      lieuEarned: localHours.lieu_earned,
+      lieuUsed: localHours.lieu_used
+    });
+    return clamped.lieuBalanceBefore + clamped.lieuEarned;
+  }, [
+    employee,
+    localHours.lieu_earned,
+    localHours.lieu_used
+  ]);
   
   if (!isOpen || !employee) return null;
   
@@ -546,7 +824,7 @@ const PETEmployeeEntryModal = ({
                   </label>
                   <input
                     type="number"
-                    step="0.25"f
+                    step="0.25"
                     min="0"
                     max="168"
                     style={{
@@ -559,6 +837,12 @@ const PETEmployeeEntryModal = ({
                     onFocus={(e) => e.target.select()}
                     onClick={(e) => e.target.select()}
                   />
+                  {lieuCapSummary && (
+                    <div style={{ ...styles.infoText, color: '#b45309', marginTop: '6px' }}>
+                      Max paid hours this period: {lieuCapSummary.maxHours.toFixed(2)}.
+                      {` ${lieuCapSummary.worked.toFixed(2)} worked → ${lieuCapSummary.lieuEarned.toFixed(2)} banked as lieu time (not paid in cash).`}
+                    </div>
+                  )}
                   {hasWageChange && (
                     <div style={{marginTop: '8px'}}>
                       <button
@@ -603,9 +887,17 @@ const PETEmployeeEntryModal = ({
                     onClick={(e) => e.target.select()}
                   />
                   <div style={styles.infoText}>
-                    Paid at 1.5x regular rate
+                    Auto-filled from timesheets when hours were worked on a stat holiday (e.g. Canada Day). Paid at 1.5× regular rate — not included in Total Hours Worked above.
                   </div>
                 </div>
+              </div>
+              <div style={styles.statHolidayGuide}>
+                <strong>Worked on a stat holiday (e.g. Canada Day)?</strong>
+                <ol style={styles.statHolidayGuideList}>
+                  <li>Enter stat holiday hours here (1.5× premium pay).</li>
+                  <li>Enable <em>Include Holiday Pay</em> below for the ESA public holiday amount (average day&apos;s pay).</li>
+                  <li>Confirm the employee worked their last shift before and first shift after the holiday.</li>
+                </ol>
               </div>
             </div>
 
@@ -646,6 +938,7 @@ const PETEmployeeEntryModal = ({
                     type="number"
                     step="0.25"
                     min="0"
+                    max={maxLieuUsableThisPeriod > 0 ? maxLieuUsableThisPeriod : undefined}
                     style={{
                       ...styles.input,
                       ...(employee?.lieu_time_enabled ? {} : styles.inputDisabled)
@@ -659,6 +952,11 @@ const PETEmployeeEntryModal = ({
                   />
                   <div style={styles.infoText}>
                     Lieu time taken this period
+                    {employee?.lieu_time_enabled && maxLieuUsableThisPeriod <= 0 ? (
+                      <span style={{ display: 'block', color: '#b45309', marginTop: '4px' }}>
+                        No lieu balance available — cannot use lieu until time is earned.
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <div style={styles.formGroup}>
@@ -713,10 +1011,12 @@ const PETEmployeeEntryModal = ({
                     employee={employee}
                     selectedBusinessId={selectedBusinessId}
                     settings={settings}
-                    selectedHolidayDate={holidayDate}
+                    initialHolidayDate={holidayDate}
                     payPeriod={payPeriod}
                     onHolidayPayChange={handleHolidayPayCalculation}
                     formatAmount={formatTaxAmount}
+                    missedShiftBefore={missedShiftBefore}
+                    missedShiftAfter={missedShiftAfter}
                   />
 
                   <div style={styles.complianceSection}>
@@ -799,6 +1099,10 @@ const PETEmployeeEntryModal = ({
                         <strong>{calculatedPreview.overtime_hours?.toFixed(2) || '0.00'} hrs</strong>
                       </div>
                       <div style={styles.previewItem}>
+                        <span>Stat Worked Hours:</span>
+                        <strong>{calculatedPreview.stat_holiday_hours?.toFixed(2) || '0.00'} hrs</strong>
+                      </div>
+                      <div style={styles.previewItem}>
                         <span>Regular Pay:</span>
                         <strong>${formatTaxAmount(calculatedPreview.regular_pay)}</strong>
                       </div>
@@ -859,13 +1163,12 @@ const PETEmployeeEntryModal = ({
                       <div style={styles.previewItem}>
                         <span>Provincial Tax:</span>
                         <strong>${formatTaxAmount(calculatedPreview.provincial_tax)}</strong>
+                        {calculatedPreview.ontario_health_premium > 0 && (
+                          <span style={{fontSize: '18px', color: '#6b7280', marginLeft: '8px', fontStyle: 'italic'}}>
+                            (includes OHP: ${formatTaxAmount(calculatedPreview.ontario_health_premium)})
+                          </span>
+                        )}
                       </div>
-                      {calculatedPreview.ontario_health_premium > 0 && (
-                        <div style={styles.previewItem}>
-                          <span>Ontario Health Premium:</span>
-                          <strong>${formatTaxAmount(calculatedPreview.ontario_health_premium)}</strong>
-                        </div>
-                      )}
                       <div style={styles.previewItem}>
                         <span>EI Premium:</span>
                         <strong>${formatTaxAmount(calculatedPreview.ei_premium)}</strong>
@@ -913,7 +1216,7 @@ const PETEmployeeEntryModal = ({
                         <strong>CRA-Compliant Calculation</strong>
                         <br/>
                         <em>
-                        Federal & Provincial tax calculated using {new Date().getFullYear()} CRA withholding tables (Claim Code {calculatedPreview.claim_code || 1}).
+                        Federal & Provincial tax calculated using {calculatedPreview.cra_compliance?.tax_year || canadianTax?.taxSettings?.tax_year || new Date().getFullYear()} CRA withholding tables (Claim Code {calculatedPreview.claim_code || 1}).
                         {calculatedPreview.ontario_health_premium > 0 && ' Includes Ontario Health Premium calculation.'}
                         {calculatedPreview.has_wage_changes && ' Pay calculated using multiple wage rates for accuracy.'}
                         Vacation pay calculated at {calculatedPreview.vacation_percent_display}% per employee/business settings.
@@ -988,7 +1291,7 @@ const styles = {
     backgroundColor: '#f9fafb'
   },
   title: {
-    fontSize: '18px',
+    fontSize: '24px',
     fontWeight: '700',
     color: '#1f2937',
     margin: 0
@@ -996,7 +1299,7 @@ const styles = {
   closeButton: {
     background: 'none',
     border: 'none',
-    fontSize: '24px',
+    fontSize: '16px',
     color: '#6b7280',
     cursor: 'pointer',
     padding: '8px',
@@ -1033,7 +1336,7 @@ const styles = {
     borderBottom: '2px solid #008080'
   },
   sectionTitleDisabled: {
-    fontSize: '16px',
+    fontSize: '14px',
     fontWeight: '600',
     color: '#9ca3af',
     marginBottom: '16px',
@@ -1071,7 +1374,7 @@ const styles = {
     padding: '12px 16px',
     border: '1px solid #d1d5db',
     borderRadius: '6px',
-    fontSize: '14px',
+    fontSize: '12px',
     fontFamily: 'inherit',
     backgroundColor: '#ffffff',
     transition: 'border-color 0.2s'
@@ -1082,10 +1385,24 @@ const styles = {
     cursor: 'not-allowed'
   },
   infoText: {
-    fontSize: '12px',
+    fontSize: '14px',
     color: '#6b7280',
     marginTop: '4px',
     fontStyle: 'italic'
+  },
+  statHolidayGuide: {
+    marginTop: '12px',
+    padding: '12px 14px',
+    backgroundColor: '#eff6ff',
+    border: '1px solid #93c5fd',
+    borderRadius: '6px',
+    fontSize: '14px',
+    color: '#1e3a5f',
+    lineHeight: 1.5
+  },
+  statHolidayGuideList: {
+    margin: '8px 0 0',
+    paddingLeft: '20px'
   },
   checkboxRow: {
     marginBottom: '16px'
@@ -1119,7 +1436,7 @@ const styles = {
     border: '1px solid #fca5a5',
     borderRadius: '6px',
     color: '#dc2626',
-    fontSize: '14px'
+    fontSize: '13px'
   },
   successBox: {
     padding: '12px',
@@ -1135,7 +1452,7 @@ const styles = {
     border: '1px solid #d1d5db',
     color: '#374151',
     borderRadius: '6px',
-    fontSize: '13px',
+    fontSize: '14px',
     fontWeight: '600',
     cursor: 'pointer',
     transition: 'all 0.2s'
@@ -1145,7 +1462,7 @@ const styles = {
     backgroundColor: '#f9fafb',
     border: '2px solid #e5e7eb',
     borderRadius: '8px',
-    fontSize: '14px'
+    fontSize: '13px'
   },
   previewGrid: {
     display: 'grid',
@@ -1172,7 +1489,7 @@ const styles = {
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: '6px 0',
-    fontSize: '13px',
+    fontSize: '14px',
     color: '#4b5563'
   },
   previewTotal: {
@@ -1230,7 +1547,7 @@ const styles = {
     border: '1px solid #d1d5db',
     color: '#374151',
     borderRadius: '6px',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: '600',
     cursor: 'pointer',
     transition: 'all 0.2s'
@@ -1241,7 +1558,7 @@ const styles = {
     color: '#ffffff',
     border: 'none',
     borderRadius: '6px',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: '600',
     cursor: 'pointer',
     transition: 'all 0.2s'

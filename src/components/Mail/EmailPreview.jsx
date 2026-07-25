@@ -4,6 +4,8 @@ import { styles } from '../../styles/Mail/CampaignBuilder.styles';
 import { FiSmartphone, FiMonitor } from 'react-icons/fi';
 
 const EmailPreview = ({ campaign, previewMode, onPreviewModeChange, business }) => {
+  const preserveLineBreaks = (content) => String(content || '').replace(/\r\n|\r|\n/g, '<br />');
+
   const generateEmailHTML = (contentBlocks) => {
     if (!contentBlocks || contentBlocks.length === 0) {
       return `
@@ -17,6 +19,7 @@ const EmailPreview = ({ campaign, previewMode, onPreviewModeChange, business }) 
     const blockHTML = contentBlocks.map(block => {
       switch (block.type) {
         case 'text':
+          const textContent = preserveLineBreaks(block.content);
           return `
             <p style="
               font-size: ${block.settings.fontSize}; 
@@ -25,7 +28,7 @@ const EmailPreview = ({ campaign, previewMode, onPreviewModeChange, business }) 
               line-height: ${block.settings.lineHeight};
               margin: 15px 0;
             ">
-              ${block.content}
+              ${textContent}
             </p>
           `;
           
@@ -166,8 +169,19 @@ const EmailPreview = ({ campaign, previewMode, onPreviewModeChange, business }) 
     // Replace dynamic fields with sample data
     const processedHTML = blockHTML
       .replace(/\{FirstName\}/g, 'John')
+      .replace(/\{\{FirstName\}\}/g, 'John')
+      .replace(/\{\{First Name\}\}/g, 'John')
       .replace(/\{LastName\}/g, 'Doe')
-      .replace(/\{Email\}/g, 'john@example.com');
+      .replace(/\{\{LastName\}\}/g, 'Doe')
+      .replace(/\{\{Last Name\}\}/g, 'Doe')
+      .replace(/\{FullName\}/g, 'John Doe')
+      .replace(/\{\{FullName\}\}/g, 'John Doe')
+      .replace(/\{\{Full Name\}\}/g, 'John Doe')
+      .replace(/\{Email\}/g, 'john@example.com')
+      .replace(/\{\{Email\}\}/g, 'john@example.com')
+      .replace(/\{\{Email Address\}\}/g, 'john@example.com')
+      .replace(/\{\{LoyaltyPoints\}\}/g, '245')
+      .replace(/\{\{Loyalty Points\}\}/g, '245');
 
     return processedHTML;
   };

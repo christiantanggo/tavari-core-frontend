@@ -2,6 +2,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
+import { scheduleCustomerDisplayMirrorPush } from '../../services/customerDisplayMirrorSync';
+import { clearCustomerDisplayPaymentLocalAndMirror } from '../../services/customerDisplayLocalState';
+import { buildRegisterNavigationState } from '../../utils/posRegisterLock';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
@@ -9,6 +12,13 @@ import { SecurityWrapper, useSecurityContext } from '../../Security';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { TavariStyles } from '../../utils/TavariStyles';
 import { generateReceiptHTML, generateEmailReceiptHTML, printReceipt, RECEIPT_TYPES } from '../../helpers/ReceiptBuilder';
+import {
+  ensureReceiptPrinterFromActiveStation,
+  getDeviceReceiptPrinterConfig,
+} from '../../services/posRegisterStationsService';
+import { formatDateTimeForBusiness, getBusinessTimezone } from '../../utils/businessDateFormat';
+import * as GiftCardService from '../../services/GiftCards/GiftCardService';
+import toast from 'react-hot-toast';
 
 const ReceiptScreen = () => {
   const navigate = useNavigate();
@@ -16,7 +26,7 @@ const ReceiptScreen = () => {
   
   // Authentication
   const auth = usePOSAuth({
-    requiredRoles: ['employee', 'cashier', 'manager', 'owner'],
+    requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'ReceiptScreen'
   });
@@ -55,10 +65,15 @@ const ReceiptScreen = () => {
   const [receiptData, setReceiptData] = useState(null);
   const [businessInfo, setBusinessInfo] = useState(null);
   const [mailSettings, setMailSettings] = useState(null);
+  const [posReceiptSettings, setPosReceiptSettings] = useState({
+    receipt_auto_print: false,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [autoPrintDone, setAutoPrintDone] = useState(false);
   
   const saleData = location.state?.saleData;
+  const businessTimezone = getBusinessTimezone(auth.businessData);
   
   useEffect(() => {
     if (!auth.isReady || !canViewReceipts) return;
@@ -69,21 +84,55 @@ const ReceiptScreen = () => {
   useEffect(() => {
     if (auth.selectedBusinessId) {
       loadMailSettings(auth.selectedBusinessId);
+      loadPosReceiptSettings(auth.selectedBusinessId);
     }
   }, [auth.selectedBusinessId]);
 
+  // Auto-print standard receipt once when network printer + helper are both ready
+  useEffect(() => {
+    if (loading || autoPrintDone || !receiptData || !businessInfo) return;
+    if (!canPrintReceipts || !auth.selectedBusinessId) return;
+
+    let cancelled = false;
+    (async () => {
+      const printer = await ensureReceiptPrinterFromActiveStation(auth.selectedBusinessId);
+      if (cancelled || !printer) return;
+
+      // Opt-in only: must be explicitly enabled in POS Settings → Receipts
+      if (posReceiptSettings.receipt_auto_print !== true) return;
+
+      // Don't pop an error alert on screen load if the helper isn't installed yet
+      const { checkPrintAgentHealth } = await import('../../helpers/escposReceipt');
+      const helperOk = await checkPrintAgentHealth();
+      if (cancelled || !helperOk) {
+        setAutoPrintDone(true);
+        return;
+      }
+
+      setAutoPrintDone(true);
+      handlePrintReceipt('standard', { silent: true });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, autoPrintDone, receiptData, businessInfo, canPrintReceipts, posReceiptSettings, auth.selectedBusinessId]);
+
   // Send navigation signal to customer display when leaving receipt screen
   useEffect(() => {
+    const bid = auth.selectedBusinessId;
     return () => {
-      // Send signal to customer display to reset to ads
+      if (!bid) return;
+      clearCustomerDisplayPaymentLocalAndMirror(bid);
       const navigationData = {
         navigated: true,
         timestamp: Date.now()
       };
       localStorage.setItem('tavari_customer_display_receipt_navigation', JSON.stringify(navigationData));
+      scheduleCustomerDisplayMirrorPush(bid);
       console.log('📄 ReceiptScreen: Navigation signal sent to customer display:', navigationData);
     };
-  }, []);
+  }, [auth.selectedBusinessId]);
   
   const loadReceiptData = async () => {
     try {
@@ -125,6 +174,46 @@ const ReceiptScreen = () => {
       if (!receiptInfo) {
         throw new Error('No receipt data found');
       }
+
+      // Enrich receipt with sale notes + full payment rows (fixes messy receipts and enables H-ID on receipt).
+      if (receiptInfo?.sale_id) {
+        try {
+          const [{ data: paymentsRows, error: paymentsErr }, { data: saleRow, error: saleErr }] = await Promise.all([
+            supabase
+              .from('pos_payments')
+              .select('payment_method, amount, custom_method_name, reference_number, notes, created_at')
+              .eq('sale_id', receiptInfo.sale_id)
+              .order('created_at', { ascending: true }),
+            supabase
+              .from('pos_sales')
+              .select('notes, sale_number, user_id, operator_user_id, operator_user_name, login_user_id, login_user_name')
+              .eq('id', receiptInfo.sale_id)
+              .maybeSingle()
+          ]);
+
+          if (!paymentsErr && Array.isArray(paymentsRows) && paymentsRows.length > 0) {
+            receiptInfo.payments = paymentsRows.map((p) => ({
+              payment_method: p.payment_method,
+              amount: Number(p.amount || 0),
+              custom_method_name: p.custom_method_name || null,
+              reference_number: p.reference_number || null,
+              notes: p.notes || null,
+            }));
+          }
+
+          if (!saleErr && saleRow) {
+            receiptInfo.sale_notes = saleRow.notes || null;
+            // In case some views expect sale_number, keep it in sync
+            receiptInfo.sale_number = receiptInfo.sale_number || saleRow.sale_number || null;
+            receiptInfo.operator_user_id = receiptInfo.operator_user_id || saleRow.operator_user_id || saleRow.user_id || null;
+            receiptInfo.operator_user_name = receiptInfo.operator_user_name || saleRow.operator_user_name || receiptInfo.employee_name || null;
+            receiptInfo.login_user_id = receiptInfo.login_user_id || saleRow.login_user_id || null;
+            receiptInfo.login_user_name = receiptInfo.login_user_name || saleRow.login_user_name || null;
+          }
+        } catch (enrichErr) {
+          console.warn('[ReceiptScreen] Failed to enrich receipt with payments/sale notes:', enrichErr?.message || enrichErr);
+        }
+      }
       
       setReceiptData(receiptInfo);
       
@@ -149,15 +238,25 @@ const ReceiptScreen = () => {
   
   const loadBusinessInfo = async () => {
     try {
-      const { data: business, error } = await supabase
-        .from('businesses')
-        .select('*')
-        .eq('id', auth.selectedBusinessId)
-        .single();
+      const [{ data: business, error }, { data: branding }] = await Promise.all([
+        supabase
+          .from('businesses')
+          .select('*')
+          .eq('id', auth.selectedBusinessId)
+          .single(),
+        supabase
+          .from('app_branding')
+          .select('logo_url')
+          .eq('business_id', auth.selectedBusinessId)
+          .maybeSingle(),
+      ]);
         
       if (error) throw error;
       
-      setBusinessInfo(business);
+      setBusinessInfo({
+        ...business,
+        logo_url: branding?.logo_url || business?.logo_url || null,
+      });
     } catch (err) {
       await logSecurityEvent('business_info_load_error', {
         error: err.message,
@@ -195,13 +294,36 @@ const ReceiptScreen = () => {
     }
   };
 
-  const buildReceiptEmailPayload = (recipientEmail, formattedSaleData, businessSettings) => {
-    const htmlContent = generateEmailReceiptHTML(formattedSaleData, businessSettings);
+  const loadPosReceiptSettings = async (businessId) => {
+    try {
+      const { data, error } = await supabase
+        .from('pos_settings')
+        .select('receipt_auto_print')
+        .eq('business_id', businessId)
+        .order('updated_at', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+
+      const row = Array.isArray(data) ? data[0] : data;
+      setPosReceiptSettings({
+        receipt_auto_print: row?.receipt_auto_print === true,
+      });
+    } catch (err) {
+      console.warn('Failed to load POS receipt settings:', err.message);
+      setPosReceiptSettings({
+        receipt_auto_print: false,
+      });
+    }
+  };
+
+  const buildReceiptEmailPayload = async (recipientEmail, formattedSaleData, businessSettings) => {
+    const htmlContent = await generateEmailReceiptHTML(formattedSaleData, businessSettings);
 
     const plainTextSections = [
       `${businessSettings.business_name || 'Receipt'}`,
       `Receipt #${formattedSaleData.sale_number || 'N/A'}`,
-      `Date: ${new Date(formattedSaleData.created_at || Date.now()).toLocaleString()}`,
+      `Date: ${formatDateTimeForBusiness(formattedSaleData.created_at || Date.now(), businessTimezone)}`,
       `Subtotal: $${(formattedSaleData.subtotal || 0).toFixed(2)}`,
       `Tax: $${(formattedSaleData.tax_amount || 0).toFixed(2)}`,
       `Total: $${(formattedSaleData.final_total || formattedSaleData.total || 0).toFixed(2)}`,
@@ -242,6 +364,7 @@ const ReceiptScreen = () => {
         businessId: auth.selectedBusinessId,
         campaignId: `pos-receipt-${formattedSaleData.sale_number || Date.now()}`,
         contactId: `pos-receipt-${recipientEmail}`,
+        emailType: 'transactional',
         to: recipientEmail,
         fromEmail: senderEmail,
         fromName: senderName,
@@ -253,9 +376,11 @@ const ReceiptScreen = () => {
     };
   };
   
-  const handlePrintReceipt = async (type = 'standard') => {
+  const handlePrintReceipt = async (type = 'standard', printOptions = {}) => {
     if (!canPrintReceipts) {
-      alert('You do not have permission to print receipts');
+      if (!printOptions.silent) {
+        alert('You do not have permission to print receipts');
+      }
       await logSecurityEvent('receipt_print_denied', {
         receipt_type: type,
         business_id: auth.selectedBusinessId,
@@ -265,14 +390,18 @@ const ReceiptScreen = () => {
     }
 
     if (!receiptData || !businessInfo) {
-      alert('Receipt data not ready');
+      if (!printOptions.silent) {
+        alert('Receipt data not ready');
+      }
       return;
     }
 
     // Rate limiting
     const rateLimitCheck = await checkRateLimit('print_receipt', 10, 60000);
     if (!rateLimitCheck.allowed) {
-      alert('Too many print attempts. Please wait a moment.');
+      if (!printOptions.silent) {
+        alert('Too many print attempts. Please wait a moment.');
+      }
       return;
     }
     
@@ -283,6 +412,9 @@ const ReceiptScreen = () => {
         business_id: auth.selectedBusinessId,
         printed_by: auth.authUser?.id
       }, 'low');
+
+      // Make sure station printer IP is in localStorage before dispatching print
+      await ensureReceiptPrinterFromActiveStation(auth.selectedBusinessId);
 
       const businessSettings = {
         business_name: businessInfo.name,
@@ -305,13 +437,27 @@ const ReceiptScreen = () => {
         subtotal: receiptData.subtotal || 0,
         final_total: receiptData.total || receiptData.final_total || 0,
         tax_amount: receiptData.tax_amount || receiptData.final_tax_amount || 0,
-        payments: receiptData.payment_methods || receiptData.payments || [],
+        // Prefer full payment rows (pos_payments). If missing (older data / RLS), fall back to method names.
+        payments: Array.isArray(receiptData.payments) && receiptData.payments.length > 0
+          ? receiptData.payments
+          : (Array.isArray(receiptData.payment_methods)
+              ? receiptData.payment_methods
+              : []),
         tip_amount: receiptData.tip_amount || 0,
         change_given: receiptData.change_given || 0,
         discount_amount: receiptData.discount_amount || 0,
         loyalty_redemption: receiptData.loyalty_redemption || 0,
-        aggregated_taxes: receiptData.aggregated_taxes || {},
-        aggregated_rebates: receiptData.aggregated_rebates || {},
+        aggregated_taxes: receiptData.tax_calculation?.aggregatedTaxes || receiptData.aggregated_taxes || {},
+        aggregated_rebates: receiptData.tax_calculation?.aggregatedRebates || receiptData.aggregated_rebates || {},
+        indian_status_gst_only: receiptData.indian_status_gst_only,
+        indian_status_certificate_number: receiptData.indian_status_certificate_number,
+        // Pass through any sale notes (used to extract H-ID if needed)
+        notes: receiptData.sale_notes || receiptData.notes || null,
+        cashier_name: receiptData.operator_user_name || receiptData.employee_name || 'Unknown',
+        operator_user_id: receiptData.operator_user_id || null,
+        operator_user_name: receiptData.operator_user_name || receiptData.employee_name || 'Unknown',
+        login_user_id: receiptData.login_user_id || null,
+        login_user_name: receiptData.login_user_name || null,
         loyaltyCustomer: receiptData.customer_name ? {
           customer_name: receiptData.customer_name,
           customer_email: receiptData.customer_email,
@@ -335,14 +481,20 @@ const ReceiptScreen = () => {
           receiptType = RECEIPT_TYPES.STANDARD;
       }
       
-      const receiptHTML = generateReceiptHTML(
+      const receiptHTML = await generateReceiptHTML(
         formattedSaleData, 
         receiptType, 
         businessSettings,
         type === 'reprint' ? { reprintReason: 'Customer Request' } : {}
       );
       
-      printReceipt(receiptHTML);
+      await printReceipt(receiptHTML, {
+        saleData: formattedSaleData,
+        receiptType,
+        businessSettings,
+        escposOptions: type === 'reprint' ? { reprintReason: 'Customer Request' } : {},
+        silent: !!printOptions.silent,
+      });
 
       await logSecurityEvent('receipt_printed', {
         receipt_type: type,
@@ -428,13 +580,25 @@ const ReceiptScreen = () => {
         subtotal: receiptData.subtotal || 0,
         final_total: receiptData.total || receiptData.final_total || 0,
         tax_amount: receiptData.tax_amount || receiptData.final_tax_amount || 0,
-        payments: receiptData.payment_methods || receiptData.payments || [],
+        payments: Array.isArray(receiptData.payments) && receiptData.payments.length > 0
+          ? receiptData.payments
+          : (Array.isArray(receiptData.payment_methods)
+              ? receiptData.payment_methods
+              : []),
         tip_amount: receiptData.tip_amount || 0,
         change_given: receiptData.change_given || 0,
         discount_amount: receiptData.discount_amount || 0,
         loyalty_redemption: receiptData.loyalty_redemption || 0,
-        aggregated_taxes: receiptData.aggregated_taxes || {},
-        aggregated_rebates: receiptData.aggregated_rebates || {},
+        aggregated_taxes: receiptData.tax_calculation?.aggregatedTaxes || receiptData.aggregated_taxes || {},
+        aggregated_rebates: receiptData.tax_calculation?.aggregatedRebates || receiptData.aggregated_rebates || {},
+        notes: receiptData.sale_notes || receiptData.notes || null,
+        indian_status_gst_only: receiptData.indian_status_gst_only,
+        indian_status_certificate_number: receiptData.indian_status_certificate_number,
+        cashier_name: receiptData.operator_user_name || receiptData.employee_name || 'Unknown',
+        operator_user_id: receiptData.operator_user_id || null,
+        operator_user_name: receiptData.operator_user_name || receiptData.employee_name || 'Unknown',
+        login_user_id: receiptData.login_user_id || null,
+        login_user_name: receiptData.login_user_name || null,
         loyaltyCustomer: receiptData.customer_name ? {
           customer_name: receiptData.customer_name,
           customer_email: receiptData.customer_email,
@@ -443,7 +607,7 @@ const ReceiptScreen = () => {
         } : null
       };
 
-      const { senderEmail: resolvedSender, payload } = buildReceiptEmailPayload(
+      const { senderEmail: resolvedSender, payload } = await buildReceiptEmailPayload(
         email,
         formattedSaleData,
         businessSettings
@@ -559,12 +723,15 @@ const ReceiptScreen = () => {
       initiated_by: auth.authUser?.id
     }, 'low');
 
+    clearCustomerDisplayPaymentLocalAndMirror(auth.selectedBusinessId);
+
     // Send navigation signal to customer display to reset to ads
     const navigationData = {
       navigated: true,
       timestamp: Date.now()
     };
     localStorage.setItem('tavari_customer_display_receipt_navigation', JSON.stringify(navigationData));
+    scheduleCustomerDisplayMirrorPush(auth.selectedBusinessId);
     console.log('📄 ReceiptScreen: Navigation signal sent to customer display from handleNewSale:', navigationData);
 
     sessionStorage.removeItem('lastSaleData');
@@ -578,7 +745,9 @@ const ReceiptScreen = () => {
     } else if (fromState === 'tabs') {
       navigate('/dashboard/pos/tabs');
     } else {
-      navigate('/dashboard/pos/register');
+      navigate('/dashboard/pos/register', {
+        state: buildRegisterNavigationState(saleData || {}),
+      });
     }
   };
   
@@ -587,7 +756,7 @@ const ReceiptScreen = () => {
     return (
       <SecurityWrapper>
         <POSAuthWrapper
-          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="ReceiptScreen"
         >
@@ -612,7 +781,7 @@ const ReceiptScreen = () => {
     return (
       <SecurityWrapper>
         <POSAuthWrapper
-          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="ReceiptScreen"
         >
@@ -632,7 +801,7 @@ const ReceiptScreen = () => {
     return (
       <SecurityWrapper>
         <POSAuthWrapper
-          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="ReceiptScreen"
         >
@@ -656,7 +825,7 @@ const ReceiptScreen = () => {
   return (
     <SecurityWrapper>
       <POSAuthWrapper
-        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         requireBusiness={true}
         componentName="ReceiptScreen"
       >
@@ -665,6 +834,151 @@ const ReceiptScreen = () => {
             <h1>Sale Complete!</h1>
             <p>Receipt #{receiptData.receipt_number || 'N/A'}</p>
             <p>Total: ${taxCalc.applyCashRounding(receiptData.total || 0).toFixed(2)}</p>
+          </div>
+
+          <div style={styles.section}>
+            <h3>Receipt Options</h3>
+            <div style={styles.receiptOptions}>
+              <button 
+                style={styles.receiptButton}
+                onClick={() => handlePrintReceipt('standard')}
+                disabled={!canPrintReceipts}
+                title={!canPrintReceipts ? 'You do not have permission to print receipts' : undefined}
+              >
+                Print Receipt
+              </button>
+              
+              <button 
+                style={styles.receiptButton}
+                onClick={() => handlePrintReceipt('gift')}
+                disabled={!canPrintReceipts}
+                title={!canPrintReceipts ? 'You do not have permission to print receipts' : undefined}
+              >
+                Gift Receipt
+              </button>
+              
+              <button 
+                style={styles.receiptButton}
+                onClick={() => handlePrintReceipt('kitchen')}
+                disabled={!canPrintReceipts}
+                title={!canPrintReceipts ? 'You do not have permission to print receipts' : undefined}
+              >
+                Kitchen Receipt
+              </button>
+              
+              <button 
+                style={styles.receiptButton}
+                onClick={handleEmailReceipt}
+                disabled={!canEmailReceipts}
+                title={!canEmailReceipts ? 'You do not have permission to email receipts' : undefined}
+              >
+                Email Receipt
+              </button>
+              
+              <button 
+                style={styles.receiptButton}
+                onClick={handleTextReceipt}
+                disabled={!canEmailReceipts}
+                title={!canEmailReceipts ? 'You do not have permission to text receipts' : undefined}
+              >
+                Text Receipt
+              </button>
+              
+              <button 
+                style={styles.receiptButtonSecondary}
+                onClick={handleNewSale}
+              >
+                No Receipt
+              </button>
+            </div>
+          </div>
+
+          {Array.isArray(saleData?.issued_gift_cards) && saleData.issued_gift_cards.length > 0 && (
+            <div style={styles.section}>
+              <h3>Gift cards issued</h3>
+              <p style={{ color: '#64748b', fontSize: 11, marginTop: 0 }}>
+                Print the certificate or email it to the recipient / purchaser.
+              </p>
+              {saleData.issued_gift_cards.map((card) => (
+                <div
+                  key={card.id || card.code}
+                  style={{
+                    border: '1px solid #a7f3d0',
+                    background: '#ecfdf5',
+                    borderRadius: 10,
+                    padding: 12,
+                    marginBottom: 10,
+                  }}
+                >
+                  <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                    {card.code} · ${Number(card.face_value || 0).toFixed(2)}
+                  </div>
+                  {card.personal_message && (
+                    <div style={{ fontStyle: 'italic', color: '#065f46', marginBottom: 8 }}>
+                      “{card.personal_message}”
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      style={styles.receiptButton}
+                      onClick={async () => {
+                        try {
+                          await GiftCardService.openPrintableGiftCard({
+                            card,
+                            businessId: auth.selectedBusinessId || card.business_id,
+                            businessName: businessInfo?.name || 'Gift Card',
+                            businessLogoUrl: businessInfo?.logo_url || businessInfo?.business_logo_url || null,
+                          });
+                        } catch (err) {
+                          toast.error(err.message || 'Unable to print gift card');
+                        }
+                      }}
+                    >
+                      Print gift card
+                    </button>
+                    <button
+                      type="button"
+                      style={styles.receiptButton}
+                      onClick={() => {
+                        const to = card.recipient_email || card.purchaser_email || '';
+                        const email = window.prompt('Email gift card to:', to);
+                        if (!email) return;
+                        const subject = encodeURIComponent(`Your gift card from ${businessInfo?.name || 'us'}`);
+                        const body = encodeURIComponent(
+                          [
+                            `You've received a gift card!`,
+                            ``,
+                            `Code: ${card.code}`,
+                            `Value: $${Number(card.face_value || 0).toFixed(2)}`,
+                            card.personal_message ? `Message: ${card.personal_message}` : '',
+                            ``,
+                            `Present this code (or the printed QR) at checkout to redeem.`,
+                          ].filter(Boolean).join('\n')
+                        );
+                        window.location.href = `mailto:${email}?subject=${subject}&body=${body}`;
+                      }}
+                    >
+                      Email gift card
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          
+          <div style={styles.actions}>
+            <button 
+              style={styles.newSaleButton}
+              onClick={handleNewSale}
+            >
+              {location.state?.from === 'saved_carts' 
+                ? 'Back to Saved Carts' 
+                : location.state?.from === 'tabs'
+                ? 'Back to Tabs'
+                : 'Start New Sale'
+              }
+            </button>
           </div>
           
           <div style={styles.section}>
@@ -810,77 +1124,6 @@ const ReceiptScreen = () => {
               </div>
             </div>
           )}
-          
-          <div style={styles.section}>
-            <h3>Receipt Options</h3>
-            <div style={styles.receiptOptions}>
-              <button 
-                style={styles.receiptButton}
-                onClick={() => handlePrintReceipt('standard')}
-                disabled={!canPrintReceipts}
-                title={!canPrintReceipts ? 'You do not have permission to print receipts' : undefined}
-              >
-                Print Receipt
-              </button>
-              
-              <button 
-                style={styles.receiptButton}
-                onClick={() => handlePrintReceipt('gift')}
-                disabled={!canPrintReceipts}
-                title={!canPrintReceipts ? 'You do not have permission to print receipts' : undefined}
-              >
-                Gift Receipt
-              </button>
-              
-              <button 
-                style={styles.receiptButton}
-                onClick={() => handlePrintReceipt('kitchen')}
-                disabled={!canPrintReceipts}
-                title={!canPrintReceipts ? 'You do not have permission to print receipts' : undefined}
-              >
-                Kitchen Receipt
-              </button>
-              
-              <button 
-                style={styles.receiptButton}
-                onClick={handleEmailReceipt}
-                disabled={!canEmailReceipts}
-                title={!canEmailReceipts ? 'You do not have permission to email receipts' : undefined}
-              >
-                Email Receipt
-              </button>
-              
-              <button 
-                style={styles.receiptButton}
-                onClick={handleTextReceipt}
-                disabled={!canEmailReceipts}
-                title={!canEmailReceipts ? 'You do not have permission to text receipts' : undefined}
-              >
-                Text Receipt
-              </button>
-              
-              <button 
-                style={styles.receiptButtonSecondary}
-                onClick={handleNewSale}
-              >
-                No Receipt
-              </button>
-            </div>
-          </div>
-          
-          <div style={styles.actions}>
-            <button 
-              style={styles.newSaleButton}
-              onClick={handleNewSale}
-            >
-              {location.state?.from === 'saved_carts' 
-                ? 'Back to Saved Carts' 
-                : location.state?.from === 'tabs'
-                ? 'Back to Tabs'
-                : 'Start New Sale'
-              }
-            </button>
-          </div>
         </div>
       </POSAuthWrapper>
     </SecurityWrapper>
@@ -1069,16 +1312,20 @@ const styles = {
   
   actions: {
     display: 'flex',
+    flexDirection: 'column',
     gap: TavariStyles.spacing.lg,
     justifyContent: 'center',
-    marginTop: TavariStyles.spacing['2xl']
+    alignItems: 'stretch',
+    width: '100%',
+    marginTop: TavariStyles.spacing.sm,
+    marginBottom: TavariStyles.spacing['3xl']
   },
   
   receiptOptions: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
     gap: TavariStyles.spacing.md,
-    marginBottom: TavariStyles.spacing.lg
+    marginBottom: 0
   },
   
   receiptButton: {
@@ -1109,7 +1356,9 @@ const styles = {
   newSaleButton: {
     ...TavariStyles.components.button.base,
     ...TavariStyles.components.button.variants.primary,
-    ...TavariStyles.components.button.sizes.lg
+    ...TavariStyles.components.button.sizes.lg,
+    width: '100%',
+    boxSizing: 'border-box'
   }
 };
 

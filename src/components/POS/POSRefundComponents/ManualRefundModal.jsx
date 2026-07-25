@@ -18,6 +18,7 @@ const ManualRefundModal = ({
   const [refundAmount, setRefundAmount] = useState('');
   const [refundMethod, setRefundMethod] = useState('cash');
   const [customRefundMethod, setCustomRefundMethod] = useState('');
+  const [helcimId, setHelcimId] = useState('');
   const [refundReason, setRefundReason] = useState('');
   const [customerName, setCustomerName] = useState('');
   const [customerEmail, setCustomerEmail] = useState('');
@@ -27,7 +28,7 @@ const ManualRefundModal = ({
   const [error, setError] = useState(null);
 
   const auth = usePOSAuth({
-    requiredRoles: ['cashier', 'manager', 'owner'],
+    requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'ManualRefundModal'
   });
@@ -41,6 +42,13 @@ const ManualRefundModal = ({
 
     if (!refundReason.trim()) {
       setError('Please provide a reason for the refund');
+      return;
+    }
+
+    // If processing via Helcim, require H-ID (original Helcim transaction id)
+    const isHelcimRefund = refundMethod === 'credit' || refundMethod === 'debit';
+    if (isHelcimRefund && !helcimId.trim()) {
+      setError('H-ID is required for Helcim debit/credit refunds');
       return;
     }
 
@@ -61,6 +69,33 @@ const ManualRefundModal = ({
 
     try {
       const refundTotal = parseFloat(refundAmount);
+      if (!Number.isFinite(refundTotal) || refundTotal <= 0) {
+        throw new Error('Refund amount must be a number greater than $0.00');
+      }
+
+      // If Helcim debit/credit refund: call Helcim first (avoid creating DB records if processor fails)
+      if (isHelcimRefund) {
+        const deviceCode = (localStorage.getItem('helcim_device_code') || 'JSV5').toUpperCase();
+        const { data: helcimResp, error: helcimFnError } = await supabase.functions.invoke('helcim-terminal', {
+          body: {
+            action: 'refundPayment',
+            data: {
+              refundType: refundMethod === 'debit' ? 'debit' : 'credit',
+              originalTransactionId: helcimId.trim(),
+              transactionAmount: Number(refundTotal.toFixed(2)),
+              currency: 'CAD',
+              deviceCode,
+              businessId: selectedBusinessId,
+            },
+          },
+        });
+        if (helcimFnError) {
+          throw new Error(helcimFnError.message || 'Helcim refund failed');
+        }
+        if (!helcimResp?.success) {
+          throw new Error(helcimResp?.error || 'Helcim refund failed');
+        }
+      }
       
       // First, create a dummy sale record for the manual refund
       const { data: manualSale, error: saleError } = await supabase
@@ -76,12 +111,17 @@ const ManualRefundModal = ({
       }
 
       // Now create the refund record with the manual sale ID
+      const resolvedRefundMethod = refundMethod === 'custom' ? customRefundMethod : refundMethod;
+      const dbRefundType =
+        (refundMethod === 'credit' || refundMethod === 'debit')
+          ? 'card'
+          : resolvedRefundMethod;
       const refundData = {
         business_id: selectedBusinessId,
         original_sale_id: manualSale, // Reference the dummy sale
         refunded_by: authUser.id,
-        refund_type: refundMethod === 'custom' ? customRefundMethod : refundMethod,
-        refund_method: refundMethod === 'custom' ? customRefundMethod : refundMethod,
+        refund_type: dbRefundType,
+        refund_method: resolvedRefundMethod,
         total_refund_amount: refundTotal,
         reason: refundReason.trim(),
         manager_override: true,
@@ -117,7 +157,12 @@ const ManualRefundModal = ({
         final_total: -refundTotal,
         tax_amount: 0,
         total: -refundTotal,
-        payments: [{
+        payments: isHelcimRefund ? [{
+          method: 'helcim_terminal',
+          payment_method: 'helcim_terminal',
+          amount: refundTotal,
+          reference_number: helcimId.trim()
+        }] : [{
           method: refundData.refund_method,
           payment_method: refundData.refund_method,
           amount: refundTotal
@@ -138,7 +183,7 @@ const ManualRefundModal = ({
         is_manual_refund: true
       };
 
-      const refundReceiptHTML = generateReceiptHTML(
+      const refundReceiptHTML = await generateReceiptHTML(
         manualRefundReceiptData, 
         RECEIPT_TYPES.REFUND, 
         businessSettings,
@@ -150,7 +195,11 @@ const ManualRefundModal = ({
         }
       );
       
-      printReceipt(refundReceiptHTML);
+      await printReceipt(refundReceiptHTML, {
+        saleData: manualRefundReceiptData,
+        receiptType: RECEIPT_TYPES.REFUND,
+        businessSettings,
+      });
 
       await logAction({
         action: 'manual_refund_processed',
@@ -337,10 +386,31 @@ const ManualRefundModal = ({
               style={styles.select}
             >
               <option value="cash">Cash</option>
-              <option value="card">Credit Card</option>
+              <option value="credit">Credit (Helcim)</option>
+              <option value="debit">Debit (Helcim - device required)</option>
               <option value="loyalty">Store Credit</option>
               <option value="custom">Custom Method</option>
             </select>
+            
+            {(refundMethod === 'credit' || refundMethod === 'debit') && (
+              <div style={{ marginTop: TavariStyles.spacing.md }}>
+                <label style={{ display: 'block', fontWeight: TavariStyles.typography.fontWeight.medium }}>
+                  H-ID (Helcim Transaction ID) *
+                </label>
+                <input
+                  type="text"
+                  value={helcimId}
+                  onChange={(e) => setHelcimId(e.target.value.replace(/[^0-9]/g, ''))}
+                  placeholder="Enter Helcim transaction id (numbers only)"
+                  style={styles.input}
+                />
+                <div style={{ fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray600, marginTop: '6px' }}>
+                  {refundMethod === 'debit'
+                    ? 'Debit refunds require the customer to complete the refund on the terminal.'
+                    : 'Credit refunds are processed via Helcim without the customer present.'}
+                </div>
+              </div>
+            )}
             
             {refundMethod === 'custom' && (
               <input

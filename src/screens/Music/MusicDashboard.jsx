@@ -1,7 +1,7 @@
 // src/screens/Music/MusicDashboard.jsx - TABBED INTERFACE WITH UX ENHANCEMENTS
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { FiMusic, FiUpload, FiList, FiSettings, FiLock, FiPlay, FiAlertCircle, FiDollarSign, FiDownload, FiMonitor, FiRefreshCw, FiCalendar, FiHardDrive } from 'react-icons/fi';
+import { FiMusic, FiUpload, FiList, FiSettings, FiLock, FiPlay, FiAlertCircle, FiDollarSign, FiDownload, FiMonitor, FiRefreshCw, FiCalendar, FiHardDrive, FiVolume2 } from 'react-icons/fi';
 
 // Tavari Build Standards - Required imports
 import { TavariStyles } from '../../utils/TavariStyles';
@@ -23,7 +23,8 @@ import Breadcrumbs from '../../components/UI/Breadcrumbs';
 import SkeletonLoader from '../../components/UI/SkeletonLoader';
 import EmptyState from '../../components/UI/EmptyState';
 import ContextualHelp from '../../components/UI/ContextualHelp';
-import MusicOnboarding from '../../components/Music/MusicOnboarding';
+import TavariModuleHeader from '../../components/UI/TavariModuleHeader';
+import TavariTabSystemComponent from '../../components/UI/TavariTabSystemComponent';
 
 // Services
 import ModuleCatalogService from '../../services/ModuleCatalogService';
@@ -36,6 +37,7 @@ import SystemMonitor from '../../components/Music/SystemMonitor';
 import PlaybackMonitor from '../../components/Music/PlaybackMonitor';
 import InstallationListManager from '../../components/Desktop/InstallationListManager';
 import MusicSubscriptionGate from '../../components/Music/MusicSubscriptionGate';
+import { globalMusicService } from '../../services/GlobalMusicService';
 
 // Music screen components for tabs
 import MusicUpload from './MusicUpload';
@@ -43,6 +45,7 @@ import MusicLibrary from './MusicLibrary';
 import PlaylistManager from './PlaylistManager';
 import MusicSchedules from './MusicSchedules';
 import MusicSystemMonitor from './MusicSystemMonitor';
+import MusicAdManager from './MusicAdManager';
 
 /**
  * Music Dashboard - Main hub for music management with tabbed interface
@@ -52,8 +55,6 @@ const MusicDashboard = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState(searchParams.get('tab') || 'overview');
-  const [showOnboarding, setShowOnboarding] = useState(false);
-  const [onboardingComplete, setOnboardingComplete] = useState(false);
 
   // Tavari standardized authentication
   const auth = usePOSAuth({
@@ -114,31 +115,44 @@ const MusicDashboard = () => {
     }
   }, [permissionsLoading, canAccessDashboard, navigate]);
 
-  // Log dashboard access and track activity
+  // Module/recent-activity tracking on each visit; security audit DB rows only once per session per business
   useEffect(() => {
     const logAccess = async () => {
       if (!canAccessDashboard) return;
 
-      // Track module usage
       ModuleCatalogService.setBusinessId(auth.selectedBusinessId);
       await ModuleCatalogService.trackModuleUsage('music');
 
-      // Track recent activity
       RecentActivityService.setBusinessId(auth.selectedBusinessId);
       await RecentActivityService.trackActivity('music', 'dashboard', null, 'Music Dashboard');
 
-      await security.logSecurityEvent('music_dashboard_access', {
-        user_role: auth.userRole,
-        business_id: auth.selectedBusinessId,
-        permissions: {
-          canControlMusic,
-          canUploadMusic,
-          canManagePlaylists,
-          canEditSettings
-        }
-      }, 'low');
+      const auditKey = `tavari_audit_music_dashboard_${auth.selectedBusinessId}`;
+      const alreadyLogged =
+        typeof sessionStorage !== 'undefined' && sessionStorage.getItem(auditKey) === '1';
+      if (alreadyLogged) return;
 
-      await security.recordAction('music_dashboard_view', true);
+      try {
+        await security.logSecurityEvent(
+          'music_dashboard_access',
+          {
+            user_role: auth.userRole,
+            business_id: auth.selectedBusinessId,
+            permissions: {
+              canControlMusic,
+              canUploadMusic,
+              canManagePlaylists,
+              canEditSettings
+            }
+          },
+          'low'
+        );
+        await security.recordAction('music_dashboard_view', true);
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem(auditKey, '1');
+        }
+      } catch (e) {
+        console.warn('[MusicDashboard] Session audit log skipped:', e);
+      }
     };
 
     if (auth.selectedBusinessId && !permissionsLoading) {
@@ -146,34 +160,11 @@ const MusicDashboard = () => {
     }
   }, [auth.selectedBusinessId, auth.userRole, security, permissionsLoading, canAccessDashboard, canControlMusic, canUploadMusic, canManagePlaylists, canEditSettings]);
 
-  // Check onboarding status
-  useEffect(() => {
-    const checkOnboarding = async () => {
-      if (!auth.selectedBusinessId) return;
-
-      try {
-        const { data } = await supabase
-          .from('module_onboarding_status')
-          .select('completed')
-          .eq('business_id', auth.selectedBusinessId)
-          .eq('module_key', 'music')
-          .single();
-
-        if (data && !data.completed) {
-          setShowOnboarding(true);
-        } else {
-          setOnboardingComplete(true);
-        }
-      } catch (error) {
-        // Table might not exist yet, or no record - show onboarding
-        setShowOnboarding(true);
-      }
-    };
-
-    if (auth.selectedBusinessId && !permissionsLoading) {
-      checkOnboarding();
-    }
-  }, [auth.selectedBusinessId, permissionsLoading]);
+  // Test announcement state - MUST be called before any conditional returns
+  const [testingAnnouncement, setTestingAnnouncement] = useState(false);
+  
+  // Remote restart state - MUST be called before any conditional returns
+  const [restartingKiosk, setRestartingKiosk] = useState(false);
 
   // NOW ALL HOOKS ARE CALLED - SAFE TO DO CONDITIONAL RETURNS
   // Check subscription access
@@ -292,14 +283,65 @@ const MusicDashboard = () => {
       return;
     }
 
-    // Record action for audit asynchronously
-    setTimeout(() => {
-      security.recordAction('music_tab_navigation', true).catch(err => 
-        console.error('Failed to record tab navigation:', err)
-      );
-    }, 0);
-    
     setActiveTab(tabId);
+  };
+
+  // Test announcement function
+  const handleTestAnnouncement = async () => {
+    if (!auth.selectedBusinessId) {
+      toast.error('No business selected');
+      return;
+    }
+
+    setTestingAnnouncement(true);
+    try {
+      // Send a test announcement
+      await globalMusicService.constructor.sendAnnouncement(auth.selectedBusinessId, {
+        text: 'Test announcement from dashboard',
+        type: 'test',
+        timestamp: new Date().toISOString()
+      });
+      
+      toast.success('📢 Test announcement sent! Check kiosk console for receipt.');
+    } catch (error) {
+      console.error('Error sending test announcement:', error);
+      toast.error(`Failed to send announcement: ${error.message}`);
+    } finally {
+      setTestingAnnouncement(false);
+    }
+  };
+
+  // Remote restart function
+  const handleRemoteRestart = async () => {
+    if (!auth.selectedBusinessId) {
+      toast.error('No business selected');
+      return;
+    }
+
+    const confirmRestart = window.confirm(
+      '🔄 Restart all kiosks at your facility?\n\n' +
+      'This will restart all kiosks running the music system. Music will automatically resume after restart.\n\n' +
+      'This is useful after code updates to ensure kiosks have the latest features.'
+    );
+
+    if (!confirmRestart) {
+      return;
+    }
+
+    setRestartingKiosk(true);
+    try {
+      await globalMusicService.constructor.sendRemoteRestart(
+        auth.selectedBusinessId,
+        'Remote restart from dashboard'
+      );
+      
+      toast.success('🔄 Restart command sent! Kiosks will restart in a few seconds.');
+    } catch (error) {
+      console.error('Error sending restart command:', error);
+      toast.error(`Failed to send restart command: ${error.message}`);
+    } finally {
+      setRestartingKiosk(false);
+    }
   };
 
   const renderTabContent = () => {
@@ -307,6 +349,71 @@ const MusicDashboard = () => {
       case 'overview':
         return (
           <div>
+            {/* Remote Control Section */}
+            <div style={styles.testAnnouncementSection}>
+              <h3 style={styles.sectionTitle}>🎮 Remote Kiosk Control</h3>
+              
+              {/* Test Announcement */}
+              <div style={styles.remoteControlItem}>
+                <h4 style={styles.remoteControlTitle}>📢 Test Announcement</h4>
+                <p style={styles.testDescription}>
+                  Send a test announcement to all kiosks at your facility. The kiosk will receive it and log it to the console.
+                </p>
+                <button
+                  style={{
+                    ...styles.testButton,
+                    opacity: testingAnnouncement ? 0.6 : 1
+                  }}
+                  onClick={handleTestAnnouncement}
+                  disabled={testingAnnouncement || !auth.selectedBusinessId}
+                >
+                  {testingAnnouncement ? (
+                    <>
+                      <FiRefreshCw style={{ ...styles.testButtonIcon, animation: 'spin 1s linear infinite' }} />
+                      Sending...
+                    </>
+                  ) : (
+                    <>
+                      <FiVolume2 style={styles.testButtonIcon} />
+                      Send Test Announcement
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Remote Restart */}
+              <div style={styles.remoteControlItem}>
+                <h4 style={styles.remoteControlTitle}>🔄 Remote Restart</h4>
+                <p style={styles.testDescription}>
+                  Restart all kiosks at your facility remotely. Useful after code updates to ensure kiosks have the latest features. Music will automatically resume after restart.
+                </p>
+                <button
+                  style={{
+                    ...styles.restartButton,
+                    opacity: restartingKiosk ? 0.6 : 1
+                  }}
+                  onClick={handleRemoteRestart}
+                  disabled={restartingKiosk || !auth.selectedBusinessId}
+                >
+                  {restartingKiosk ? (
+                    <>
+                      <FiRefreshCw style={{ ...styles.testButtonIcon, animation: 'spin 1s linear infinite' }} />
+                      Sending Restart Command...
+                    </>
+                  ) : (
+                    <>
+                      <FiRefreshCw style={styles.testButtonIcon} />
+                      Restart All Kiosks
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <p style={styles.testNote}>
+                Note: Kiosks must be online and subscribed to remote commands. Check the kiosk console for "🎮 ✅ Subscribed to remote commands channel" message.
+              </p>
+            </div>
+
             {/* Quick Actions */}
             <div style={styles.quickActionsSection}>
               <h3 style={styles.sectionTitle}>Quick Actions</h3>
@@ -488,19 +595,11 @@ const MusicDashboard = () => {
               </div>
             }
           >
-            <div style={styles.redirectCard}>
-              <FiDollarSign size={48} style={{ color: TavariStyles.colors.primary, marginBottom: TavariStyles.spacing.lg }} />
-              <h3 style={styles.redirectTitle}>Ad Manager</h3>
-              <p style={styles.redirectText}>
-                The Ad Manager has been moved to a dedicated dashboard with enhanced features.
-              </p>
-              <button
-                style={styles.redirectButton}
-                onClick={() => navigate('/dashboard/music/ads/dashboard')}
-              >
-                Go to Ad Manager Dashboard
-              </button>
-            </div>
+            <ErrorBoundary moduleName="Ad Manager" moduleKey="music-ads">
+              <div style={{ marginTop: '-30px', marginLeft: '-12px', marginRight: '-12px' }}>
+                <MusicAdManager />
+              </div>
+            </ErrorBoundary>
           </PermissionGate>
         );
 
@@ -547,7 +646,7 @@ const MusicDashboard = () => {
       maxWidth: '1400px',
       margin: '0 auto',
       padding: '10px',
-      paddingTop: '70px' // Account for fixed HeaderBar (60px) + spacing
+      paddingTop: '80px'
     },
     loading: {
       ...TavariStyles.layout.flexCenter,
@@ -679,42 +778,6 @@ const MusicDashboard = () => {
       fontWeight: TavariStyles.typography.fontWeight.medium,
       marginTop: TavariStyles.spacing.md
     },
-    tabsContainer: {
-      backgroundColor: TavariStyles.colors.white,
-      borderBottom: `1px solid ${TavariStyles.colors.gray200}`,
-      marginBottom: TavariStyles.spacing.xl,
-      overflowX: 'auto'
-    },
-    tabsList: {
-      display: 'flex',
-      gap: '2px',
-      backgroundColor: '#e5e7eb',
-      borderRadius: '8px',
-      padding: '4px',
-      overflowX: 'auto'
-    },
-    tab: {
-      flex: 1,
-      padding: '12px 20px',
-      backgroundColor: 'transparent',
-      color: '#6b7280',
-      border: 'none',
-      borderRadius: '6px',
-      fontSize: '14px',
-      fontWeight: 'bold',
-      cursor: 'pointer',
-      transition: 'all 0.2s ease',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '8px',
-      whiteSpace: 'nowrap',
-      minWidth: 'fit-content'
-    },
-    activeTab: {
-      backgroundColor: 'white',
-      color: '#008080',
-      boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
-    },
     tabContent: {
       padding: TavariStyles.spacing.xl,
       minHeight: '400px'
@@ -763,6 +826,55 @@ const MusicDashboard = () => {
       padding: TavariStyles.spacing['3xl'],
       textAlign: 'center',
       color: TavariStyles.colors.gray500
+    },
+    testAnnouncementSection: {
+      ...TavariStyles.layout.card,
+      padding: TavariStyles.spacing.xl,
+      marginBottom: TavariStyles.spacing.xl,
+      border: `2px solid ${TavariStyles.colors.primary}`,
+      backgroundColor: `${TavariStyles.colors.primary}08`
+    },
+    testDescription: {
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray600,
+      marginBottom: TavariStyles.spacing.md,
+      lineHeight: TavariStyles.typography.lineHeight.relaxed
+    },
+    remoteControlItem: {
+      marginBottom: TavariStyles.spacing.xl,
+      paddingBottom: TavariStyles.spacing.xl,
+      borderBottom: `1px solid ${TavariStyles.colors.gray200}`
+    },
+    remoteControlTitle: {
+      fontSize: TavariStyles.typography.fontSize.md,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      color: TavariStyles.colors.gray800,
+      marginBottom: TavariStyles.spacing.sm
+    },
+    testButton: {
+      ...TavariStyles.components.button.primary,
+      display: 'flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      marginBottom: TavariStyles.spacing.sm
+    },
+    restartButton: {
+      ...TavariStyles.components.button.primary,
+      display: 'flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      marginBottom: TavariStyles.spacing.sm,
+      backgroundColor: TavariStyles.colors.error,
+      borderColor: TavariStyles.colors.error
+    },
+    testButtonIcon: {
+      fontSize: '14px'
+    },
+    testNote: {
+      fontSize: TavariStyles.typography.fontSize.xs,
+      color: TavariStyles.colors.gray500,
+      fontStyle: 'italic',
+      marginTop: TavariStyles.spacing.sm
     },
     quickActionsSection: {
       marginBottom: TavariStyles.spacing.xl
@@ -927,32 +1039,17 @@ const MusicDashboard = () => {
           componentName="MusicDashboard"
           sensitiveComponent={true}
         >
-          {showOnboarding && !onboardingComplete && (
-            <MusicOnboarding
-              businessId={auth.selectedBusinessId}
-              onComplete={() => {
-                setShowOnboarding(false);
-                setOnboardingComplete(true);
-              }}
-              onSkip={() => {
-                setShowOnboarding(false);
-              }}
-            />
-          )}
           <div style={styles.container}>
+            <TavariModuleHeader
+              title="Tavari Music"
+              description="Manage uploads, playlists, schedules, ads, playback, and system monitoring."
+              actionLabel="Upload Music"
+              actionIcon={<FiUpload size={18} />}
+              onAction={() => handleTabChange('upload')}
+            />
             <Breadcrumbs items={breadcrumbItems} />
-            {/* Header */}
-            <div style={styles.header}>
-            <div style={styles.headerLeft}>
-              <FiMusic size={32} style={styles.headerIcon} />
-              <div style={styles.headerContent}>
-                <h1 style={styles.title}>Tavari Music Dashboard</h1>
-                <p style={styles.subtitle}>
-                  {auth.businessData?.name ? `Managing music for ${auth.businessData.name}` : 'Music Management System'}
-                </p>
-              </div>
-            </div>
-            <div style={styles.headerRight}>
+
+            <div style={{ ...styles.headerRight, justifyContent: 'flex-end', marginBottom: TavariStyles.spacing.xl }}>
               {!canEditSettings && !canUploadMusic && (
                 <div style={styles.limitedAccessBadge}>
                   <FiAlertCircle />
@@ -999,26 +1096,15 @@ const MusicDashboard = () => {
                 </div>
               </div>
             </div>
-          </div>
 
-          {/* Tabs Navigation */}
-          <div style={styles.tabsContainer}>
-            <div style={styles.tabsList}>
-              {availableTabs.map(tab => (
-                  <button
-                  key={tab.id}
-                  style={{
-                    ...styles.tab,
-                    ...(activeTab === tab.id ? styles.activeTab : {})
-                  }}
-                  onClick={() => handleTabChange(tab.id)}
-                >
-                  <span>{tab.icon}</span>
-                  <span>{tab.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          <TavariTabSystemComponent
+            tabs={availableTabs}
+            mode="state"
+            activeTab={activeTab}
+            onTabChange={handleTabChange}
+            ariaLabel="Music module"
+            variant="module"
+          />
 
           {/* Tab Content */}
           <div style={

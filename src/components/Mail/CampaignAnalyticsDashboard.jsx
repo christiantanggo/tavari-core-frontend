@@ -1,41 +1,83 @@
 // components/Mail/CampaignAnalyticsDashboard.jsx - Step 108: Campaign Performance Metrics Foundation
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   FiBarChart2, FiTrendingUp, FiTrendingDown, FiEye, FiMousePointer, 
   FiMail, FiUsers, FiClock, FiTarget, FiAward, FiAlertTriangle,
   FiCalendar, FiFilter, FiDownload, FiRefreshCw, FiShare2, FiSettings, FiX
 } from 'react-icons/fi';
 import AnalyticsFoundation from '../../helpers/Mail/AnalyticsFoundation';
+import { formatDateShort, formatDateTimeForBusiness } from '../../utils/businessDateFormat';
 
-const CampaignAnalyticsDashboard = ({ businessId, isOpen, onClose }) => {
+const CampaignAnalyticsDashboard = ({
+  businessId,
+  businessTimezone = 'America/Toronto',
+  isOpen = true,
+  onClose,
+  embedded = false,
+  initialCampaignId = null,
+  initialTab = 'overview'
+}) => {
   const [timeframe, setTimeframe] = useState('30d'); // '7d', '30d', '90d', 'all'
   const [campaigns, setCampaigns] = useState([]);
   const [selectedCampaign, setSelectedCampaign] = useState(null);
   const [dashboardData, setDashboardData] = useState(null);
   const [contentPerformance, setContentPerformance] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('overview'); // 'overview', 'campaigns', 'content', 'abtest'
+  const [activeTab, setActiveTab] = useState(initialTab); // 'overview', 'campaigns', 'content', 'abtest'
   const [chartType, setChartType] = useState('line'); // 'line', 'bar', 'donut'
+
+  const visibleCampaigns = useMemo(() => {
+    if (!selectedCampaign) {
+      return campaigns;
+    }
+
+    return campaigns.filter((campaign) => campaign.id === selectedCampaign);
+  }, [campaigns, selectedCampaign]);
+
+  useEffect(() => {
+    setActiveTab(initialTab || 'overview');
+  }, [initialTab]);
 
   useEffect(() => {
     if (isOpen && businessId) {
       loadDashboardData();
     }
-  }, [isOpen, businessId, timeframe]);
+  }, [isOpen, businessId, timeframe, businessTimezone]);
+
+  useEffect(() => {
+    if (!isOpen || !businessId || !selectedCampaign) return;
+
+    const loadSelectedCampaignContent = async () => {
+      const contentResult = await AnalyticsFoundation.getContentBlockPerformance(selectedCampaign);
+      if (contentResult.success) {
+        setContentPerformance(Object.values(contentResult.performance));
+      }
+    };
+
+    loadSelectedCampaignContent();
+  }, [isOpen, businessId, selectedCampaign]);
 
   const loadDashboardData = async () => {
     setLoading(true);
     try {
       // Load comprehensive analytics data
-      const result = await AnalyticsFoundation.getAnalyticsDashboardData(businessId, timeframe);
+      const result = await AnalyticsFoundation.getAnalyticsDashboardData(businessId, timeframe, businessTimezone);
       
       if (result.success) {
         setDashboardData(result.dashboard_data);
         setCampaigns(result.dashboard_data.campaign_performance || []);
-        
+
+        const campaignIds = result.dashboard_data.campaign_performance || [];
+        const preferredCampaignId =
+          initialCampaignId && campaignIds.some((campaign) => campaign.id === initialCampaignId)
+            ? initialCampaignId
+            : campaignIds[0]?.id || null;
+
+        setSelectedCampaign(preferredCampaignId);
+
         // Load content performance data
-        if (result.dashboard_data.campaign_performance.length > 0) {
-          const firstCampaignId = result.dashboard_data.campaign_performance[0].id;
+        if (preferredCampaignId) {
+          const firstCampaignId = preferredCampaignId;
           const contentResult = await AnalyticsFoundation.getContentBlockPerformance(firstCampaignId);
           if (contentResult.success) {
             setContentPerformance(Object.values(contentResult.performance));
@@ -50,9 +92,10 @@ const CampaignAnalyticsDashboard = ({ businessId, isOpen, onClose }) => {
   };
 
   const calculateOverallMetrics = () => {
-    if (!campaigns.length) return {
+    if (!visibleCampaigns.length) return {
       totalCampaigns: 0,
       totalEmailsSent: 0,
+      totalDeliveries: 0,
       averageOpenRate: 0,
       averageClickRate: 0,
       totalViews: 0,
@@ -60,22 +103,27 @@ const CampaignAnalyticsDashboard = ({ businessId, isOpen, onClose }) => {
       bestPerformingCampaign: null
     };
 
-    const totalEmailsSent = campaigns.reduce((sum, c) => sum + (c.emails_sent || 0), 0);
-    const totalViews = campaigns.reduce((sum, c) => sum + (c.performance?.views || 0), 0);
-    const totalClicks = campaigns.reduce((sum, c) => sum + (c.performance?.clicks || 0), 0);
+    const totalEmailsSent = visibleCampaigns.reduce((sum, c) => sum + (c.emails_sent || 0), 0);
+    const totalDeliveries = visibleCampaigns.reduce(
+      (sum, c) => sum + (c.performance?.deliveries || c.emails_sent || 0),
+      0
+    );
+    const totalViews = visibleCampaigns.reduce((sum, c) => sum + (c.performance?.views || 0), 0);
+    const totalClicks = visibleCampaigns.reduce((sum, c) => sum + (c.performance?.clicks || 0), 0);
     
-    const averageOpenRate = totalEmailsSent > 0 ? (totalViews / totalEmailsSent) * 100 : 0;
-    const averageClickRate = totalViews > 0 ? (totalClicks / totalViews) * 100 : 0;
+    const averageOpenRate = totalDeliveries > 0 ? (totalViews / totalDeliveries) * 100 : 0;
+    const averageClickRate = totalDeliveries > 0 ? (totalClicks / totalDeliveries) * 100 : 0;
     
-    const bestPerformingCampaign = campaigns.reduce((best, current) => {
+    const bestPerformingCampaign = visibleCampaigns.reduce((best, current) => {
       const currentRate = current.performance?.click_through_rate || 0;
       const bestRate = best?.performance?.click_through_rate || 0;
       return currentRate > bestRate ? current : best;
     }, null);
 
     return {
-      totalCampaigns: campaigns.length,
+      totalCampaigns: visibleCampaigns.length,
       totalEmailsSent,
+      totalDeliveries,
       averageOpenRate,
       averageClickRate,
       totalViews,
@@ -118,10 +166,10 @@ const CampaignAnalyticsDashboard = ({ businessId, isOpen, onClose }) => {
   const exportAnalytics = () => {
     const exportData = {
       timeframe,
-      generated_at: new Date().toISOString(),
+      generated_at: formatDateTimeForBusiness(new Date(), businessTimezone),
       business_id: businessId,
       overview_metrics: calculateOverallMetrics(),
-      campaign_performance: campaigns,
+      campaign_performance: visibleCampaigns,
       content_performance: contentPerformance,
       recommendations: dashboardData?.recommendations || []
     };
@@ -291,12 +339,12 @@ const CampaignAnalyticsDashboard = ({ businessId, isOpen, onClose }) => {
         </div>
 
         <div style={styles.campaignsGrid}>
-          {campaigns.map(campaign => (
+          {visibleCampaigns.map(campaign => (
             <div key={campaign.id} style={styles.campaignCard}>
               <div style={styles.campaignCardHeader}>
                 <h4 style={styles.campaignName}>{campaign.name}</h4>
                 <span style={styles.campaignDate}>
-                  {new Date(campaign.created_at).toLocaleDateString()}
+                  {formatDateShort(campaign.created_at, businessTimezone)}
                 </span>
               </div>
               
@@ -422,98 +470,104 @@ const CampaignAnalyticsDashboard = ({ businessId, isOpen, onClose }) => {
 
   if (!isOpen) return null;
 
-  return (
-    <div style={styles.overlay}>
-      <div style={styles.modal}>
-        <div style={styles.header}>
-          <h2 style={styles.title}>Campaign Analytics Dashboard</h2>
-          <div style={styles.headerControls}>
-            <select
-              value={timeframe}
-              onChange={(e) => setTimeframe(e.target.value)}
-              style={styles.timeframeSelect}
-            >
-              <option value="7d">Last 7 days</option>
-              <option value="30d">Last 30 days</option>
-              <option value="90d">Last 90 days</option>
-              <option value="all">All time</option>
-            </select>
-            <button style={styles.refreshButton} onClick={loadDashboardData} disabled={loading}>
-              <FiRefreshCw style={{ ...styles.buttonIcon, ...(loading ? { animation: 'spin 1s linear infinite' } : {}) }} />
-            </button>
-            <button style={styles.exportButton} onClick={exportAnalytics}>
-              <FiDownload style={styles.buttonIcon} />
-              Export
-            </button>
+  const dashboardContent = (
+    <div style={embedded ? styles.embeddedContainer : styles.modal}>
+      <div style={styles.header}>
+        <h2 style={styles.title}>Campaign Analytics Dashboard</h2>
+        <div style={styles.headerControls}>
+          <select
+            value={timeframe}
+            onChange={(e) => setTimeframe(e.target.value)}
+            style={styles.timeframeSelect}
+          >
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="90d">Last 90 days</option>
+            <option value="all">All time</option>
+          </select>
+          <button style={styles.refreshButton} onClick={loadDashboardData} disabled={loading}>
+            <FiRefreshCw style={{ ...styles.buttonIcon, ...(loading ? { animation: 'spin 1s linear infinite' } : {}) }} />
+          </button>
+          <button style={styles.exportButton} onClick={exportAnalytics}>
+            <FiDownload style={styles.buttonIcon} />
+            Export
+          </button>
+          {!embedded && (
             <button style={styles.closeButton} onClick={onClose}>
               <FiX />
             </button>
-          </div>
-        </div>
-
-        <div style={styles.content}>
-          {/* Tab Navigation */}
-          <div style={styles.tabs}>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'overview' ? styles.activeTab : {})
-              }}
-              onClick={() => setActiveTab('overview')}
-            >
-              <FiBarChart2 style={styles.tabIcon} />
-              Overview
-            </button>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'campaigns' ? styles.activeTab : {})
-              }}
-              onClick={() => setActiveTab('campaigns')}
-            >
-              <FiMail style={styles.tabIcon} />
-              Campaigns
-            </button>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'content' ? styles.activeTab : {})
-              }}
-              onClick={() => setActiveTab('content')}
-            >
-              <FiTarget style={styles.tabIcon} />
-              Content
-            </button>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'abtest' ? styles.activeTab : {})
-              }}
-              onClick={() => setActiveTab('abtest')}
-            >
-              <FiShare2 style={styles.tabIcon} />
-              A/B Tests
-            </button>
-          </div>
-
-          {/* Tab Content */}
-          {loading ? (
-            <div style={styles.loadingState}>
-              <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
-              <p>Loading analytics data...</p>
-            </div>
-          ) : (
-            <>
-              {activeTab === 'overview' && renderOverviewTab()}
-              {activeTab === 'campaigns' && renderCampaignsTab()}
-              {activeTab === 'content' && renderContentTab()}
-              {activeTab === 'abtest' && renderABTestTab()}
-            </>
           )}
         </div>
       </div>
+
+      <div style={styles.content}>
+        {/* Tab Navigation */}
+        <div style={styles.tabs}>
+          <button
+            style={{
+              ...styles.tab,
+              ...(activeTab === 'overview' ? styles.activeTab : {})
+            }}
+            onClick={() => setActiveTab('overview')}
+          >
+            <FiBarChart2 style={styles.tabIcon} />
+            Overview
+          </button>
+          <button
+            style={{
+              ...styles.tab,
+              ...(activeTab === 'campaigns' ? styles.activeTab : {})
+            }}
+            onClick={() => setActiveTab('campaigns')}
+          >
+            <FiMail style={styles.tabIcon} />
+            Campaigns
+          </button>
+          <button
+            style={{
+              ...styles.tab,
+              ...(activeTab === 'content' ? styles.activeTab : {})
+            }}
+            onClick={() => setActiveTab('content')}
+          >
+            <FiTarget style={styles.tabIcon} />
+            Content
+          </button>
+          <button
+            style={{
+              ...styles.tab,
+              ...(activeTab === 'abtest' ? styles.activeTab : {})
+            }}
+            onClick={() => setActiveTab('abtest')}
+          >
+            <FiShare2 style={styles.tabIcon} />
+            A/B Tests
+          </button>
+        </div>
+
+        {/* Tab Content */}
+        {loading ? (
+          <div style={styles.loadingState}>
+            <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
+            <p>Loading analytics data...</p>
+          </div>
+        ) : (
+          <>
+            {activeTab === 'overview' && renderOverviewTab()}
+            {activeTab === 'campaigns' && renderCampaignsTab()}
+            {activeTab === 'content' && renderContentTab()}
+            {activeTab === 'abtest' && renderABTestTab()}
+          </>
+        )}
+      </div>
     </div>
   );
+
+  if (embedded) {
+    return dashboardContent;
+  }
+
+  return <div style={styles.overlay}>{dashboardContent}</div>;
 };
 
 const styles = {
@@ -537,6 +591,14 @@ const styles = {
     maxHeight: '90vh',
     overflow: 'auto',
     boxShadow: '0 10px 25px rgba(0,0,0,0.2)',
+  },
+  embeddedContainer: {
+    backgroundColor: 'white',
+    borderRadius: '12px',
+    width: '100%',
+    minHeight: '700px',
+    overflow: 'auto',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
   },
   header: {
     display: 'flex',

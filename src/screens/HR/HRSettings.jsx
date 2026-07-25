@@ -1,5 +1,5 @@
 // components/HR/HRSettings.jsx - WITH PERMISSION SYSTEM
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../../supabaseClient';
 import { useNavigate } from 'react-router-dom';
 import { SecurityWrapper } from '../../Security';
@@ -7,10 +7,8 @@ import { useSecurityContext } from '../../Security';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import POSAuthWrapper from "../../components/Auth/POSAuthWrapper";
-import TavariCheckbox from "../../components/UI/TavariCheckbox";
 import { TavariStyles } from '../../utils/TavariStyles';
 import { usePermissions } from '../../hooks/usePermissions';
-import PermissionGate from '../../components/Auth/PermissionGate';
 import toast from 'react-hot-toast';
 
 // Import tab components
@@ -18,10 +16,69 @@ import EmployeeManagementTab from '../../components/HR/HRSettingsComponents/Empl
 import LeaveAndBenefitsTab from '../../components/HR/HRSettingsComponents/LeaveAndBenefitsTab';
 import ApprovalSettingsTab from '../../components/HR/HRSettingsComponents/ApprovalSettingsTab';
 import NotificationSettingsTab from '../../components/HR/HRSettingsComponents/NotificationSettingsTab';
+import ModuleDeactivationPanel from '../../components/Modules/ModuleDeactivationPanel';
 import DocumentManagementTab from '../../components/HR/HRSettingsComponents/DocumentManagementTab';
 import ShiftPremiumsTab from '../../components/HR/HRSettingsComponents/ShiftPremiumsTab';
 
-const HRSettings = () => {
+const EMBED_SCOPES = {
+  employee: ['employee-management', 'leave-benefits', 'shift-premiums'],
+  communications: ['approval-settings', 'notifications', 'document-management'],
+};
+
+const ALL_SETTINGS_TABS = [
+  {
+    id: 'employee-management',
+    label: 'Employee Management',
+    icon: '👥',
+    component: EmployeeManagementTab,
+    permission: 'hr.settings.manage',
+  },
+  {
+    id: 'leave-benefits',
+    label: 'Leave & Benefits',
+    icon: '🖊️',
+    component: LeaveAndBenefitsTab,
+    permission: 'hr.settings.manage',
+  },
+  {
+    id: 'shift-premiums',
+    label: 'Shift Premiums',
+    icon: '💰',
+    component: ShiftPremiumsTab,
+    permission: 'hr.premiums.manage',
+  },
+  {
+    id: 'approval-settings',
+    label: 'Approvals',
+    icon: '✅',
+    component: ApprovalSettingsTab,
+    permission: 'hr.settings.manage',
+  },
+  {
+    id: 'notifications',
+    label: 'Notifications',
+    icon: '🔔',
+    component: NotificationSettingsTab,
+    permission: 'hr.settings.manage',
+  },
+  {
+    id: 'document-management',
+    label: 'Documents',
+    icon: '📄',
+    component: DocumentManagementTab,
+    permission: 'hr.documents.manage',
+  },
+];
+
+const HRSettings = (props) => {
+  const {
+    mode = 'standalone',
+    embedScope = 'employee',
+    activeSettingsTab = 'employee-management',
+  } = props;
+  const isEmbed = mode === 'embed';
+  const embedTabIds = isEmbed && EMBED_SCOPES[embedScope] ? EMBED_SCOPES[embedScope] : null;
+
   const [activeTab, setActiveTab] = useState('employee-management');
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -54,7 +111,7 @@ const HRSettings = () => {
     authError,
     isOwner
   } = usePOSAuth({
-    requiredRoles: ['owner', 'admin'],
+    requiredRoles: isEmbed ? ['owner', 'manager', 'admin', 'hr_admin'] : ['owner', 'admin'],
     requireBusiness: true,
     componentName: 'HRSettings'
   });
@@ -74,13 +131,14 @@ const HRSettings = () => {
   const canManageHRSettings = hasPermission('hr.settings.manage') || isOwner();
   const canViewHRSettings = hasPermission('hr.settings.view') || canManageHRSettings;
 
-  // Check permissions on mount
+  // Check permissions on mount; embed mode leaves access handling to the parent
   useEffect(() => {
-    if (!permissionsLoading && !canViewHRSettings) {
+    if (isEmbed || permissionsLoading) return;
+    if (!canViewHRSettings) {
       toast.error('You do not have permission to access HR Settings');
       navigate('/dashboard/hr/dashboard');
     }
-  }, [permissionsLoading, canViewHRSettings]);
+  }, [permissionsLoading, canViewHRSettings, isEmbed, navigate]);
 
   const defaultSettings = {
     probation_period_days: 90,
@@ -100,62 +158,39 @@ const HRSettings = () => {
     require_manager_approval_profile_changes: false
   };
 
-  const tabs = [
-    {
-      id: 'employee-management',
-      label: 'Employee Management',
-      icon: '👥',
-      component: EmployeeManagementTab,
-      permission: 'hr.settings.manage'
-    },
-    {
-      id: 'leave-benefits',
-      label: 'Leave & Benefits',
-      icon: '🖊️',
-      component: LeaveAndBenefitsTab,
-      permission: 'hr.settings.manage'
-    },
-    {
-      id: 'shift-premiums',
-      label: 'Shift Premiums',
-      icon: '💰',
-      component: ShiftPremiumsTab,
-      permission: 'hr.premiums.manage'
-    },
-    {
-      id: 'approval-settings',
-      label: 'Approvals',
-      icon: '✅',
-      component: ApprovalSettingsTab,
-      permission: 'hr.settings.manage'
-    },
-    {
-      id: 'notifications',
-      label: 'Notifications',
-      icon: '🔔',
-      component: NotificationSettingsTab,
-      permission: 'hr.settings.manage'
-    },
-    {
-      id: 'document-management',
-      label: 'Documents',
-      icon: '📄',
-      component: DocumentManagementTab,
-      permission: 'hr.documents.manage'
-    }
-  ];
+  // Filter tabs based on permissions (and embed scope)
+  const visibleTabs = useMemo(() => {
+    return ALL_SETTINGS_TABS.filter((tab) => (embedTabIds && isEmbed ? embedTabIds.includes(tab.id) : true))
+      .filter((tab) => {
+        if (!tab.permission) return true;
+        return hasPermission(tab.permission) || isOwner();
+      });
+  }, [isEmbed, embedTabIds, hasPermission, isOwner, permissionsLoading]);
 
-  // Filter tabs based on permissions
-  const visibleTabs = tabs.filter(tab => {
-    if (!tab.permission) return true;
-    return hasPermission(tab.permission) || isOwner();
-  });
+  const currentTab = useMemo(() => {
+    if (isEmbed) {
+      if (visibleTabs.find((t) => t.id === activeSettingsTab)) return activeSettingsTab;
+      return visibleTabs[0]?.id || 'employee-management';
+    }
+    if (visibleTabs.length && !visibleTabs.find((t) => t.id === activeTab)) {
+      return visibleTabs[0].id;
+    }
+    return activeTab;
+  }, [isEmbed, activeSettingsTab, visibleTabs, activeTab]);
 
   useEffect(() => {
     if (selectedBusinessId && !authLoading && !permissionsLoading && canViewHRSettings) {
       loadSettings();
     }
   }, [selectedBusinessId, authLoading, permissionsLoading, canViewHRSettings]);
+
+  // Standalone: if active tab became invisible (permissions), snap to first visible
+  useEffect(() => {
+    if (isEmbed) return;
+    if (visibleTabs.length && !visibleTabs.find((t) => t.id === activeTab)) {
+      setActiveTab(visibleTabs[0].id);
+    }
+  }, [isEmbed, visibleTabs, activeTab]);
 
   const loadSettings = async () => {
     try {
@@ -312,11 +347,16 @@ const HRSettings = () => {
     navigate('/dashboard/hr/dashboard');
   };
 
+  const setTab = (id) => {
+    if (isEmbed) return;
+    setActiveTab(id);
+  };
+
   const styles = {
     container: {
       minHeight: '100vh',
       backgroundColor: TavariStyles.colors.gray50,
-      paddingTop: '60px',
+      paddingTop: '0px',
       paddingLeft: TavariStyles.spacing.lg,
       paddingRight: TavariStyles.spacing.lg,
       paddingBottom: TavariStyles.spacing.lg
@@ -451,11 +491,28 @@ const HRSettings = () => {
       ...TavariStyles.components.button?.base,
       ...TavariStyles.components.button?.variants?.secondary,
       marginTop: TavariStyles.spacing.xl
+    },
+    embedWrap: {
+      width: '100%',
+    },
+    embedAccessDenied: {
+      backgroundColor: TavariStyles.colors.gray50,
+      padding: TavariStyles.spacing.lg,
+      borderRadius: TavariStyles.borderRadius?.md || '8px',
+    },
+    embedEmpty: {
+      padding: TavariStyles.spacing.xl,
+      textAlign: 'center',
+      color: TavariStyles.colors.gray600,
+    },
+    noTabsText: {
+      margin: 0,
+      fontSize: TavariStyles.typography.fontSize.base,
     }
   };
 
   const renderActiveTab = () => {
-    const activeTabConfig = visibleTabs.find(tab => tab.id === activeTab);
+    const activeTabConfig = visibleTabs.find((tab) => tab.id === currentTab);
     if (!activeTabConfig) return null;
 
     const TabComponent = activeTabConfig.component;
@@ -499,16 +556,96 @@ const HRSettings = () => {
 
   if (!canViewHRSettings) {
     return (
-      <div style={styles.container}>
+      <div style={isEmbed ? styles.embedAccessDenied : styles.container}>
         <div style={styles.maxWidthContainer}>
           <div style={styles.accessDenied}>
             <h2 style={styles.accessDeniedTitle}>Access Denied</h2>
-            <p>You do not have permission to access HR Settings</p>
-            <button onClick={handleBackToDashboard} style={styles.backButton}>
-              Return to HR Dashboard
+            <p>You do not have permission to access HR settings for this business.</p>
+            <button onClick={handleBackToDashboard} type="button" style={styles.backButton}>
+              Return to HR overview
             </button>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (isEmbed && !visibleTabs.length) {
+    return (
+      <div style={styles.embedEmpty}>
+        <p style={styles.noTabsText}>
+          You do not have access to any of the settings in this section.
+        </p>
+      </div>
+    );
+  }
+
+  const messageBlock = message && (
+    <div
+      style={{
+        ...styles.messageContainer,
+        ...(message.type === 'error' ? styles.errorMessage : {}),
+      }}
+    >
+      {message.text}
+    </div>
+  );
+
+  const mainSettingsBody = (
+    <>
+      {messageBlock}
+      <div style={styles.tabsContainer}>
+        {!isEmbed && (
+          <div style={styles.tabsHeader}>
+            {visibleTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setTab(tab.id)}
+                style={{
+                  ...styles.tab,
+                  ...(currentTab === tab.id ? styles.activeTab : {}),
+                }}
+              >
+                <span>{tab.icon}</span>
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div style={styles.tabContent}>
+          {settings && renderActiveTab()}
+        </div>
+
+        {canManageHRSettings && (
+          <div style={styles.saveButtonContainer}>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              type="button"
+              style={styles.saveButton}
+            >
+              {saving ? 'Saving...' : 'Save Settings'}
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  );
+
+  if (isEmbed) {
+    return (
+      <div style={styles.embedWrap}>
+        <style>
+          {`
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+          `}
+        </style>
+        {mainSettingsBody}
       </div>
     );
   }
@@ -526,7 +663,6 @@ const HRSettings = () => {
         sensitiveComponent={true}
       >
         <div style={styles.container}>
-          {/* Add CSS for spinner animation */}
           <style>
             {`
               @keyframes spin {
@@ -535,63 +671,15 @@ const HRSettings = () => {
               }
             `}
           </style>
-
           <div style={styles.maxWidthContainer}>
-            {/* Header */}
             <div style={styles.header}>
               <h1 style={styles.title}>HR Settings</h1>
               <p style={styles.subtitle}>
                 {businessData?.business_name || businessData?.name || 'Configure HR settings for your business'}
               </p>
             </div>
-
-            {/* Message */}
-            {message && (
-              <div style={{
-                ...styles.messageContainer,
-                ...(message.type === 'error' ? styles.errorMessage : {})
-              }}>
-                {message.text}
-              </div>
-            )}
-
-            {/* Tabs Container */}
-            <div style={styles.tabsContainer}>
-              {/* Tabs Header */}
-              <div style={styles.tabsHeader}>
-                {visibleTabs.map((tab) => (
-                  <button
-                    key={tab.id}
-                    onClick={() => setActiveTab(tab.id)}
-                    style={{
-                      ...styles.tab,
-                      ...(activeTab === tab.id ? styles.activeTab : {})
-                    }}
-                  >
-                    <span>{tab.icon}</span>
-                    <span>{tab.label}</span>
-                  </button>
-                ))}
-              </div>
-
-              {/* Tab Content */}
-              <div style={styles.tabContent}>
-                {settings && renderActiveTab()}
-              </div>
-
-              {/* Save Button - Only show if user can manage settings */}
-              {canManageHRSettings && (
-                <div style={styles.saveButtonContainer}>
-                  <button
-                    onClick={handleSave}
-                    disabled={saving}
-                    style={styles.saveButton}
-                  >
-                    {saving ? 'Saving...' : 'Save Settings'}
-                  </button>
-                </div>
-              )}
-            </div>
+            {mainSettingsBody}
+            <ModuleDeactivationPanel moduleKey="hr" />
           </div>
         </div>
       </SecurityWrapper>

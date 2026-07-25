@@ -1,6 +1,6 @@
 // screens/POS/POSDailyDepositScreen.jsx - Daily Cash Deposit Management
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 
 // Foundation Components
@@ -9,6 +9,7 @@ import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { usePermissions } from '../../hooks/usePermissions';
 import PermissionGate from '../../components/Auth/PermissionGate';
 import { TavariStyles } from '../../utils/TavariStyles';
+import { fetchPosBusinessSettings } from '../../utils/posSettingsQuery';
 
 // Security
 import { SecurityWrapper } from '../../Security';
@@ -17,10 +18,14 @@ import { useSecurityContext } from '../../Security';
 // Deposit Components
 import POSDepositCountComponent from '../../components/POS/POSDailyDepositScreen/POSDepositCountComponent';
 import POSDepositHistoryComponent from '../../components/POS/POSDailyDepositScreen/POSDepositHistoryComponent';
+import { getTaskKioskDashboardContext } from '../../helpers/taskManagerKioskSession';
 
 const POSDailyDepositScreen = () => {
   const navigate = useNavigate();
-  
+  const [searchParams] = useSearchParams();
+  const isTaskReturnFlow = !!searchParams.get('taskReturn');
+  const taskKioskCtx = isTaskReturnFlow ? getTaskKioskDashboardContext() : null;
+  const posAuthRequiredRoles = isTaskReturnFlow ? null : ['manager', 'owner'];
   // Security context for deposit operations
   const {
     validateInput,
@@ -37,7 +42,7 @@ const POSDailyDepositScreen = () => {
 
   // Authentication using standardized hook
   const auth = usePOSAuth({
-    requiredRoles: ['manager', 'owner'],
+    requiredRoles: posAuthRequiredRoles,
     requireBusiness: true,
     componentName: 'POSDailyDepositScreen'
   });
@@ -50,14 +55,26 @@ const POSDailyDepositScreen = () => {
     loading: permissionsLoading
   } = usePermissions();
 
-  // Permission checks
-  const canViewDeposits = hasAnyPermission([
+  // Permission checks — task kiosk session was issued only after server-side module-link check
+  const canViewDeposits = !!taskKioskCtx || hasAnyPermission([
+    'pos.daily_deposit.view',
+    'pos.daily_deposit.edit',
+    'pos.daily_deposit.create',
     'pos.deposits.view',
     'pos.deposits.create'
   ]) || hasElevatedPrivileges();
 
-  const canCreateDeposits = hasPermission('pos.deposits.create') || hasElevatedPrivileges();
-  const canViewHistory = hasPermission('pos.deposits.view_history') || hasElevatedPrivileges();
+  const canCreateDeposits = !!taskKioskCtx || hasAnyPermission([
+    'pos.daily_deposit.create',
+    'pos.daily_deposit.edit',
+    'pos.deposits.create'
+  ]) || hasElevatedPrivileges();
+  const canViewHistory = !isTaskReturnFlow && (hasAnyPermission([
+    'pos.daily_deposit.view_history',
+    'pos.deposits.view_history'
+  ]) || hasElevatedPrivileges());
+
+  const effectiveUserId = auth.activePOSUser?.id || auth.authUser?.id;
 
   // State management
   const [activeTab, setActiveTab] = useState('deposit');
@@ -81,11 +98,17 @@ const POSDailyDepositScreen = () => {
         business_id: auth.selectedBusinessId
       }, 'low');
 
-      const { data: settings, error: settingsError } = await supabase
-        .from('pos_settings')
-        .select('*')
-        .eq('business_id', auth.selectedBusinessId)
-        .maybeSingle();
+      const { data: settings, error: settingsError } = taskKioskCtx
+        ? await (async () => {
+            const { data: ctx, error: ctxError } = await supabase.rpc('task_kiosk_pos_daily_deposit_context', {
+              p_token: taskKioskCtx.dashboardToken,
+              p_business_id: auth.selectedBusinessId,
+              p_employee_id: taskKioskCtx.employeeId
+            });
+            if (ctxError) return { data: null, error: ctxError };
+            return { data: ctx?.settings || null, error: null };
+          })()
+        : await fetchPosBusinessSettings(auth.selectedBusinessId);
 
       if (settingsError && settingsError.code && settingsError.code !== 'PGRST116') {
         throw settingsError;
@@ -132,7 +155,7 @@ const POSDailyDepositScreen = () => {
   if (!auth.isReady || loading || permissionsLoading) {
     return (
       <POSAuthWrapper
-        requiredRoles={['manager', 'owner']}
+        requiredRoles={posAuthRequiredRoles}
         componentName="POSDailyDepositScreen"
       >
         <div style={styles.container}>
@@ -150,7 +173,7 @@ const POSDailyDepositScreen = () => {
   if (!canViewDeposits) {
     return (
       <POSAuthWrapper
-        requiredRoles={['manager', 'owner']}
+        requiredRoles={posAuthRequiredRoles}
         componentName="POSDailyDepositScreen"
       >
         <div style={styles.container}>
@@ -178,7 +201,7 @@ const POSDailyDepositScreen = () => {
   if (error) {
     return (
       <POSAuthWrapper
-        requiredRoles={['manager', 'owner']}
+        requiredRoles={posAuthRequiredRoles}
         componentName="POSDailyDepositScreen"
       >
         <div style={styles.container}>
@@ -203,7 +226,7 @@ const POSDailyDepositScreen = () => {
   return (
     <SecurityWrapper>
       <POSAuthWrapper
-        requiredRoles={['manager', 'owner']}
+        requiredRoles={posAuthRequiredRoles}
         componentName="POSDailyDepositScreen"
       >
         <div style={styles.container}>
@@ -258,20 +281,26 @@ const POSDailyDepositScreen = () => {
           <div style={styles.tabContent}>
             {activeTab === 'deposit' && canCreateDeposits && (
               <PermissionGate
-                permissions={['pos.deposits.create']}
-                requireElevated
+                permissions={['pos.daily_deposit.create', 'pos.deposits.create']}
+                requireElevated={!isTaskReturnFlow}
+                bypass={!!taskKioskCtx}
                 fallback={
                   <div style={styles.noAccessContainer}>
                     <p style={styles.noAccessText}>
-                      ⚠️ You do not have permission to create deposits (requires manager/owner)
+                      ⚠️ You do not have permission to create deposits
+                      {!isTaskReturnFlow ? ' (requires manager/owner)' : ''}
                     </p>
                   </div>
                 }
               >
                 <POSDepositCountComponent
                   businessId={auth.selectedBusinessId}
-                  userId={auth.authUser?.id}
+                  userId={effectiveUserId}
                   businessSettings={businessSettings}
+                  taskKioskCredentials={taskKioskCtx ? {
+                    token: taskKioskCtx.dashboardToken,
+                    employeeId: taskKioskCtx.employeeId
+                  } : null}
                   onDepositComplete={() => {
                     loadBusinessSettings();
                     if (canViewHistory) {
@@ -368,7 +397,7 @@ const styles = {
 
   activeTab: {
     color: TavariStyles.colors.primary,
-    borderBottomColor: TavariStyles.colors.primary,
+    borderBottom: `3px solid ${TavariStyles.colors.primary}`,
     backgroundColor: TavariStyles.colors.white
   },
 

@@ -317,11 +317,21 @@ export const useSecurityContext = (options = {}) => {
           sanitized = SecurityUtils.sanitizeString(input);
       }
 
-      // Security threat checks
+      // Security threat checks (not for passwords: strong passwords routinely match shell/SQL heuristics;
+      // they are opaque secrets sent to the auth provider, not concatenated into queries or shells.)
+      const skipInjectionHeuristics =
+        validationType === 'password' || fieldName === 'password';
+      const xssCheck = skipInjectionHeuristics ? { safe: true } : SecurityUtils.checkForXSS(input);
       // Skip SQL injection check for email fields - emails are validated separately and dashes are valid
-      const xssCheck = SecurityUtils.checkForXSS(input);
-      const sqlCheck = validationType === 'email' ? { safe: true } : SecurityUtils.checkForSQLInjection(input);
-      const commandCheck = SecurityUtils.checkForCommandInjection(input);
+      const sqlCheck =
+        skipInjectionHeuristics || validationType === 'email'
+          ? { safe: true }
+          : SecurityUtils.checkForSQLInjection(input);
+      // Skip command injection check for product/modifier names — often use quotes, parentheses, slashes (e.g. 12" Toppings (Full))
+      const commandCheck =
+        skipInjectionHeuristics || fieldName === 'item_name' || fieldName === 'group_name'
+          ? { safe: true }
+          : SecurityUtils.checkForCommandInjection(input);
 
       const threats = [];
       if (!xssCheck.safe) threats.push('XSS');

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <meta http-equiv="Permissions-Policy" content="camera=(self), microphone=()">
+  <title>Tavari Legacy Punch Clock</title>
+  <link rel="icon" href="/favicon.ico">
+  <style>
+    html, body { margin: 0; padding: 0; min-height: 100%; background: #0f766e; color: #f0fdfa; font-family: Arial, Helvetica, sans-serif; -webkit-text-size-adjust: 100%; }
+    body { overflow: auto; -webkit-overflow-scrolling: touch; }
+    * { box-sizing: border-box; }
+    button, input, textarea { font-family: Arial, Helvetica, sans-serif; }
+    button { -webkit-tap-highlight-color: rgba(0,0,0,0); }
+    .app { min-height: 100vh; padding: 14px; background: #0f766e; }
+    .shell { max-width: 980px; margin: 0 auto; }
+    .top { display: table; width: 100%; margin-bottom: 14px; }
+    .logo, .clockbox { display: table-cell; vertical-align: middle; width: 50%; }
+    .logo img { width: 150px; max-width: 42vw; }
+    .clockbox { text-align: right; }
+    .time { font-size: 34px; font-weight: 700; color: #a7f3d0; font-family: "Courier New", monospace; }
+    .date { font-size: 14px; color: #d1fae5; margin-top: 4px; }
+    .camera-card { background: rgba(255,255,255,0.12); border: 2px solid rgba(255,255,255,0.25); border-radius: 14px; padding: 12px; margin-bottom: 16px; text-align: center; position: relative; }
+    video, .photo-preview { width: 300px; max-width: 86vw; height: 225px; background: #000; border-radius: 10px; object-fit: cover; border: 2px solid rgba(255,255,255,0.35); }
+    .camera-note { font-size: 13px; color: #d1fae5; margin-top: 8px; line-height: 1.35; }
+    .pin-dots { text-align: center; margin: 14px 0; }
+    .dot { display: inline-block; width: 25px; height: 25px; border-radius: 50%; border: 2px solid #fff; margin: 0 9px; background: #0f766e; }
+    .dot.on { background: #fff; }
+    .keypad { max-width: 440px; margin: 0 auto; overflow: hidden; }
+    .keyrow { display: table; width: 100%; table-layout: fixed; border-spacing: 8px; }
+    .keycell { display: table-cell; }
+    .key, .clear, .primary, .danger, .secondary, .success { width: 100%; min-height: 66px; border: 0; border-radius: 14px; font-size: 28px; font-weight: 700; color: #fff; background: rgba(255,255,255,0.13); border: 2px solid rgba(255,255,255,0.32); }
+    .key:active, .primary:active, .danger:active, .secondary:active, .success:active { transform: scale(0.98); }
+    .clear { background: rgba(239,68,68,0.9); font-size: 18px; min-height: 54px; margin-top: 8px; }
+    .employee { background: rgba(255,255,255,0.16); border-radius: 12px; padding: 14px; margin: 12px auto; max-width: 480px; text-align: center; }
+    .employee .name { font-size: 23px; font-weight: 700; color: #fff; }
+    .status { margin-top: 8px; display: inline-block; padding: 7px 16px; border-radius: 99px; font-size: 13px; font-weight: 700; background: #10b981; color: #fff; }
+    .status.break { background: #f59e0b; }
+    .status.out { background: #64748b; }
+    .actions { max-width: 560px; margin: 12px auto; }
+    .action-row { display: table; width: 100%; table-layout: fixed; border-spacing: 8px; }
+    .action-cell { display: table-cell; }
+    .primary { background: #2563eb; font-size: 20px; }
+    .success { background: #10b981; font-size: 20px; }
+    .danger { background: #dc2626; font-size: 20px; }
+    .secondary { background: #475569; font-size: 20px; }
+    .panel { display: none; position: fixed; z-index: 40; left: 0; right: 0; top: 0; bottom: 0; background: rgba(15,23,42,0.72); padding: 18px; overflow: auto; -webkit-overflow-scrolling: touch; }
+    .panel.show { display: block; }
+    .modal { max-width: 620px; margin: 34px auto; background: #fff; color: #111827; border-radius: 16px; padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.35); }
+    .modal h2 { margin: 0 0 16px 0; text-align: center; color: #0f766e; font-size: 27px; }
+    .shift { display: block; width: 100%; text-align: left; padding: 16px; margin: 10px 0; border-radius: 10px; border: 2px solid #e5e7eb; background: #f8fafc; color: #111827; font-size: 17px; }
+    .shift strong { display: block; font-size: 20px; margin-bottom: 5px; }
+    .note { padding: 12px; border-radius: 8px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1e293b; margin-top: 10px; white-space: pre-wrap; }
+    .toast { display: none; position: fixed; z-index: 80; left: 50%; top: 16px; transform: translateX(-50%); max-width: 92vw; padding: 13px 18px; border-radius: 10px; background: #111827; color: #fff; font-weight: 700; box-shadow: 0 8px 24px rgba(0,0,0,0.32); text-align: center; }
+    .toast.show { display: block; }
+    .toast.error { background: #b91c1c; }
+    .toast.ok { background: #047857; }
+    .loading { display: none; position: fixed; z-index: 70; left: 0; right: 0; top: 0; bottom: 0; background: rgba(15,23,42,0.62); text-align: center; color: #111827; }
+    .loading.show { display: block; }
+    .loading-card { background: #fff; border-radius: 14px; padding: 24px; width: 280px; margin: 26vh auto 0; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+    .spinner { width: 42px; height: 42px; border: 5px solid #d1fae5; border-top-color: #0f766e; border-radius: 50%; margin: 0 auto 12px; -webkit-animation: spin 0.9s linear infinite; animation: spin 0.9s linear infinite; }
+    @-webkit-keyframes spin { to { -webkit-transform: rotate(360deg); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .textarea { width: 100%; min-height: 110px; font-size: 17px; padding: 12px; border-radius: 8px; border: 2px solid #d1d5db; }
+    .schedule { display: none; position: fixed; z-index: 45; left: 0; right: 0; top: 0; bottom: 0; background: #f8fafc; color: #111827; overflow: auto; -webkit-overflow-scrolling: touch; }
+    .schedule.show { display: block; }
+    .schedule-head { background: #0f766e; color: #ecfdf5; padding: 12px; display: table; width: 100%; }
+    .schedule-title, .schedule-close { display: table-cell; vertical-align: middle; }
+    .schedule-title { font-size: 21px; font-weight: 700; }
+    .schedule-close { text-align: right; }
+    .schedule-close button { width: auto; padding: 10px 18px; min-height: 0; border-radius: 8px; border: 0; color: #0f766e; background: #ecfdf5; font-weight: 700; font-size: 16px; }
+    .schedule-body { padding: 12px; }
+    .day { background: #fff; border-radius: 10px; margin: 0 0 10px; padding: 12px; border: 1px solid #e5e7eb; }
+    .day h3 { margin: 0 0 8px; color: #0f766e; }
+    .small { font-size: 12px; color: #d1fae5; text-align: center; margin-top: 14px; }
+    /* Keep capture input in-tree (not display:none) so iOS will open the camera. */
+    .capture-input {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1px;
+      height: 1px;
+      opacity: 0.01;
+      overflow: hidden;
+      z-index: 2;
+    }
+    @media (orientation: landscape) and (min-width: 720px) {
+      .layout { display: table; width: 100%; table-layout: fixed; }
+      .left, .right { display: table-cell; vertical-align: top; width: 50%; padding: 0 12px; }
+      .camera-card { margin-top: 8px; }
+      .time { font-size: 30px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+  <div id="loading" class="loading"><div class="loading-card"><div class="spinner"></div><strong id="loadingText">Working...</strong><div style="margin-top:8px;font-size:13px;color:#64748b">This will reset if it takes too long.</div></div></div>
+  <div class="app">
+    <div class="shell">
+      <div class="top">
+        <div class="logo"><img src="/tavari-logo.png" alt="Tavari"></div>
+        <div class="clockbox"><div id="time" class="time">--:--</div><div id="date" class="date"></div></div>
+      </div>
+      <div class="layout">
+        <div class="left">
+          <div class="camera-card">
+            <input id="photoInput" class="capture-input" type="file" accept="image/*" capture="camera">
+            <video id="video" autoplay muted playsinline webkit-playsinline></video>
+            <img id="photoPreview" class="photo-preview" alt="Captured photo" style="display:none">
+            <div id="cameraNote" class="camera-note">Starting camera…</div>
+          </div>
+          <div class="actions">
+            <button id="scheduleBtn" class="secondary" type="button">Week Schedule</button>
+          </div>
+          <div id="employee" class="employee" style="display:none"><div id="employeeName" class="name"></div><div id="employeeStatus" class="status out"></div></div>
+        </div>
+        <div class="right">
+          <div class="pin-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+          <div class="keypad" id="keypad"></div>
+          <div class="actions"><button id="clearBtn" class="clear" type="button">Clear</button></div>
+        </div>
+      </div>
+      <div class="small">Legacy ES5 fallback only • Prefer https://legacy-punchclock.tavarios.ca/ on iPad 7+</div>
+    </div>
+  </div>
+
+  <div id="shiftPanel" class="panel"><div class="modal"><h2>Select Your Shift</h2><div id="shiftList"></div><div class="action-row"><div class="action-cell"><button id="shiftCancelBtn" class="secondary" type="button">Cancel</button></div></div></div></div>
+  <div id="confirmPanel" class="panel"><div class="modal"><h2>Confirm Clock In</h2><div id="confirmDetails"></div><div class="action-row"><div class="action-cell"><button id="confirmBackBtn" class="secondary" type="button">Back</button></div><div class="action-cell"><button id="confirmClockInBtn" class="success" type="button">Confirm Clock In</button></div></div></div></div>
+  <div id="optionsPanel" class="panel"><div class="modal"><h2 id="optionsTitle">Options</h2><div id="optionsButtons"></div><div class="action-row"><div class="action-cell"><button id="optionsCancelBtn" class="secondary" type="button">Cancel</button></div></div></div></div>
+  <div id="successPanel" class="panel"><div class="modal"><h2 id="successTitle">Success</h2><div id="commentBlock" style="display:none"><label style="font-weight:700">Add a note (optional)</label><textarea id="clockOutComment" class="textarea" placeholder="Enter any notes about your work..."></textarea></div><div class="action-row"><div class="action-cell"><button id="successDoneBtn" class="success" type="button">Done</button></div></div></div></div>
+  <div id="schedulePanel" class="schedule"><div class="schedule-head"><div class="schedule-title">Team Schedule</div><div class="schedule-close"><button id="scheduleCloseBtn" type="button">Close</button></div></div><div id="scheduleBody" class="schedule-body"></div></div>
+
+  <script src="/legacy-punchclock/config.js"></script>
+  <script src="/legacy-punchclock/app.es5.js"></script>
+</body>
+</html>

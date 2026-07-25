@@ -100,10 +100,18 @@ export const useTaxCalculations = (businessId) => {
 
   /**
    * Get effective tax categories for an item
-   * Combines category defaults with item-specific overrides
+   * Combines category defaults with item-specific overrides.
+   * Custom items (no category) get the first active standard tax category so they are taxed.
    */
   const getItemTaxes = useCallback((item) => {
     let allApplicableTaxes = [];
+
+    // Custom items: use all active standard tax categories so combined rate matches other taxable items
+    if (item.is_custom) {
+      const defaultTaxes = taxCategories.filter(t => t.category_type === 'tax' && t.is_active !== false);
+      allApplicableTaxes.push(...defaultTaxes);
+      return allApplicableTaxes;
+    }
     
     // ALWAYS start with category defaults (base taxes)
     if (item.category_id) {
@@ -131,10 +139,29 @@ export const useTaxCalculations = (businessId) => {
     return uniqueTaxes;
   }, [taxCategories, getCategoryTaxes]);
 
+  /** Combined rate (0-1) for standard taxes on an item. Used for tax-inclusive back-calculation. */
+  const getCombinedTaxRate = useCallback((item) => {
+    const taxes = getItemTaxes(item);
+    return taxes
+      .filter(t => t.category_type === 'tax')
+      .reduce((sum, t) => sum + (parseFloat(t.rate) || 0), 0);
+  }, [getItemTaxes]);
+
   /**
    * Calculate tax for a single item with rebates and exemptions
    */
   const calculateItemTax = useCallback((item, itemSubtotal) => {
+    // Gift cards / prepaid value: tax at redemption only (Ontario default)
+    if (item?.tax_exempt || item?.is_gift_card || item?.gift_card) {
+      return {
+        taxAmount: 0,
+        effectiveRate: 0,
+        simpleTaxBreakdown: {},
+        rebateBreakdown: {},
+        isExempt: true
+      };
+    }
+
     const applicableTaxes = getItemTaxes(item);
     
     let isExempt = false;
@@ -218,12 +245,27 @@ export const useTaxCalculations = (businessId) => {
   /**
    * Calculate total tax for all cart items with aggregated breakdown
    */
+  /**
+   * @param {object|null} indianStatusOptions - When set, entire order uses only the configured GST rate (Indian Status).
+   *   { enabled: true, gstRate: number, taxLabel?: string }
+   */
   const calculateTotalTax = useCallback((
     cartItems = [], 
     discountAmount = 0, 
     loyaltyRedemption = 0, 
-    subtotal = null
+    subtotal = null,
+    indianStatusOptions = null
   ) => {
+    const gstOnly =
+      indianStatusOptions &&
+      indianStatusOptions.enabled === true &&
+      typeof indianStatusOptions.gstRate === 'number' &&
+      indianStatusOptions.gstRate >= 0;
+    const indianGstRate = gstOnly ? Math.min(1, Math.max(0, indianStatusOptions.gstRate)) : 0;
+    const indianTaxLabel = (gstOnly && indianStatusOptions.taxLabel?.trim())
+      ? indianStatusOptions.taxLabel.trim()
+      : 'GST (Indian Status)';
+
     // Calculate subtotal if not provided
     const calculatedSubtotal = subtotal !== null ? subtotal : cartItems.reduce((sum, item) => {
       const basePrice = Number(item.price) || 0;
@@ -242,7 +284,7 @@ export const useTaxCalculations = (businessId) => {
     // Calculate proportional discount and loyalty reduction per item
     const discountRatio = calculatedSubtotal > 0 ? (discountAmount + loyaltyRedemption) / calculatedSubtotal : 0;
 
-    cartItems.forEach((item, index) => {
+    cartItems.forEach((item) => {
       const basePrice = Number(item.price) || 0;
       const modifiersTotal = item.modifiers?.reduce((mSum, mod) => {
         return mSum + (Number(mod.price) || 0);
@@ -250,10 +292,41 @@ export const useTaxCalculations = (businessId) => {
       const itemSubtotal = (basePrice + modifiersTotal) * (Number(item.quantity) || 1);
       
       // Apply proportional discount/loyalty reduction
-      const itemAfterReductions = itemSubtotal * (1 - discountRatio);
-      
-      const itemTaxInfo = calculateItemTax(item, itemAfterReductions);
-      totalTax += itemTaxInfo.taxAmount;
+      let itemAfterReductions = itemSubtotal * (1 - discountRatio);
+
+      // Tax-inclusive custom items: price entered is total including tax; back out pre-tax amount
+      if (item.is_custom && item.tax_included) {
+        const rateForInclusive = gstOnly ? indianGstRate : getCombinedTaxRate(item);
+        if (rateForInclusive > 0) {
+          const preTaxAmount = itemAfterReductions / (1 + rateForInclusive);
+          itemAfterReductions = preTaxAmount;
+        }
+      }
+
+      let itemTaxInfo;
+      if (item?.tax_exempt || item?.is_gift_card || item?.gift_card) {
+        itemTaxInfo = {
+          taxAmount: 0,
+          effectiveRate: 0,
+          simpleTaxBreakdown: {},
+          rebateBreakdown: {},
+          isExempt: true
+        };
+      } else if (gstOnly) {
+        const taxAmount = itemAfterReductions * indianGstRate;
+        const simpleTaxBreakdown = taxAmount > 0 ? { [indianTaxLabel]: taxAmount } : {};
+        itemTaxInfo = {
+          taxAmount,
+          effectiveRate: itemAfterReductions > 0 ? taxAmount / itemAfterReductions : 0,
+          simpleTaxBreakdown,
+          rebateBreakdown: {},
+          isExempt: false
+        };
+        totalTax += taxAmount;
+      } else {
+        itemTaxInfo = calculateItemTax(item, itemAfterReductions);
+        totalTax += itemTaxInfo.taxAmount;
+      }
       
       itemTaxDetails.push({
         itemId: item.id,
@@ -286,9 +359,10 @@ export const useTaxCalculations = (businessId) => {
       totalTax,
       aggregatedTaxes,
       aggregatedRebates,
-      itemTaxDetails
+      itemTaxDetails,
+      indianStatusGstOnly: gstOnly
     };
-  }, [calculateItemTax]);
+  }, [calculateItemTax, getCombinedTaxRate]);
 
   /**
    * Apply Canadian cash rounding (no pennies)
@@ -386,6 +460,7 @@ export const useTaxCalculations = (businessId) => {
     // Core calculation functions
     getCategoryTaxes,
     getItemTaxes,
+    getCombinedTaxRate,
     calculateItemTax,
     calculateTotalTax,
     

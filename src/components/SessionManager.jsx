@@ -2,29 +2,36 @@ import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { sessionPersistence } from '../services/SessionPersistence';
+import { isBrowserStaffSession } from '../utils/staffSessionContext';
 
 const SessionManager = ({ children }) => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    // BULLETPROOF: KEEP SESSION ALIVE FOREVER
-    // Force stayLoggedIn to be true
-    localStorage.setItem('stayLoggedIn', 'true');
-    
+    if (!isBrowserStaffSession()) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
     const refreshToken = async () => {
       try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (cancelled || !session?.refresh_token) {
+          return;
+        }
+        localStorage.setItem('stayLoggedIn', 'true');
+        sessionPersistence.startAutoRefresh();
         await sessionPersistence.refreshToken();
       } catch (err) {
         console.warn('Session refresh failed (ignored):', err.message);
       }
     };
 
-    // Ensure the persistence service is actively refreshing
-    sessionPersistence.startAutoRefresh();
     refreshToken();
 
     return () => {
-      // SessionPersistence manages its own timers; nothing to clean up here
+      cancelled = true;
     };
   }, [navigate]);
 

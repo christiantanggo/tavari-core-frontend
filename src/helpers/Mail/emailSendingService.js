@@ -1,12 +1,14 @@
-// helpers/Mail/emailSendingService.js - Real AWS SES Integration - QUOTA FIXED
+// helpers/Mail/emailSendingService.js - Backend-driven mail sending
 import { supabase } from '../../supabaseClient';
-import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
 const TEST_MODE_STORAGE_KEY = 'EMAIL_TESTING_MODE_OVERRIDE';
+const DEFAULT_PUBLIC_SITE_URL = 'https://tavarios.ca';
+const SIGNED_UNSUBSCRIBE_PLACEHOLDER = '__TAVARI_SIGNED_UNSUBSCRIBE_URL__';
 
 const getInitialTestMode = () => {
   const envFlag = import.meta.env.VITE_EMAIL_TESTING_MODE;
-  let defaultMode = envFlag === undefined || envFlag === null || envFlag === '' || envFlag === 'true';
+  const normalizedEnvFlag = typeof envFlag === 'string' ? envFlag.trim().toLowerCase() : '';
+  const defaultMode = normalizedEnvFlag === 'true' || normalizedEnvFlag === '1' || normalizedEnvFlag === 'yes' || normalizedEnvFlag === 'on';
 
   if (typeof window !== 'undefined') {
     try {
@@ -22,14 +24,42 @@ const getInitialTestMode = () => {
   return defaultMode;
 };
 
+const normalizePublicSiteUrl = (value) => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return '';
+
+  if (/^https?:\/\/(?:app\.)?tavari\.ca\/?$/i.test(trimmed)) {
+    return DEFAULT_PUBLIC_SITE_URL;
+  }
+
+  return trimmed.replace(/\/$/, '');
+};
+
+const resolvePublicSiteUrl = () => {
+  const envUrl = normalizePublicSiteUrl(
+    import.meta.env.VITE_PUBLIC_SITE_URL ||
+    import.meta.env.VITE_APP_URL ||
+    import.meta.env.REACT_APP_BASE_URL
+  );
+
+  if (envUrl) {
+    return envUrl;
+  }
+
+  if (typeof window !== 'undefined') {
+    const origin = normalizePublicSiteUrl(window.location.origin);
+    if (origin && !/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(origin)) {
+      return origin;
+    }
+  }
+
+  return DEFAULT_PUBLIC_SITE_URL;
+};
+
 class EmailSendingService {
   constructor() {
     this.sesConfig = {
-      region: import.meta.env.VITE_AWS_REGION || 'us-east-2',
-      credentials: {
-        accessKeyId: import.meta.env.VITE_AWS_ACCESS_KEY_ID,
-        secretAccessKey: import.meta.env.VITE_AWS_SECRET_ACCESS_KEY
-      }
+      region: import.meta.env.VITE_AWS_REGION || 'us-east-2'
     };
     
     this.sendRateLimits = {
@@ -42,16 +72,6 @@ class EmailSendingService {
       baseDelay: 1000, // 1 second base delay
       maxDelay: 30000 // 30 seconds max delay
     };
-
-    // Initialize REAL AWS SES Client
-    if (this.sesConfig.credentials.accessKeyId && this.sesConfig.credentials.secretAccessKey) {
-      this.sesClient = new SESClient({
-        region: this.sesConfig.region,
-        credentials: this.sesConfig.credentials
-      });
-    } else {
-      this.sesClient = null;
-    }
 
     this.testMode = getInitialTestMode();
     
@@ -92,24 +112,13 @@ class EmailSendingService {
   async initializeSES() {
     try {
       
-      if (this.sesClient) {
-        
-        return {
-          success: true,
-          region: this.sesConfig.region,
-          configured: true,
-          mode: 'live',
-          sendingQuota: { Max24HourSend: 50000, SentLast24Hours: 0, MaxSendRate: 14 }
-        };
-      } else {
-        return {
-          success: false,
-          region: this.sesConfig.region,
-          configured: false,
-          mode: 'error',
-          error: 'Missing AWS credentials'
-        };
-      }
+      return {
+        success: true,
+        region: this.sesConfig.region,
+        configured: true,
+        mode: 'backend',
+        sendingQuota: { Max24HourSend: 50000, SentLast24Hours: 0, MaxSendRate: 14 }
+      };
     } catch (error) {
       console.error('Error initializing SES:', error);
       return {
@@ -125,29 +134,30 @@ class EmailSendingService {
   // FIXED: Always allow sending - removed all false positive quota checks
   async checkSESQuota(forceRefresh = false) {
     try {
-
       return {
-        sendQuota: 50000,
-        sent24Hour: 9,
-        sendRate: 14,
-        quotaUsagePercent: 0.02,
-        remainingQuota: 49991,
-        canSend: true,
+        sendQuota: null,
+        sent24Hour: null,
+        sendRate: null,
+        quotaUsagePercent: null,
+        remainingQuota: null,
+        canSend: null,
         sendStatistics: [],
         lastChecked: new Date(),
-        mode: 'live'
+        mode: 'unknown',
+        warnings: ['SES quota has not been verified from the backend yet.']
       };
     } catch (error) {
       console.error('Error checking SES quota:', error);
       
       return {
-        sendQuota: 50000,
-        sent24Hour: 9,
-        sendRate: 14,
-        quotaUsagePercent: 0.02,
-        remainingQuota: 49991,
-        canSend: true,
-        mode: 'live',
+        sendQuota: null,
+        sent24Hour: null,
+        sendRate: null,
+        quotaUsagePercent: null,
+        remainingQuota: null,
+        canSend: null,
+        mode: 'unknown',
+        warnings: ['SES quota could not be verified.'],
         error: error.message
       };
     }
@@ -156,26 +166,25 @@ class EmailSendingService {
   // FIXED: Always return good reputation
   async checkIPReputation() {
     try {
-      
       return {
-        reputation: 'good',
-        score: 90,
-        issues: [],
-        recommendations: [],
-        bounceRate: 0,
-        complaintRate: 0,
-        totalSends: 9,
-        mode: 'live'
+        reputation: 'unknown',
+        score: null,
+        issues: ['IP reputation has not been verified from the backend.'],
+        recommendations: ['Confirm SES reputation before relying on this status.'],
+        bounceRate: null,
+        complaintRate: null,
+        totalSends: null,
+        mode: 'unknown'
       };
 
     } catch (error) {
       console.error('Error checking IP reputation:', error);
       return {
-        reputation: 'good',
-        score: 85,
-        issues: [],
-        recommendations: ['AWS SES reputation is healthy'],
-        mode: 'live'
+        reputation: 'unknown',
+        score: null,
+        issues: ['IP reputation could not be verified.'],
+        recommendations: ['Review SES reputation in AWS before sending at scale.'],
+        mode: 'unknown'
       };
     }
   }
@@ -190,27 +199,28 @@ class EmailSendingService {
           authenticated: false,
           domain: 'invalid',
           error: 'Invalid from email address',
-          canSend: true,
+          canSend: false,
           recommendations: ['Check email format']
         };
       }
 
 
       return {
-        authenticated: true,
+        authenticated: null,
         domain: domain,
-        canSend: true,
-        verifiedAt: new Date().toISOString(),
-        dkimEnabled: true
+        canSend: null,
+        verifiedAt: null,
+        dkimEnabled: null,
+        recommendations: ['Verify this sending domain from the Mail Domains screen before launch.']
       };
 
     } catch (error) {
       console.error('Error validating domain authentication:', error);
       return {
-        authenticated: true,
+        authenticated: null,
         error: error.message,
-        canSend: true,
-        recommendations: ['Domain verification passed via AWS SES']
+        canSend: null,
+        recommendations: ['Domain authentication could not be verified.']
       };
     }
   }
@@ -254,13 +264,13 @@ class EmailSendingService {
       console.error('Error validating campaign compliance:', error);
       
       return {
-        canSend: true,
-        issues: [],
-        warnings: ['Compliance validation had errors but allowing send'],
-        recommendations: ['Check campaign configuration'],
-        quota: { canSend: true, sendQuota: 50000, sent24Hour: 9, remainingQuota: 49991 },
-        reputation: { reputation: 'good', score: 85 },
-        complianceScore: 80
+        canSend: false,
+        issues: ['Compliance validation could not be completed'],
+        warnings: ['Sending is blocked until compliance checks succeed.'],
+        recommendations: ['Retry validation after confirming settings and consented recipients.'],
+        quota: { canSend: null, sendQuota: null, sent24Hour: null, remainingQuota: null },
+        reputation: { reputation: 'unknown', score: null },
+        complianceScore: 0
       };
     }
   }
@@ -355,78 +365,91 @@ class EmailSendingService {
         };
       }
 
-      // **REAL EMAIL SENDING via AWS SES**
-      if (!this.sesClient) {
-        throw new Error('AWS SES client not initialized - check credentials in .env file');
-      }
-
       const configurationSet =
         queueItem.configuration_set ||
         campaign.configuration_set ||
         import.meta.env.VITE_SES_CONFIGURATION_SET ||
         undefined;
 
+      const campaignBusinessId = campaign.business_id || queueItem.business_id;
+
       // Get business settings
-      const { data: settings, error: settingsError } = await supabase
-        .from('mail_settings')
-        .select('from_name, from_email, business_address')
-        .eq('business_id', campaign.business_id || queueItem.business_id)
-        .single();
+      const [
+        { data: settings, error: settingsError },
+        { data: businessRow, error: businessError }
+      ] = await Promise.all([
+        supabase
+          .from('mail_settings')
+          .select('from_name, from_email, business_address')
+          .eq('business_id', campaignBusinessId)
+          .single(),
+        supabase
+          .from('businesses')
+          .select('name, business_address')
+          .eq('id', campaignBusinessId)
+          .maybeSingle()
+      ]);
 
       if (settingsError) {
         console.error('Error loading settings:', settingsError);
         throw new Error('Failed to load business settings: ' + settingsError.message);
       }
 
+      if (businessError) {
+        console.warn('Unable to load business name for email display name:', businessError);
+      }
+
+      const businessName = businessRow?.name?.trim() || settings?.from_name || 'Tavari';
+      const isUsableAddress = (value) => {
+        const trimmed = String(value || '').trim();
+        if (!trimmed) return false;
+        return !/^(business address required|please update your business address)/i.test(trimmed);
+      };
+      const businessAddress =
+        (isUsableAddress(settings?.business_address) && settings.business_address.trim()) ||
+        (isUsableAddress(businessRow?.business_address) && businessRow.business_address.trim()) ||
+        'Business address required';
+      const resolvedSettings = {
+        ...settings,
+        business_name: businessName,
+        business_address: businessAddress,
+      };
+
       // Personalize content
       let personalizedHtml = queueItem.personalized_content || campaign.content_html || '';
-      personalizedHtml = this.personalizeEmailContent(personalizedHtml, contact, campaign.business_id || queueItem.business_id);
+      personalizedHtml = this.personalizeEmailContent(personalizedHtml, contact, campaignBusinessId);
+      personalizedHtml = this.injectPreviewText(personalizedHtml, campaign.preheader_text || '');
 
       // Auto-add compliance footer
-      personalizedHtml = this.ensureComplianceTokens(personalizedHtml, settings, contact, campaign.business_id || queueItem.business_id);
+      personalizedHtml = this.ensureComplianceTokens(personalizedHtml, resolvedSettings, contact, campaignBusinessId);
 
-      // Create SES send command
-      const sendCommand = new SendEmailCommand({
-        Source: `${settings.from_name} <${settings.from_email}>`,
-        Destination: {
-          ToAddresses: [contact.email]
-        },
-        Message: {
-          Subject: {
-            Data: campaign.subject_line,
-            Charset: 'UTF-8'
-          },
-          Body: {
-            Html: {
-              Data: personalizedHtml,
-              Charset: 'UTF-8'
-            },
-            Text: {
-              Data: this.htmlToText(personalizedHtml),
-              Charset: 'UTF-8'
-            }
-          }
-        },
-        ...(configurationSet ? { ConfigurationSetName: configurationSet } : {}),
-        EmailTags: [
-          ...(queueItem.business_id
-            ? [{ Name: 'business_id', Value: queueItem.business_id }]
-            : []),
-          {
-            Name: 'campaign_id',
-            Value: queueItem.campaign_id || campaign.id || 'unknown'
-          }
-        ]
+      const { data, error } = await supabase.functions.invoke('mail-send', {
+        body: {
+          businessId: campaignBusinessId,
+          campaignId: queueItem.campaign_id || campaign.id || null,
+          contactId: queueItem.contact_id || contact.id || null,
+          emailType: queueItem.emailType || campaign.email_type || 'marketing',
+          to: contact.email,
+          fromEmail: settings.from_email,
+          fromName: businessName,
+          subject: campaign.subject_line,
+          html: personalizedHtml,
+          text: this.htmlToText(personalizedHtml),
+          configurationSet
+        }
       });
 
-      // 🔥 SEND REAL EMAIL via AWS SES
-      
-      const result = await this.sesClient.send(sendCommand);
-      
+      if (error) {
+        throw new Error(error.message || 'Failed to invoke backend mail sender');
+      }
+
+      if (!data?.ok) {
+        throw new Error(data?.error || 'Backend mail sender rejected the request');
+      }
 
       return {
         success: true,
-        messageId: result.MessageId,
+        messageId: data.messageId || null,
         timestamp: new Date().toISOString(),
         campaign_id: queueItem.campaign_id,
         contact_id: queueItem.contact_id,
@@ -454,15 +477,19 @@ class EmailSendingService {
   ensureComplianceTokens(htmlContent, settings, contact, businessId) {
     if (!htmlContent || !settings) return htmlContent;
 
-    const unsubscribeToken = this.generateUnsubscribeToken(contact.id, businessId);
-    const unsubscribeUrl = `${import.meta.env?.REACT_APP_BASE_URL || window.location.origin}/unsubscribe?token=${unsubscribeToken}`;
+    const unsubscribeUrl = SIGNED_UNSUBSCRIBE_PLACEHOLDER;
+    const businessName = settings.business_name || settings.from_name || 'Tavari';
+    const businessAddress = settings.business_address || 'Business address required';
 
     // Replace existing tokens
     let processedContent = htmlContent
       .replace(/\{UnsubscribeLink\}/g, unsubscribeUrl)
-      .replace(/\{FromName\}/g, settings.from_name || '')
-      .replace(/\{BusinessName\}/g, settings.from_name || '')
-      .replace(/\{BusinessAddress\}/g, settings.business_address || '539 First Street, London, ON N5V 1Z5');
+      .replace(/\{UpdatePreferencesLink\}/g, unsubscribeUrl)
+      .replace(/\{FromName\}/g, businessName)
+      .replace(/\{BusinessName\}/g, businessName)
+      .replace(/\{BusinessAddress\}/g, businessAddress)
+      .replace(/Your Business Name/g, businessName)
+      .replace(/Your Business Address - Required for CASL Compliance/g, businessAddress);
 
     // Auto-inject unsubscribe footer if not present
     const hasUnsubscribe = processedContent.toLowerCase().includes('unsubscribe');
@@ -471,7 +498,7 @@ class EmailSendingService {
       const complianceFooter = `
         <div style="margin-top: 40px; padding: 20px; border-top: 1px solid #e0e0e0; font-size: 12px; color: #666; text-align: center;">
           <p style="margin: 0 0 10px 0;">
-            You are receiving this email because you subscribed to ${settings.from_name || 'our'} communications.
+            You are receiving this email because you subscribed to ${businessName} communications.
           </p>
           <p style="margin: 0 0 10px 0;">
             <a href="${unsubscribeUrl}" style="color: #0066cc; text-decoration: underline;">Unsubscribe</a> 
@@ -479,7 +506,7 @@ class EmailSendingService {
             <a href="${unsubscribeUrl}" style="color: #0066cc; text-decoration: underline;">Update Preferences</a>
           </p>
           <p style="margin: 0; font-size: 11px;">
-            ${settings.business_address || '539 First Street, London, ON N5V 1Z5'}
+            ${businessAddress}
           </p>
         </div>
       `;
@@ -531,9 +558,11 @@ class EmailSendingService {
 
       let query = supabase
         .from('mail_contacts')
-        .select('id, email, first_name, last_name, subscribed')
+        .select('id, email, first_name, last_name, subscribed, consent_method, consent_timestamp')
         .eq('business_id', campaign.business_id)
-        .eq('subscribed', true);
+        .eq('subscribed', true)
+        .not('consent_method', 'is', null)
+        .not('consent_timestamp', 'is', null);
 
       if (contactIds && contactIds.length > 0) {
         query = query.in('id', contactIds);
@@ -550,15 +579,22 @@ class EmailSendingService {
         status: 'queued',
         priority: 5,
         scheduled_for: new Date().toISOString(),
+        business_id: campaign.business_id,
         personalized_content: this.personalizeEmailContent(campaign.content_html, contact, campaign.business_id)
       }));
 
-      const { data: queuedItems, error: queueError } = await supabase
-        .from('mail_sending_queue')
-        .insert(queueItems)
-        .select();
+      const queuedItems = [];
+      const queueInsertBatchSize = 1000;
+      for (let i = 0; i < queueItems.length; i += queueInsertBatchSize) {
+        const batch = queueItems.slice(i, i + queueInsertBatchSize);
+        const { data: queuedBatch, error: queueError } = await supabase
+          .from('mail_sending_queue')
+          .insert(batch)
+          .select();
 
-      if (queueError) throw queueError;
+        if (queueError) throw queueError;
+        queuedItems.push(...(queuedBatch || []));
+      }
 
       // Update campaign status
       await supabase
@@ -566,7 +602,7 @@ class EmailSendingService {
         .update({
           status: 'sending',
           total_recipients: contacts.length,
-          sent_at: new Date().toISOString()
+          updated_at: new Date().toISOString()
         })
         .eq('id', campaignId);
 
@@ -586,90 +622,23 @@ class EmailSendingService {
   }
 
   // Process sending queue
-  async processSendingQueue(batchSize = 5) {
+  async processSendingQueue(batchSize = 25, businessId = null) {
     try {
-      const { data: queueItems, error } = await supabase
-        .from('mail_sending_queue')
-        .select(`
-          *,
-          campaign:mail_campaigns(name, subject_line, business_id, content_html),
-          contact:mail_contacts(first_name, last_name, email)
-        `)
-        .eq('status', 'queued')
-        .lte('scheduled_for', new Date().toISOString())
-        .limit(batchSize)
-        .order('priority', { ascending: true })
-        .order('created_at', { ascending: true });
+      const { data, error } = await supabase.functions.invoke('mail-process-queue', {
+        body: {
+          businessId,
+          batchSize
+        }
+      });
 
       if (error) throw error;
-      if (!queueItems || queueItems.length === 0) {
-        return { 
-          processed: 0, 
-          sent: 0, 
-          failed: 0,
-          campaigns_affected: [],
-          errors: []
-        };
-      }
 
-      let sent = 0;
-      let failed = 0;
-      const campaignsAffected = new Set();
-      const errors = [];
-
-      for (let i = 0; i < queueItems.length; i++) {
-        const item = queueItems[i];
-
-        try {
-          // Update to processing
-          await supabase
-            .from('mail_sending_queue')
-            .update({ 
-              status: 'processing', 
-              processed_at: new Date().toISOString() 
-            })
-            .eq('id', item.id);
-
-          // Send the email
-          const sendResult = await this.sendSingleEmail(item);
-          
-          if (sendResult.success) {
-            await this.recordSuccessfulSend(item, sendResult);
-            sent++;
-            campaignsAffected.add(item.campaign_id);
-          } else {
-            await this.handleSendFailure(item, sendResult.error);
-            failed++;
-            errors.push({
-              campaign_id: item.campaign_id,
-              contact_email: item.email_address,
-              error: sendResult.error
-            });
-          }
-
-          // Rate limiting
-          if (i < queueItems.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1000 / this.sendRateLimits.default));
-          }
-
-        } catch (error) {
-          console.error(`Error processing queue item ${item.id}:`, error);
-          await this.handleSendFailure(item, error.message);
-          failed++;
-          errors.push({
-            campaign_id: item.campaign_id,
-            contact_email: item.email_address,
-            error: error.message
-          });
-        }
-      }
-
-      return { 
-        processed: queueItems.length, 
-        sent, 
-        failed,
-        campaigns_affected: Array.from(campaignsAffected),
-        errors,
+      return {
+        processed: data?.processed || 0,
+        sent: data?.sent || 0,
+        failed: data?.failed || 0,
+        campaigns_affected: data?.campaigns_affected || [],
+        errors: data?.errors || [],
         timestamp: new Date().toISOString()
       };
     } catch (error) {
@@ -679,32 +648,63 @@ class EmailSendingService {
   }
 
   // Helper Methods
+  escapeTokenForRegex(token) {
+    return String(token || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  replaceMergeTokens(content, tokens, value) {
+    return tokens.reduce((output, token) => (
+      output.replace(new RegExp(this.escapeTokenForRegex(token), 'g'), String(value ?? ''))
+    ), String(content || ''));
+  }
   
   personalizeEmailContent(htmlContent, contact, businessId) {
     if (!htmlContent) return '';
-    
-    return htmlContent
-      .replace(/\{FirstName\}/g, contact.first_name || '')
-      .replace(/\{LastName\}/g, contact.last_name || '')
-      .replace(/\{Email\}/g, contact.email || '');
+
+    const firstName = contact?.first_name || contact?.firstName || '';
+    const lastName = contact?.last_name || contact?.lastName || '';
+    const email = contact?.email || '';
+    const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+    const loyaltyPoints = contact?.loyalty_points ?? contact?.loyaltyPoints ?? contact?.points_balance ?? contact?.pointsBalance ?? '';
+
+    let output = String(htmlContent || '');
+    output = this.replaceMergeTokens(output, ['{{First Name}}', '{{FirstName}}', '{FirstName}'], firstName);
+    output = this.replaceMergeTokens(output, ['{{Last Name}}', '{{LastName}}', '{LastName}'], lastName);
+    output = this.replaceMergeTokens(output, ['{{Full Name}}', '{{FullName}}', '{FullName}'], fullName);
+    output = this.replaceMergeTokens(output, ['{{Email Address}}', '{{Email}}', '{Email}'], email);
+    output = this.replaceMergeTokens(output, ['{{LoyaltyPoints}}', '{{Loyalty Points}}'], loyaltyPoints);
+
+    const reviewLink = businessId
+      ? `${resolvePublicSiteUrl()}/reputation/review/${businessId}`
+      : '';
+    const checkedInDemo = String(firstName || '').trim();
+    output = this.replaceMergeTokens(output, ['{{{ReviewLink}}}', '{{{Review Link}}}'], reviewLink);
+    output = this.replaceMergeTokens(output, ['{{ReviewLink}}', '{{Review Link}}'], reviewLink);
+    output = this.replaceMergeTokens(
+      output,
+      ['{{CheckedInName}}', '{{Checked-In Name}}', '{{Checked In Name}}'],
+      checkedInDemo,
+    );
+
+    return output;
   }
 
-  generateUnsubscribeToken(contactId, businessId) {
-    return Buffer.from(`${contactId}:${businessId}:${Date.now()}`).toString('base64');
+  injectPreviewText(htmlContent, previewText) {
+    const trimmedPreview = String(previewText || '').trim();
+    if (!htmlContent || !trimmedPreview) return htmlContent;
+    if (htmlContent.includes('data-tavari-preheader="true"')) return htmlContent;
+
+    const preheaderHtml = `<div data-tavari-preheader="true" style="display:none !important; visibility:hidden; opacity:0; color:transparent; height:0; width:0; overflow:hidden; mso-hide:all; font-size: 1px; line-height:1px; max-height:0; max-width:0;">${trimmedPreview}</div>`;
+
+    if (htmlContent.includes('<body')) {
+      return htmlContent.replace(/<body([^>]*)>/i, `<body$1>${preheaderHtml}`);
+    }
+
+    return `${preheaderHtml}${htmlContent}`;
   }
 
   async recordSuccessfulSend(queueItem, sendResult) {
     try {
-      // Record in sends table
-      await supabase.from('mail_campaign_sends').insert({
-        campaign_id: queueItem.campaign_id,
-        contact_id: queueItem.contact_id,
-        email_address: queueItem.email_address,
-        status: 'sent',
-        sent_at: sendResult.timestamp,
-        ses_message_id: sendResult.messageId
-      });
-
       // Update queue status
       await supabase
         .from('mail_sending_queue')
@@ -725,8 +725,9 @@ class EmailSendingService {
   async handleSendFailure(queueItem, errorMessage) {
     try {
       const retryCount = (queueItem.retry_count || 0) + 1;
+      const isPermanentFailure = /unsubscribed|suppressed|marketing consent/i.test(errorMessage);
       
-      if (retryCount <= this.retryConfig.maxRetries) {
+      if (!isPermanentFailure && retryCount <= this.retryConfig.maxRetries) {
         const delayMs = Math.min(
           this.retryConfig.baseDelay * Math.pow(2, retryCount - 1),
           this.retryConfig.maxDelay

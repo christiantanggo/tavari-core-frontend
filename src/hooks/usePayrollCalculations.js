@@ -4,7 +4,18 @@ import { supabase } from '../supabaseClient';
 import { useSecurityContext } from '../Security';
 import { usePOSAuth } from './usePOSAuth';
 import { useCanadianTaxCalculations } from './useCanadianTaxCalculations';
-
+import { calculatePayFrequencyFromDates } from '../utils/calculatePayPeriodNumber';
+import {
+  indexLatestWagesFromHistory,
+  resolveEffectiveEmployeeWage,
+} from '../helpers/Payroll/resolveEffectiveEmployeeWage';
+import {
+  fetchLieuBalanceMapForEmployees,
+  resolveAvailableLieuBalance,
+  resolvePayrollLieuBalance,
+  clampLieuHoursForPeriod
+} from '../helpers/Payroll/lieuTimeLedger';
+import { resolveEmploymentFields } from '../utils/businessEmploymentStatus';
 // ============================================================
 // WAGEHISTORY CLASS - EMBEDDED
 // ============================================================
@@ -28,7 +39,7 @@ class WageHistory {
 
       if (employeeError) throw employeeError;
 
-      const currentWage = parseFloat(employee?.wage || 0);
+      const currentWage = resolveEffectiveEmployeeWage(employee);
 
       const { data: wageChanges, error: wageError } = await supabase
         .from('hrpayroll_wage_history')
@@ -203,6 +214,41 @@ class WageHistory {
 }
 
 // ============================================================
+// HELPER: Calculate vacation percent based on years of service
+// ============================================================
+const calculateVacationPercent = (employee, defaultVacationPercent = 0.04) => {
+  // If vacation_percent is explicitly set (not null/undefined), use it (might be an override)
+  if (employee.vacation_percent != null) {
+    let percent = parseFloat(employee.vacation_percent);
+    // If it looks like a percentage (>= 1.0), convert to decimal
+    if (percent >= 1.0) {
+      percent = percent / 100;
+    }
+    return percent;
+  }
+  
+  // If not set, calculate based on years of service (ESA requirement)
+  if (employee.hire_date) {
+    const hireDate = new Date(employee.hire_date);
+    const currentDate = new Date();
+    const yearsOfService = (currentDate - hireDate) / (365.25 * 24 * 60 * 60 * 1000);
+    
+    // ESA minimum: 4% for <5 years, 6% for 5+ years
+    if (yearsOfService >= 5) {
+      return 0.06;
+    }
+  }
+  
+  // Fall back to default (usually 4%)
+  // Normalize defaultVacationPercent - if it's stored as percentage (>= 1.0), convert to decimal
+  let defaultPercent = parseFloat(defaultVacationPercent || 0.04);
+  if (defaultPercent >= 1.0) {
+    defaultPercent = defaultPercent / 100;
+  }
+  return defaultPercent;
+};
+
+// ============================================================
 // MAIN HOOK
 // ============================================================
 export const usePayrollCalculations = (businessId) => {
@@ -256,7 +302,7 @@ export const usePayrollCalculations = (businessId) => {
     try {
       const { data: settingsData, error: settingsError } = await supabase
         .from('hrpayroll_settings')
-        .select('*')
+        .select('id, business_id, pay_period_type, pay_frequency, pay_period_start_day, overtime_threshold, vacation_rate, stat_holiday_rate, tax_jurisdiction, use_cra_tax_tables, default_claim_code, tax_year, default_vacation_percent, federal_tax_percent, provincial_tax_percent, ei_percent, cpp_percent, use_accurate_tax_calculations, auto_calculate_vacation')
         .eq('business_id', businessId)
         .single();
 
@@ -266,9 +312,10 @@ export const usePayrollCalculations = (businessId) => {
 
       const { data: runsData, error: runsError } = await supabase
         .from('hrpayroll_runs')
-        .select('*')
+        .select('id, business_id, pay_period_start, pay_period_end, status, created_at, finalized_at')
         .eq('business_id', businessId)
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false })
+        .limit(50);
 
       if (runsError) {
         console.warn('Error loading payroll runs:', runsError);
@@ -276,34 +323,102 @@ export const usePayrollCalculations = (businessId) => {
 
       const { data: businessUsers, error: businessUsersError } = await supabase
         .from('business_users')
-        .select('user_id')
+        .select('user_id, employment_status, termination_date')
         .eq('business_id', businessId);
 
       if (businessUsersError) throw businessUsersError;
 
-      const userIds = businessUsers.map(bu => bu.user_id);
+      const membershipByUserId = {};
+      (businessUsers || []).forEach((bu) => {
+        if (bu?.user_id) membershipByUserId[bu.user_id] = bu;
+      });
+
+      const userIds = (businessUsers || []).map((bu) => bu.user_id).filter(Boolean);
 
       let employeeData = [];
       if (userIds.length > 0) {
         const { data: usersData, error: usersError } = await supabase
           .from('users')
           .select(`
-            *,
-            hrpayroll_employee_premiums!hrpayroll_employee_premiums_user_id_fkey(*)
+            id, first_name, last_name, full_name, email, wage, hire_date, employment_status, termination_date,
+            lieu_time_enabled, max_paid_hours_per_period, lieu_time_balance, vacation_percent,
+            additional_tax_per_period,
+            hrpayroll_employee_premiums!hrpayroll_employee_premiums_user_id_fkey(id, premium_name, premium_rate, applies_to_all_hours, is_active)
           `)
           .in('id', userIds)
-          .neq('employment_status', 'terminated');
+          .limit(500);
 
         if (usersError) throw usersError;
-        employeeData = usersData || [];
+        const rawUsers = usersData || [];
+
+        // Ledger-derived balances for lieu-enabled employees (matches Lieu Time modal).
+        const lieuEnabledIds = rawUsers.filter((u) => u.lieu_time_enabled).map((u) => u.id);
+        let lieuBalanceMap = {};
+        if (lieuEnabledIds.length > 0) {
+          try {
+            lieuBalanceMap = await fetchLieuBalanceMapForEmployees(
+              supabase,
+              businessId,
+              lieuEnabledIds
+            );
+          } catch (lieuBalanceErr) {
+            console.warn('Error loading lieu ledger balances for payroll:', lieuBalanceErr);
+          }
+        }
+
+        const { data: wageHistoryRows } = await supabase
+          .from('hrpayroll_wage_history')
+          .select('user_id, new_wage, effective_date')
+          .eq('business_id', businessId)
+          .in('user_id', userIds)
+          .order('effective_date', { ascending: false });
+
+        const latestWageByUserId = indexLatestWagesFromHistory(wageHistoryRows || []);
+
+        employeeData = rawUsers.map((emp) => {
+          // Termination may live on business_users (current HR flow) OR users
+          // (older terminations). Treat either as terminated for payroll visibility.
+          const membership = membershipByUserId[emp.id];
+          const resolved = resolveEmploymentFields({
+            membership,
+            user: emp,
+          });
+          const userTerminated =
+            String(emp.employment_status || '').toLowerCase() === 'terminated';
+          const buTerminated =
+            String(membership?.employment_status || '').toLowerCase() === 'terminated';
+          const employment_status =
+            userTerminated || buTerminated ? 'terminated' : resolved.employment_status;
+          const termination_date =
+            membership?.termination_date ?? emp.termination_date ?? resolved.termination_date;
+
+          let next = {
+            ...emp,
+            employment_status,
+            termination_date,
+            business_employment_status: membership?.employment_status ?? null,
+          };
+          if (emp.lieu_time_enabled && lieuBalanceMap[emp.id] !== undefined) {
+            next = {
+              ...next,
+              lieu_time_balance: resolvePayrollLieuBalance(emp, lieuBalanceMap[emp.id]),
+            };
+          }
+          const effectiveWage = resolveEffectiveEmployeeWage(next, latestWageByUserId);
+          if (effectiveWage > 0 && !(parseFloat(next.wage) > 0)) {
+            next = { ...next, effective_wage: effectiveWage };
+          }
+          return next;
+        });
       }
 
       const { data: premiumData, error: premiumError } = await supabase
         .from('hrpayroll_employee_premiums')
-        .select('*')
+        .select('id, user_id, premium_name, premium_rate, applies_to_all_hours, is_active')
         .eq('business_id', businessId)
         .eq('is_active', true)
-        .in('user_id', userIds);
+        .in('user_id', userIds)
+        .limit(500);
 
       if (premiumError) {
         console.warn('Error loading premiums:', premiumError);
@@ -416,14 +531,17 @@ export const usePayrollCalculations = (businessId) => {
         yearToDateProvincialTax = 0
       } = yearToDate;
 
-      const baseWage = parseFloat(employee.wage || 0);
-      const vacationPercent = parseFloat(employee.vacation_percent || settings.default_vacation_percent || 0.04);
+      const baseWage = resolveEffectiveEmployeeWage(employee);
+      const vacationPercent = calculateVacationPercent(employee, settings.default_vacation_percent);
       const overtimeMultiplier = parseFloat(settings.overtime_multiplier || 1.5);
       const claimCode = parseInt(employee.claim_code || settings.default_claim_code || 1);
       const additionalFedTax = parseFloat(additionalFedTaxAmount || 0);
       const jurisdiction = settings.tax_jurisdiction || 'ON';
 
       if (baseWage <= 0) {
+        console.warn(
+          `[usePayrollCalculations] No wage for ${employee.first_name} ${employee.last_name} — profile and wage history are empty`
+        );
         return defaultResult;
       }
 
@@ -449,7 +567,7 @@ export const usePayrollCalculations = (businessId) => {
       let lieuEarned = 0;
       let lieuUsed = 0;
       let regularHoursPaid = actualRegularHours;
-      const lieuBalanceBefore = parseFloat(employee.lieu_time_balance || 0);
+      let lieuBalanceBefore = resolveAvailableLieuBalance(employee);
       let lieuBalanceAfter = lieuBalanceBefore;
       
       // âœ… FIXED: Get holiday pay amount and convert to equivalent hours
@@ -471,7 +589,7 @@ export const usePayrollCalculations = (businessId) => {
 
       if (employee?.lieu_time_enabled) {
         const maxHours = parseFloat(employee.max_paid_hours_per_period || 0);
-        const currentBalance = parseFloat(employee.lieu_time_balance || 0);
+        const currentBalance = resolveAvailableLieuBalance(employee);
         
         // âœ… CRITICAL: Include ALL compensation hours (worked + stat + holiday pay)
         const totalCompensationHours = actualTotalHours + parseFloat(stat_worked_hours || 0) + holidayPayHours;
@@ -498,11 +616,11 @@ export const usePayrollCalculations = (businessId) => {
               earned: lieuEarned,
               newBalance: lieuBalanceAfter
             });
-          } else {
-            // âœ… UNDER MAX: Auto-fill with lieu time to reach max hours
+          } else if (currentBalance > 0) {
+            // UNDER MAX: Auto-fill with lieu time only when the employee has a positive balance
             const shortfall = maxHours - totalCompensationHours;
             lieuUsed = Math.min(shortfall, currentBalance);
-            regularHoursPaid = actualRegularHours;  // FIX: Don't add lieu hours - paid separately as lieuPay
+            regularHoursPaid = actualRegularHours;
             lieuBalanceAfter = currentBalance - lieuUsed;
             
             console.log('ðŸ”„ LIEU AUTO-USED:', {
@@ -517,6 +635,24 @@ export const usePayrollCalculations = (businessId) => {
         lieuCalculation.lieuEarned = lieuEarned;
         lieuCalculation.lieuUsed = lieuUsed;
         lieuCalculation.lieuBalanceAfter = lieuBalanceAfter;
+      }
+
+      {
+        const clampedLieu = clampLieuHoursForPeriod({
+          employee,
+          lieuEarned,
+          lieuUsed,
+          balanceBefore: lieuBalanceBefore
+        });
+        lieuEarned = clampedLieu.lieuEarned;
+        lieuUsed = clampedLieu.lieuUsed;
+        lieuBalanceBefore = clampedLieu.lieuBalanceBefore;
+        lieuBalanceAfter = clampedLieu.lieuBalanceAfter;
+        if (lieuCalculation.enabled) {
+          lieuCalculation.lieuEarned = lieuEarned;
+          lieuCalculation.lieuUsed = lieuUsed;
+          lieuCalculation.lieuBalanceAfter = lieuBalanceAfter;
+        }
       }
 
       // Check for wage changes
@@ -648,43 +784,112 @@ export const usePayrollCalculations = (businessId) => {
       const vacationPay = settings.auto_calculate_vacation ? (grossPay * vacationPercent) : 0;
       const grossPayWithVacation = grossPay + vacationPay;
 
-      const payFrequency = settings.pay_frequency || 'weekly';
-      const payPeriods = payFrequency === 'weekly' ? 52 : 
-                        payFrequency === 'bi-weekly' ? 26 : 
-                        payFrequency === 'monthly' ? 12 : 26;
-
-      let taxDeductions = {};
-      try {
-        if (canadianTax && canadianTax.calculateTaxDeductions) {
-          taxDeductions = await canadianTax.calculateTaxDeductions(
-            grossPayWithVacation,
-            claimCode,
-            jurisdiction,
-            payPeriods,
-            {
-              yearToDateGross,
-              yearToDateEI,
-              yearToDateCPP
-            }
-          );
+      // Determine pay frequency: Use business settings as primary source, period dates as fallback
+      // Business settings are authoritative since period dates can vary
+      let payFrequency, payPeriods;
+      
+      // Priority 1: Use business settings (most reliable)
+      if (settings.pay_frequency || settings.pay_period_type) {
+        payFrequency = settings.pay_frequency || settings.pay_period_type || 'bi_weekly';
+        payPeriods = payFrequency === 'weekly' ? 52 : 
+                    (payFrequency === 'bi-weekly' || payFrequency === 'bi_weekly') ? 26 : 
+                    payFrequency === 'monthly' ? 12 : 
+                    payFrequency === 'semi_monthly' ? 24 : 26;
+        
+        console.log('[usePayrollCalculations] Pay frequency from business settings:', {
+          pay_frequency: settings.pay_frequency,
+          pay_period_type: settings.pay_period_type,
+          finalFrequency: payFrequency,
+          finalPeriods: payPeriods
+        });
+      } else {
+        // Priority 2: Calculate from period dates if available
+        const periodStart = payPeriod?.pay_period_start || payPeriod?.start;
+        const periodEnd = payPeriod?.pay_period_end || payPeriod?.end;
+        
+        if (periodStart && periodEnd) {
+          const calculated = calculatePayFrequencyFromDates(periodStart, periodEnd);
+          payFrequency = calculated.frequency || 'bi_weekly';
+          payPeriods = calculated.periodsPerYear || 26;
+          
+          console.log('[usePayrollCalculations] Pay frequency calculated from period dates:', {
+            periodStart,
+            periodEnd,
+            calculatedFrequency: calculated.frequency,
+            calculatedPeriods: calculated.periodsPerYear,
+            finalFrequency: payFrequency,
+            finalPeriods: payPeriods
+          });
+        } else {
+          // Priority 3: Default fallback
+          payFrequency = 'bi_weekly';
+          payPeriods = 26;
+          
+          console.log('[usePayrollCalculations] Pay frequency using default (no settings or dates):', {
+            finalFrequency: payFrequency,
+            finalPeriods: payPeriods
+          });
         }
-      } catch (taxError) {
-        console.error('Tax calculation error:', taxError);
-        taxDeductions = {
-          federal_tax: Math.max(0, (grossPayWithVacation - 310) * 0.15),
-          provincial_tax: Math.max(0, (grossPayWithVacation - 245) * 0.0505),
-          ei_premium: Math.min(grossPayWithVacation * 0.0164, 20.72),
-          cpp_contribution: Math.max(0, Math.min((grossPayWithVacation - 67.31) * 0.0595, 74.36)),
-          calculation_method: 'fallback_simplified'
-        };
       }
 
-      const baseFederalTax = parseFloat(taxDeductions.federal_tax || 0);
-      const totalFederalTax = baseFederalTax + additionalFedTax;
-      const baseProvincialTax = parseFloat(taxDeductions.provincial_tax || 0);
-      const ontarioHealthPremium = parseFloat(taxDeductions.ontario_health_premium || 0);
-      const totalDeductions = totalFederalTax + baseProvincialTax + ontarioHealthPremium + 
-                             (taxDeductions.ei_premium || 0) + (taxDeductions.cpp_contribution || 0);
+      // Use CRA calculation (same as PET-EmployeeEntryModal.jsx)
+      let baseFederalTax = 0;
+      let baseProvincialTax = 0;
+      let eiPremium = 0;
+      let cppContribution = 0;
+      
+      let cpp2Contribution = 0;
+      let cppBaseContribution = 0;
+
+      if (canadianTax && canadianTax.calculateCRACompliantTaxes) {
+        // Get tax year from canadianTax hook (which loads from database) or fall back to settings.
+        // Defaults to 2026 (current CRA T4127 122nd Edition) when neither is set.
+        const effectiveTaxYear = canadianTax?.taxSettings?.tax_year || settings?.tax_year || 2026;
+
+        // Get period end date from payPeriod parameter or use current date
+        const periodEndDate = payPeriod?.pay_period_end || payPeriod?.end || new Date().toISOString().split('T')[0];
+
+        const craCalculation = canadianTax.calculateCRACompliantTaxes({
+          grossPay: grossPayWithVacation,
+          payPeriods: payPeriods,
+          claimCode: claimCode,
+          jurisdiction: jurisdiction,
+          yearToDateTotals: {
+            yearToDateGross: yearToDateGross,
+            yearToDatePensionable: yearToDateGross, // CPP2 uses pensionable; gross is the closest available proxy
+            yearToDateEI: yearToDateEI,
+            yearToDateCPP: yearToDateCPP,
+            yearToDateCPP2: yearToDate.yearToDateCPP2 || 0,
+            yearToDateFederalTax: yearToDateFederalTax,
+            yearToDateProvincialTax: yearToDateProvincialTax
+          },
+          taxYear: effectiveTaxYear,
+          periodEndDate: periodEndDate,
+          useCumulativeAveraging: true // Enable Option 2: Cumulative Averaging
+          // NOTE: extraTaxDeductions is NOT passed here - it would REDUCE tax, not add it
+          // Additional tax is added AFTER the calculation below
+        });
+
+        baseFederalTax = craCalculation.federal_tax_period || 0;
+        baseProvincialTax = craCalculation.provincial_tax_period || 0;
+        eiPremium = craCalculation.ei_premium || 0;
+        cppContribution = craCalculation.cpp_contribution || 0;          // includes base + CPP2
+        cppBaseContribution = craCalculation.cpp_base_contribution || 0; // base + first additional only
+        cpp2Contribution = craCalculation.cpp2_contribution || 0;        // second additional only
+      } else {
+        // Fallback (no CRA hook available) — uses 2026 rates as a safe default
+        baseFederalTax = Math.max(0, (grossPayWithVacation - 310) * 0.14);
+        baseProvincialTax = Math.max(0, (grossPayWithVacation - 245) * 0.0505);
+        eiPremium = Math.min(grossPayWithVacation * 0.0163, 1123.07 / 52);
+        cppContribution = Math.max(0, Math.min((grossPayWithVacation - 3500 / 52) * 0.0595, 4230.45 / 52));
+        cppBaseContribution = cppContribution;
+        cpp2Contribution = 0;
+      }
+      
+      // Add additional tax once. Callers pass the employee default when no override exists.
+      const totalAdditionalTax = parseFloat(additionalFedTaxAmount || employee.additional_tax_per_period || 0);
+      const totalFederalTax = baseFederalTax + totalAdditionalTax;
+      const totalDeductions = totalFederalTax + baseProvincialTax + eiPremium + cppContribution;
       const netPay = Math.max(0, grossPayWithVacation - totalDeductions);
 
       return {
@@ -711,22 +916,25 @@ export const usePayrollCalculations = (businessId) => {
         additional_federal_tax: additionalFedTax,
         total_federal_tax: totalFederalTax,
         provincial_tax: baseProvincialTax,
-        ontario_health_premium: ontarioHealthPremium,
-        cpp_contribution: taxDeductions.cpp_contribution || 0,
-        ei_premium: taxDeductions.ei_premium || 0,
+        ontario_health_premium: 0,
+        cpp_contribution: cppContribution,             // base + first additional + CPP2 (combined)
+        cpp_base_contribution: cppBaseContribution,    // base + first additional only
+        cpp2_contribution: cpp2Contribution,           // second additional only (T4 box 16A)
+        ei_premium: eiPremium,
         total_deductions: totalDeductions,
         net_pay: netPay,
         year_to_date: {
           gross: yearToDateGross + grossPayWithVacation,
-          cpp: yearToDateCPP + (taxDeductions.cpp_contribution || 0),
-          ei: yearToDateEI + (taxDeductions.ei_premium || 0),
+          cpp: yearToDateCPP + cppBaseContribution,
+          cpp2: (yearToDate.yearToDateCPP2 || 0) + cpp2Contribution,
+          ei: yearToDateEI + eiPremium,
           federal_tax: yearToDateFederalTax + totalFederalTax,
           provincial_tax: yearToDateProvincialTax + baseProvincialTax
         },
         wage_breakdown: wageBreakdown,
         lieu_calculation: lieuCalculation,
         has_wage_changes: hasWageChanges,
-        calculation_method: taxDeductions.calculation_method || 'cra_compliant'
+        calculation_method: 'cra_compliant'
       };
 
     } catch (error) {

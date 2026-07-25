@@ -1,6 +1,6 @@
 // screens/Mail/CampaignDetails.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import EmailPauseBanner, { blockEmailSendIfPaused } from '../../components/EmailPauseBanner';
@@ -17,10 +17,17 @@ import { usePOSAuth } from '../../hooks/usePOSAuth';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
 import toast from 'react-hot-toast';
+import CampaignScheduler from '../../components/Mail/CampaignScheduler';
+import CampaignAnalyticsDashboard from '../../components/Mail/CampaignAnalyticsDashboard';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MailModuleTabs } from '../../components/Mail/MailModuleNavigation';
+import CampaignSchedulerService from '../../helpers/Mail/CampaignSchedulerService';
+import { formatDateTimeForBusiness, getBusinessTimezone } from '../../utils/businessDateFormat';
 
 const CampaignDetails = () => {
   const { campaignId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { business } = useBusiness();
   
   // Security context for sensitive campaign data
@@ -66,8 +73,32 @@ const CampaignDetails = () => {
   const [loading, setLoading] = useState(true);
   const [logsLoading, setLogsLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('overview');
+  const [showScheduler, setShowScheduler] = useState(false);
+  useEffect(() => {
+    const searchParams = new URLSearchParams(location.search);
+    const requestedTab = searchParams.get('tab');
 
-  const businessId = business?.id;
+    if (requestedTab === 'logs' || requestedTab === 'analytics' || requestedTab === 'overview') {
+      setActiveTab(requestedTab);
+      return;
+    }
+
+    if (location.pathname.endsWith('/results')) {
+      setActiveTab('analytics');
+      return;
+    }
+
+    setActiveTab('overview');
+  }, [location.pathname, location.search]);
+
+
+  const businessId =
+    selectedBusinessId ||
+    businessData?.id ||
+    localStorage.getItem('currentBusinessId') ||
+    business?.id ||
+    localStorage.getItem('businessId');
+  const businessTimezone = getBusinessTimezone(businessData || business);
 
   // Permission checks
   const canViewCampaigns = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
@@ -75,6 +106,11 @@ const CampaignDetails = () => {
   const canSendCampaigns = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
   const canViewAnalytics = hasAnyPermission(['mail.campaigns.view', 'reports.sales.view']) || hasElevatedPrivileges();
   const canExportLogs = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+  const canOpenSender = campaign && campaign.status !== 'sending';
+  const sendButtonLabel =
+    campaign?.status === 'sent' || campaign?.status === 'failed' || campaign?.status === 'partial_failure'
+      ? 'Send Again'
+      : 'Send Campaign';
 
   // Check permissions on mount
   useEffect(() => {
@@ -113,21 +149,8 @@ const CampaignDetails = () => {
 
       if (error) {
         console.error('Error loading campaign:', error);
-        // Fallback to mock data if campaign not found
-        if (error.code === 'PGRST116') {
-          const mockCampaign = {
-            id: campaignId,
-            name: 'Sample Campaign',
-            subject_line: 'Welcome to our newsletter!',
-            status: 'draft',
-            total_recipients: 0,
-            emails_sent: 0,
-            created_at: new Date().toISOString(),
-            sent_at: null
-          };
-          setCampaign(mockCampaign);
-          await recordAction('campaign_loaded', false, campaignId);
-        }
+        setCampaign(null);
+        await recordAction('campaign_loaded', false, campaignId);
         return;
       }
       
@@ -212,13 +235,7 @@ const CampaignDetails = () => {
 
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
-    return new Date(dateString).toLocaleString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    return formatDateTimeForBusiness(dateString, businessTimezone);
   };
 
   const exportSendLogs = () => {
@@ -248,7 +265,7 @@ const CampaignDetails = () => {
           log.email_address,
           `${log.mail_contacts?.first_name || ''} ${log.mail_contacts?.last_name || ''}`.trim(),
           log.status,
-          log.sent_at ? new Date(log.sent_at).toISOString() : '',
+          log.sent_at ? formatDateTimeForBusiness(log.sent_at, businessTimezone) : '',
           log.error_message || ''
         ].join(','))
       ].join('\n');
@@ -309,6 +326,35 @@ const CampaignDetails = () => {
     navigate(`/dashboard/mail/sender/${campaignId}`);
   };
 
+  const handleOpenScheduler = () => {
+    if (!canSendCampaigns) {
+      toast.error('You do not have permission to schedule campaigns');
+      return;
+    }
+
+    if (blockEmailSendIfPaused('Campaign scheduling')) return;
+
+    setShowScheduler(true);
+  };
+
+  const handleScheduleCampaign = async (scheduleData) => {
+    if (!businessId || !campaignId) {
+      toast.error('Missing campaign details');
+      return;
+    }
+
+    const result = await CampaignSchedulerService.scheduleCampaign(campaignId, scheduleData, businessId);
+
+    if (!result.success) {
+      toast.error(result.error || 'Failed to schedule campaign');
+      return;
+    }
+
+    toast.success(result.message || 'Campaign scheduled successfully');
+    await loadCampaign();
+    await loadSendLogs();
+  };
+
   const handlePreviewCampaign = () => {
     logSecurityEvent('campaign_preview_navigation', {
       action: 'navigate_to_campaign_preview',
@@ -317,7 +363,7 @@ const CampaignDetails = () => {
       user_id: authUser?.id
     }, 'low');
 
-    navigate(`/dashboard/mail/preview/${campaignId}`);
+    navigate(`/dashboard/mail/campaigns/${campaignId}/preview`);
   };
 
   // Calculate stats
@@ -334,6 +380,9 @@ const CampaignDetails = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.loading}>
             <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
             <div>Loading campaign details...</div>
@@ -347,6 +396,9 @@ const CampaignDetails = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.error}>
             <FiAlertCircle style={styles.errorIcon} />
             <h2>Authentication Error</h2>
@@ -361,6 +413,9 @@ const CampaignDetails = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.error}>
             <FiAlertTriangle style={styles.errorIcon} />
             <h2>Campaign Not Found</h2>
@@ -384,6 +439,8 @@ const CampaignDetails = () => {
         <div style={styles.container}>
           {/* Email Pause Banner */}
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
 
           {/* Header */}
           <div style={styles.header}>
@@ -422,11 +479,22 @@ const CampaignDetails = () => {
               <PermissionGate permission="mail.campaigns.send">
                 {(campaign.status === 'draft' || campaign.status === 'ready') && (
                   <button 
+                    style={styles.editButton}
+                    onClick={handleOpenScheduler}
+                  >
+                    <FiClock style={styles.buttonIcon} />
+                    Schedule
+                  </button>
+                )}
+              </PermissionGate>
+              <PermissionGate permission="mail.campaigns.send">
+                {canOpenSender && (
+                  <button 
                     style={styles.sendButton}
                     onClick={handleSendCampaign}
                   >
                     <FiSend style={styles.buttonIcon} />
-                    Send Campaign
+                    {sendButtonLabel}
                   </button>
                 )}
               </PermissionGate>
@@ -575,41 +643,6 @@ const CampaignDetails = () => {
                   </div>
                 </div>
 
-                {/* Quick Actions */}
-                {(campaign.status === 'draft' || campaign.status === 'ready') && (
-                  <div style={styles.quickActions}>
-                    <h3 style={styles.sectionTitle}>Quick Actions</h3>
-                    <div style={styles.actionButtons}>
-                      <PermissionGate permission="mail.campaigns.create">
-                        {campaign.status === 'draft' && (
-                          <button 
-                            style={styles.actionButton}
-                            onClick={handleEditCampaign}
-                          >
-                            <FiEdit3 style={styles.buttonIcon} />
-                            Continue Editing
-                          </button>
-                        )}
-                      </PermissionGate>
-                      <button 
-                        style={styles.actionButton}
-                        onClick={handlePreviewCampaign}
-                      >
-                        <FiEye style={styles.buttonIcon} />
-                        Preview Email
-                      </button>
-                      <PermissionGate permission="mail.campaigns.send">
-                        <button 
-                          style={styles.primaryActionButton}
-                          onClick={handleSendCampaign}
-                        >
-                          <FiSend style={styles.buttonIcon} />
-                          Send Campaign
-                        </button>
-                      </PermissionGate>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
 
@@ -697,7 +730,7 @@ const CampaignDetails = () => {
             {activeTab === 'analytics' && (
               <div style={styles.analyticsContent}>
                 <PermissionGate 
-                  permissions={['mail.campaigns.view', 'reports.sales.view']} 
+                  permissions={['mail.campaigns.view', 'reports.mail.view']} 
                   requireAny
                   fallback={
                     <div style={styles.permissionDenied}>
@@ -707,17 +740,25 @@ const CampaignDetails = () => {
                     </div>
                   }
                 >
-                  <div style={styles.comingSoon}>
-                    <FiBarChart2 style={styles.comingSoonIcon} />
-                    <h3>Analytics Coming Soon</h3>
-                    <p>Email engagement analytics will be available in a future update.</p>
-                    <p>Track opens, clicks, unsubscribes, and more detailed metrics.</p>
-                  </div>
+                  <CampaignAnalyticsDashboard
+                    businessId={businessId}
+                    businessTimezone={businessTimezone}
+                    embedded={true}
+                    isOpen={true}
+                    initialCampaignId={campaignId}
+                    initialTab="overview"
+                  />
                 </PermissionGate>
               </div>
             )}
           </div>
         </div>
+        <CampaignScheduler
+          campaign={campaign}
+          isOpen={showScheduler}
+          onClose={() => setShowScheduler(false)}
+          onSchedule={handleScheduleCampaign}
+        />
       </SecurityWrapper>
     </POSAuthWrapper>
   );

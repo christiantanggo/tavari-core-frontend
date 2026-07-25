@@ -54,6 +54,16 @@ const QRCodeScanHandler = ({
       };
     }
 
+    // Try receipt-number-only QR (current POS receipt QR encodes just the receipt number)
+    // Example: "REDDC2601244597988"
+    const receiptNumberMatch = qrData.match(/^R[A-Z0-9]{4}\d{6}\d{4}\d{3}$/i);
+    if (receiptNumberMatch) {
+      return {
+        receiptNumber: qrData.toUpperCase(),
+        type: 'receipt_number'
+      };
+    }
+
     // Try Tavari transaction format
     const txnMatch = qrData.match(/^TAVARI_TXN_([a-f0-9-]+)_(\d+)$/i);
     if (txnMatch) {
@@ -80,13 +90,13 @@ const QRCodeScanHandler = ({
    * Look up transaction in database
    */
   const lookupTransaction = async (parsedQR) => {
-    if (!parsedQR?.transactionId) return null;
+    if (!parsedQR?.transactionId && !parsedQR?.receiptNumber) return null;
 
     try {
-      console.log('Looking up transaction:', parsedQR.transactionId);
+      console.log('Looking up transaction:', parsedQR.transactionId || parsedQR.receiptNumber);
 
       // Query pos_sales table for the transaction
-      const { data: saleData, error: saleError } = await supabase
+      const baseQuery = supabase
         .from('pos_sales')
         .select(`
           *,
@@ -98,9 +108,13 @@ const QRCodeScanHandler = ({
             *
           )
         `)
-        .eq('id', parsedQR.transactionId)
-        .eq('business_id', auth.selectedBusinessId)
-        .single();
+        .eq('business_id', auth.selectedBusinessId);
+
+      const query = parsedQR.receiptNumber
+        ? baseQuery.eq('sale_number', parsedQR.receiptNumber)
+        : baseQuery.eq('id', parsedQR.transactionId);
+
+      const { data: saleData, error: saleError } = await query.single();
 
       if (saleError) {
         console.error('Error looking up transaction:', saleError);

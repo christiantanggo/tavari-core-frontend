@@ -11,6 +11,20 @@ import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import PositionLabel from '../PositionLabel';
+
+async function resolveOperatorPublicUserId(authUser) {
+  const email = (authUser?.email || '').trim().toLowerCase();
+  if (email) {
+    const { data } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+    if (data?.id) return data.id;
+  }
+  if (authUser?.id) {
+    const { data } = await supabase.from('users').select('id').eq('id', authUser.id).maybeSingle();
+    if (data?.id) return data.id;
+  }
+  return authUser?.id || null;
+}
 
 const EmployeePremiumAssignmentModal = ({
   isOpen,
@@ -21,7 +35,6 @@ const EmployeePremiumAssignmentModal = ({
 }) => {
   // Security context for sensitive premium data
   const {
-    validateInput,
     checkRateLimit,
     recordAction,
     logSecurityEvent
@@ -36,8 +49,7 @@ const EmployeePremiumAssignmentModal = ({
   // Authentication
   const {
     selectedBusinessId,
-    authUser,
-    userRole
+    authUser
   } = usePOSAuth({
     requiredRoles: ['owner', 'manager', 'admin'],
     requireBusiness: true,
@@ -52,6 +64,7 @@ const EmployeePremiumAssignmentModal = ({
   const [selectedPremiumId, setSelectedPremiumId] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [actingPremiumId, setActingPremiumId] = useState(null);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
@@ -88,7 +101,7 @@ const EmployeePremiumAssignmentModal = ({
         .select('*')
         .eq('business_id', selectedBusinessId)
         .eq('user_id', employee.id)
-        .eq('is_active', true)
+        .or('is_active.eq.true,approval_status.eq.pending')
         .order('created_at', { ascending: false });
 
       if (premiumError) throw premiumError;
@@ -184,6 +197,131 @@ const EmployeePremiumAssignmentModal = ({
     }
   };
 
+  const handleViewLinkedCertificate = async (premiumAssignment) => {
+    const certId = premiumAssignment?.employee_certificate_id;
+    if (!certId) {
+      setError('No certificate file is linked to this premium.');
+      return;
+    }
+
+    try {
+      setActingPremiumId(premiumAssignment.id);
+      const { data: cert, error: certError } = await supabase
+        .from('employee_certificates')
+        .select('id, certificate_file_url')
+        .eq('id', certId)
+        .eq('business_id', selectedBusinessId)
+        .maybeSingle();
+
+      if (certError) throw certError;
+      if (!cert?.certificate_file_url) {
+        setError('No uploaded file found for this certificate.');
+        return;
+      }
+
+      const { data, error: signedError } = await supabase.storage
+        .from('employee-certificates')
+        .createSignedUrl(cert.certificate_file_url, 3600);
+
+      if (signedError) throw signedError;
+      window.open(data.signedUrl, '_blank');
+    } catch (err) {
+      console.error('Error viewing linked certificate:', err);
+      setError('Failed to open certificate: ' + (err.message || 'Unknown error'));
+    } finally {
+      setActingPremiumId(null);
+    }
+  };
+
+  const handleDecidePendingPremium = async (premiumAssignment, decision) => {
+    if (!premiumAssignment?.id || premiumAssignment.approval_status !== 'pending') return;
+
+    const label = decision === 'approve' ? 'approve' : 'reject';
+    if (decision === 'reject' && !confirm(`Reject ${premiumAssignment.premium_name} for ${employee.full_name}?`)) {
+      return;
+    }
+
+    const rateLimitCheck = await checkRateLimit(`${label}_premium`);
+    if (!rateLimitCheck.allowed) {
+      setError('Rate limit exceeded. Please wait before trying again.');
+      return;
+    }
+
+    try {
+      setActingPremiumId(premiumAssignment.id);
+      setError(null);
+
+      const operatorId = await resolveOperatorPublicUserId(authUser);
+      const now = new Date().toISOString();
+      const updatePayload = decision === 'approve'
+        ? {
+            approval_status: 'approved',
+            is_active: true,
+            approved_by: operatorId,
+            approved_at: now,
+            rejected_by: null,
+            rejected_at: null,
+            rejection_reason: null,
+            updated_at: now,
+          }
+        : {
+            approval_status: 'rejected',
+            is_active: false,
+            rejected_by: operatorId,
+            rejected_at: now,
+            updated_at: now,
+          };
+
+      const { error: updateError } = await supabase
+        .from('hrpayroll_employee_premiums')
+        .update(updatePayload)
+        .eq('id', premiumAssignment.id)
+        .eq('business_id', selectedBusinessId)
+        .eq('approval_status', 'pending');
+
+      if (updateError) throw updateError;
+
+      // Invalidate any outstanding email action tokens for this assignment (best-effort; table may be service-role only)
+      try {
+        await supabase
+          .from('shift_premium_approval_action_tokens')
+          .update({ used_at: now })
+          .eq('premium_assignment_id', premiumAssignment.id)
+          .is('used_at', null);
+      } catch (_) {
+        /* ignore */
+      }
+
+      if (decision === 'approve') {
+        setCurrentPremiums((prev) =>
+          prev.map((p) =>
+            p.id === premiumAssignment.id
+              ? { ...p, ...updatePayload }
+              : p
+          )
+        );
+        setSuccess(`${premiumAssignment.premium_name} approved and activated`);
+      } else {
+        setCurrentPremiums((prev) => prev.filter((p) => p.id !== premiumAssignment.id));
+        setSuccess(`${premiumAssignment.premium_name} rejected`);
+      }
+
+      await recordAction(`${label}_employee_premium`, employee.id, true);
+      await logSecurityEvent(`premium_${label}`, {
+        employee_id: employee.id,
+        premium_id: premiumAssignment.id,
+        premium_name: premiumAssignment.premium_name,
+      }, 'medium');
+
+      if (onPremiumsUpdated) onPremiumsUpdated();
+    } catch (err) {
+      console.error(`Error ${label}ing premium:`, err);
+      setError(`Failed to ${label} premium: ` + (err.message || 'Unknown error'));
+    } finally {
+      setActingPremiumId(null);
+    }
+  };
+
   const handleRemovePremium = async (premiumAssignment) => {
     if (!confirm(`Remove ${premiumAssignment.premium_name} premium from ${employee.full_name}?`)) {
       return;
@@ -276,31 +414,13 @@ const EmployeePremiumAssignmentModal = ({
     closeButton: {
       background: 'none',
       border: 'none',
-      color: TavariStyles.colors.gray500,
       cursor: 'pointer',
-      padding: TavariStyles.spacing.sm
+      color: TavariStyles.colors.gray500,
+      padding: TavariStyles.spacing.xs
     },
-    body: {
+    content: {
       ...TavariStyles.components.modal?.body,
-      maxHeight: '400px',
       overflowY: 'auto'
-    },
-    employeeInfo: {
-      padding: TavariStyles.spacing.lg,
-      backgroundColor: TavariStyles.colors.gray50,
-      borderRadius: TavariStyles.borderRadius?.md || '6px',
-      marginBottom: TavariStyles.spacing.xl,
-      border: `1px solid ${TavariStyles.colors.gray200}`
-    },
-    employeeName: {
-      fontSize: TavariStyles.typography.fontSize.lg,
-      fontWeight: TavariStyles.typography.fontWeight.semibold,
-      color: TavariStyles.colors.gray800,
-      marginBottom: TavariStyles.spacing.xs
-    },
-    employeeDetails: {
-      fontSize: TavariStyles.typography.fontSize.sm,
-      color: TavariStyles.colors.gray600
     },
     section: {
       marginBottom: TavariStyles.spacing.xl
@@ -318,11 +438,7 @@ const EmployeePremiumAssignmentModal = ({
       display: 'flex',
       gap: TavariStyles.spacing.md,
       alignItems: 'flex-end',
-      marginBottom: TavariStyles.spacing.lg,
-      padding: TavariStyles.spacing.lg,
-      backgroundColor: TavariStyles.colors.gray50,
-      borderRadius: TavariStyles.borderRadius?.md || '6px',
-      border: `1px solid ${TavariStyles.colors.gray200}`
+      marginBottom: TavariStyles.spacing.lg
     },
     selectGroup: {
       flex: 1
@@ -356,10 +472,13 @@ const EmployeePremiumAssignmentModal = ({
       backgroundColor: TavariStyles.colors.white,
       borderRadius: TavariStyles.borderRadius?.md || '6px',
       border: `1px solid ${TavariStyles.colors.gray200}`,
-      boxShadow: TavariStyles.shadows?.sm || '0 1px 3px rgba(0,0,0,0.1)'
+      boxShadow: TavariStyles.shadows?.sm || '0 1px 3px rgba(0,0,0,0.1)',
+      gap: TavariStyles.spacing.md,
+      flexWrap: 'wrap'
     },
     premiumInfo: {
-      flex: 1
+      flex: 1,
+      minWidth: '180px'
     },
     premiumName: {
       fontSize: TavariStyles.typography.fontSize.md,
@@ -374,8 +493,35 @@ const EmployeePremiumAssignmentModal = ({
     premiumRate: {
       fontSize: TavariStyles.typography.fontSize.lg,
       fontWeight: TavariStyles.typography.fontWeight.bold,
-      color: TavariStyles.colors.success,
-      marginRight: TavariStyles.spacing.lg
+      color: TavariStyles.colors.success
+    },
+    actionRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      flexWrap: 'wrap'
+    },
+    approveButton: {
+      ...TavariStyles.components.button?.base,
+      backgroundColor: TavariStyles.colors.successBg || '#dcfce7',
+      color: TavariStyles.colors.success || '#15803d',
+      border: `1px solid ${TavariStyles.colors.success || '#15803d'}50`,
+      padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.md}`,
+      display: 'flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.xs,
+      cursor: 'pointer'
+    },
+    rejectButton: {
+      ...TavariStyles.components.button?.base,
+      backgroundColor: TavariStyles.colors.errorBg,
+      color: TavariStyles.colors.danger,
+      border: `1px solid ${TavariStyles.colors.danger}50`,
+      padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.md}`,
+      display: 'flex',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.xs,
+      cursor: 'pointer'
     },
     removeButton: {
       ...TavariStyles.components.button?.base,
@@ -434,46 +580,30 @@ const EmployeePremiumAssignmentModal = ({
         <div style={styles.header}>
           <h3 style={styles.title}>
             <DollarSign size={24} />
-            Manage Premium Assignments
+            Manage Premiums — {employee?.full_name}
           </h3>
-          <button onClick={onClose} style={styles.closeButton}>
+          <button onClick={onClose} style={styles.closeButton} title="Close">
             <X size={24} />
           </button>
         </div>
 
-        <div style={styles.body}>
-          {/* Employee Info */}
-          <div style={styles.employeeInfo}>
-            <div style={styles.employeeName}>{employee?.full_name}</div>
-            <div style={styles.employeeDetails}>
-              {employee?.position && `${employee.position} • `}
-              {employee?.department && `${employee.department} • `}
-              Employee #{employee?.employee_number}
-            </div>
-          </div>
-
-          {/* Messages */}
+        <div style={styles.content}>
           {error && (
-            <div style={{...styles.message, ...styles.errorMessage}}>
-              <AlertTriangle size={20} />
+            <div style={{ ...styles.message, ...styles.errorMessage }}>
+              <AlertTriangle size={16} />
               {error}
             </div>
           )}
-
           {success && (
-            <div style={{...styles.message, ...styles.successMessage}}>
-              <Check size={20} />
+            <div style={{ ...styles.message, ...styles.successMessage }}>
+              <Check size={16} />
               {success}
             </div>
           )}
 
-          {/* Add New Premium */}
+          {/* Add Premium */}
           <div style={styles.section}>
-            <h4 style={styles.sectionTitle}>
-              <Plus size={20} />
-              Assign New Premium
-            </h4>
-            
+            <h4 style={styles.sectionTitle}>Assign New Premium</h4>
             <div style={styles.addSection}>
               <div style={styles.selectGroup}>
                 <label style={styles.label}>Select Premium</label>
@@ -481,19 +611,17 @@ const EmployeePremiumAssignmentModal = ({
                   value={selectedPremiumId}
                   onChange={(e) => setSelectedPremiumId(e.target.value)}
                   style={styles.select}
-                  disabled={saving}
+                  disabled={saving || getAvailablePremiums().length === 0}
                 >
                   <option value="">Choose a premium...</option>
-                  {getAvailablePremiums().map(premium => (
+                  {getAvailablePremiums().map((premium) => (
                     <option key={premium.id} value={premium.id}>
-                      {premium.name} - ${formatTaxAmount(premium.rate)}
-                      {premium.rate_type === 'percentage' ? '%' : ''}
-                      {premium.applies_to !== 'all_hours' && ` (${premium.applies_to})`}
+                      {premium.name} (+${formatTaxAmount(premium.rate)})
+                      {premium.applies_to === 'all_hours' ? ' — all hours' : ' — specific hours'}
                     </option>
                   ))}
                 </select>
               </div>
-              
               <button
                 onClick={handleAddPremium}
                 disabled={!selectedPremiumId || saving}
@@ -535,14 +663,32 @@ const EmployeePremiumAssignmentModal = ({
               </div>
             ) : (
               <div style={styles.premiumsList}>
-                {currentPremiums.map((premium) => (
+                {currentPremiums.map((premium) => {
+                  const isPending = premium.approval_status === 'pending';
+                  const isActing = actingPremiumId === premium.id;
+                  return (
                   <div key={premium.id} style={styles.premiumItem}>
                     <div style={styles.premiumInfo}>
-                      <div style={styles.premiumName}>{premium.premium_name}</div>
+                      <div style={styles.premiumName}>
+                        {premium.premium_name}
+                        {isPending && (
+                          <span style={{
+                            marginLeft: '8px',
+                            fontSize: '9px',
+                            fontWeight: 700,
+                            color: '#b45309',
+                            background: '#fef3c7',
+                            padding: '2px 8px',
+                            borderRadius: '999px',
+                          }}>
+                            Pending approval
+                          </span>
+                        )}
+                      </div>
                       <div style={styles.premiumDetails}>
                         {premium.applies_to_all_hours ? 'Applies to all hours' : 'Applies to specific hours'}
                         {' • '}
-                        Assigned {new Date(premium.created_at).toLocaleDateString()}
+                        {isPending ? 'Awaiting manager approval' : `Assigned ${new Date(premium.created_at).toLocaleDateString()}`}
                       </div>
                     </div>
                     
@@ -550,21 +696,74 @@ const EmployeePremiumAssignmentModal = ({
                       +${formatTaxAmount(premium.premium_rate)}
                     </div>
                     
-                    <button
-                      onClick={() => handleRemovePremium(premium)}
-                      disabled={saving}
-                      style={{
-                        ...styles.removeButton,
-                        opacity: saving ? 0.6 : 1,
-                        cursor: saving ? 'not-allowed' : 'pointer'
-                      }}
-                      title="Remove premium"
-                    >
-                      <Trash2 size={16} />
-                      Remove
-                    </button>
+                    <div style={styles.actionRow}>
+                      {isPending ? (
+                        <>
+                          {premium.employee_certificate_id && (
+                            <button
+                              type="button"
+                              onClick={() => handleViewLinkedCertificate(premium)}
+                              disabled={!!actingPremiumId || saving}
+                              style={{
+                                ...styles.approveButton,
+                                backgroundColor: '#e0f2fe',
+                                color: '#0369a1',
+                                border: '1px solid #7dd3fc',
+                                opacity: (actingPremiumId || saving) ? 0.6 : 1,
+                                cursor: (actingPremiumId || saving) ? 'not-allowed' : 'pointer'
+                              }}
+                              title="View uploaded certificate"
+                            >
+                              View certificate
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleDecidePendingPremium(premium, 'approve')}
+                            disabled={!!actingPremiumId || saving}
+                            style={{
+                              ...styles.approveButton,
+                              opacity: (actingPremiumId || saving) ? 0.6 : 1,
+                              cursor: (actingPremiumId || saving) ? 'not-allowed' : 'pointer'
+                            }}
+                            title="Approve premium"
+                          >
+                            <Check size={16} />
+                            {isActing ? 'Saving…' : 'Approve'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDecidePendingPremium(premium, 'reject')}
+                            disabled={!!actingPremiumId || saving}
+                            style={{
+                              ...styles.rejectButton,
+                              opacity: (actingPremiumId || saving) ? 0.6 : 1,
+                              cursor: (actingPremiumId || saving) ? 'not-allowed' : 'pointer'
+                            }}
+                            title="Reject premium"
+                          >
+                            <X size={16} />
+                            Reject
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => handleRemovePremium(premium)}
+                          disabled={saving || !!actingPremiumId}
+                          style={{
+                            ...styles.removeButton,
+                            opacity: (saving || actingPremiumId) ? 0.6 : 1,
+                            cursor: (saving || actingPremiumId) ? 'not-allowed' : 'pointer'
+                          }}
+                          title="Remove premium"
+                        >
+                          <Trash2 size={16} />
+                          Remove
+                        </button>
+                      )}
+                    </div>
                   </div>
-                ))}
+                );})}
               </div>
             )}
           </div>

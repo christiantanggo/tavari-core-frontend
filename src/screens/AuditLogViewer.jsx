@@ -10,6 +10,7 @@ import { SecurityWrapper, useSecurityContext } from '../Security';
 import PermissionGate from '../components/Auth/PermissionGate';
 import { Download } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { formatDateShort, formatTimeForBusiness, getBusinessTimezone } from '../utils/businessDateFormat';
 
 const AuditLogViewer = () => {
   const [logs, setLogs] = useState([]);
@@ -47,6 +48,7 @@ const AuditLogViewer = () => {
     requireBusiness: true,
     componentName: 'AuditLogViewer'
   });
+  const businessTimezone = getBusinessTimezone(auth.businessData || business);
 
   // Permission system
   const { 
@@ -321,8 +323,8 @@ const AuditLogViewer = () => {
       }
 
       return [
-        date.toLocaleDateString('en-CA'),
-        date.toLocaleTimeString('en-CA', { hour12: false }),
+        formatDateShort(date, businessTimezone),
+        formatTimeForBusiness(date, businessTimezone, { hour12: false }),
         log.event_type || '',
         userEmail,
         log.user_id || '',
@@ -710,10 +712,10 @@ const AuditLogViewer = () => {
                     onClick={() => setExpandedRow(isExpanded ? null : log.id)}
                   >
                     <td style={styles.dateCell}>
-                      {new Date(log.created_at).toLocaleDateString('en-CA')}
+                      {formatDateShort(log.created_at, businessTimezone)}
                       <br />
                       <span style={{ color: TavariStyles.colors.gray500 }}>
-                        {new Date(log.created_at).toLocaleTimeString('en-CA', { 
+                        {formatTimeForBusiness(log.created_at, businessTimezone, { 
                           hour12: false, 
                           hour: '2-digit', 
                           minute: '2-digit' 

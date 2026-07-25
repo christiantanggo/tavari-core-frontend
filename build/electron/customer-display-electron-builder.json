@@ -1,0 +1,29 @@
+{
+  "appId": "com.tavari.customer-display",
+  "productName": "Tavari Customer Display",
+  "extraMetadata": {
+    "main": "build/electron/customer-display-main.cjs"
+  },
+  "directories": {
+    "output": "dist",
+    "buildResources": "build"
+  },
+  "files": ["build/electron/**/*", "package.json"],
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "signingHashAlgorithms": [],
+    "signDlls": false,
+    "verifyUpdateCodeSignature": false
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "allowElevation": true,
+    "createDesktopShortcut": "always",
+    "createStartMenuShortcut": true,
+    "shortcutName": "Tavari Customer Display",
+    "runAfterFinish": true,
+    "artifactName": "Tavari-Customer-Display-Setup-${version}.exe",
+    "uninstallDisplayName": "Tavari Customer Display"
+  }
+}

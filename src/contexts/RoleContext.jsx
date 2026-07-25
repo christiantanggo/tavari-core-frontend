@@ -6,40 +6,63 @@ import { useBusinessContext } from './BusinessContext';
 const RoleContext = createContext();
 
 export const RoleProvider = ({ children }) => {
-  const { user } = useUser();
+  const { session } = useUser();
   const [roleInfo, setRoleInfo] = useState(null);
   const [loading, setLoading] = useState(true);
-const { selectedBusinessId } = useBusinessContext();
-
-  const fetchRole = async () => {
-    if (!user) return;
-
-    try {
-      const { data, error } = await supabase
-        .from('user_roles')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('business_id', selectedBusinessId)
-        .eq('active', true)
-        .maybeSingle();
-
-      if (error) {
-        console.error('Error fetching role info:', error);
-        setRoleInfo(null);
-      } else {
-        setRoleInfo(data);
-      }
-    } catch (err) {
-      console.error('Unexpected error fetching role info:', err);
-      setRoleInfo(null);
-    }
-
-    setLoading(false);
-  };
+  const { selectedBusinessId } = useBusinessContext();
+  const userId = session?.user?.id ?? null;
 
   useEffect(() => {
+    let isMounted = true;
+
+    const fetchRole = async () => {
+      if (!userId || !selectedBusinessId) {
+        if (isMounted) {
+          setRoleInfo(null);
+          setLoading(false);
+        }
+        return;
+      }
+
+      if (isMounted) {
+        setLoading(true);
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from('user_roles')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('business_id', selectedBusinessId)
+          .eq('active', true)
+          .maybeSingle();
+
+        if (!isMounted) return;
+
+        if (error) {
+          console.error('Error fetching role info:', error);
+          setRoleInfo(null);
+        } else {
+          setRoleInfo(data);
+        }
+      } catch (err) {
+        console.error('Unexpected error fetching role info:', err);
+        if (isMounted) {
+          setRoleInfo(null);
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
     fetchRole();
-  }, [user, selectedBusinessId]);
+
+    return () => {
+      isMounted = false;
+    };
+  }, [userId, selectedBusinessId]);
 
   return (
     <RoleContext.Provider value={{ roleInfo, loading }}>

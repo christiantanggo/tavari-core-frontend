@@ -1,0 +1,25 @@
+-- =============================================================================
+-- DO NOT CREATE POLICIES ON storage.objects FROM THIS FILE
+-- =============================================================================
+--
+-- Running CREATE POLICY / COMMENT ON ... ON storage.objects in the Dashboard or
+-- most SQL clients fails with:
+--   ERROR: 42501: must be owner of relation objects
+--
+-- Waiver kiosk ad images are handled by the Edge Function:
+--   supabase/functions/waiver-kiosk-ad-urls
+--
+-- Deploy:  npx supabase functions deploy waiver-kiosk-ad-urls
+--
+-- The React flow (PublicWaiverFlow) and legacy kiosk (public/waiver-browser-kiosk/app.es5.js)
+-- call that function; it uses the service role to sign URLs. No storage RLS policy is required.
+--
+-- If you ever need anon storage access for another feature, open a Supabase support ticket or
+-- use the Dashboard Storage UI (if your plan exposes policy creation there)—do not paste
+-- storage.objects DDL from this repo unless Supabase confirms your role can own that change.
+--
+-- =============================================================================
+-- (Intentionally no executable SQL below — safe to run this file; it does nothing.)
+-- =============================================================================
+
+SELECT 1 AS waiver_kiosk_ads_use_edge_function_waiver_kiosk_ad_urls;

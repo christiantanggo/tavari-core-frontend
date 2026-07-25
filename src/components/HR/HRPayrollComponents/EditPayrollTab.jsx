@@ -9,6 +9,8 @@ import { useCanadianTaxCalculations } from '../../../hooks/useCanadianTaxCalcula
 import { usePayrollCalculations } from '../../../hooks/usePayrollCalculations';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import { deletePayrollRunWithRefunds } from '../../../helpers/Payroll/deletePayrollRun';
+import { syncUsersLieuBalanceFromLedger } from '../../../helpers/Payroll/lieuTimeLedger';
 
 const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
   const [payrollRuns, setPayrollRuns] = useState([]);
@@ -23,6 +25,7 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
   const [validationErrors, setValidationErrors] = useState({});
   const [editedEmployees, setEditedEmployees] = useState(new Set());
   const [deletingRun, setDeletingRun] = useState(false);
+  const [deletingEntryId, setDeletingEntryId] = useState(null);
 
   // Security context
   const {
@@ -80,6 +83,7 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
 
       return new Date(value).toLocaleString('en-CA', {
         timeZone: tz,
+        weekday: 'short',
         year: 'numeric',
         month: 'short',
         day: 'numeric'
@@ -315,12 +319,13 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
     const grossPay = regularPay + overtimePay + lieuPay + premiumPay;
     const vacationPay = grossPay * 0.04; // 4% vacation pay
 
-    // Simplified tax calculations for display
+    // Simplified tax calculations for display only (real tax uses useCanadianTaxCalculations).
+    // Updated for CRA 2026 (T4127 122nd Edition).
     const totalIncome = grossPay + vacationPay;
-    const federalTax = totalIncome * 0.15; // Simplified
-    const provincialTax = totalIncome * 0.10; // Simplified
-    const eiDeduction = Math.min(totalIncome * 0.0163, 1002.45); // 2024 max
-    const cppDeduction = Math.min(Math.max(totalIncome - 3500, 0) * 0.0595, 3754.45); // 2024 max
+    const federalTax = totalIncome * 0.14; // 2026 lowest federal bracket
+    const provincialTax = totalIncome * 0.0505; // ON 2026 lowest bracket
+    const eiDeduction = Math.min(totalIncome * 0.0163, 1123.07); // 2026 EI rate, max $1,123.07
+    const cppDeduction = Math.min(Math.max(totalIncome - 3500, 0) * 0.0595, 4230.45); // 2026 CPP, max $4,230.45 (employee)
 
     const totalDeductions = federalTax + provincialTax + eiDeduction + cppDeduction;
     const netPay = totalIncome - totalDeductions;
@@ -404,6 +409,7 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
         const { error: updateError } = await supabase
           .from('hrpayroll_entries')
           .update({
+            business_id: effectiveBusinessId,
             regular_hours: hours.regular_hours,
             overtime_hours: hours.overtime_hours,
             lieu_hours: hours.lieu_hours,
@@ -453,6 +459,98 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
     }
   };
 
+  const handleDeleteEntry = useCallback(async (entry) => {
+    if (!entry || deletingEntryId) return;
+
+    const employeeName = entry.employee?.full_name || 'this employee';
+    const runLabel = selectedRun
+      ? `${formatDateForBusiness(selectedRun.period_start)} to ${formatDateForBusiness(selectedRun.period_end)}`
+      : 'this run';
+
+    const confirmed = window.confirm(
+      `Remove ${employeeName} from the payroll run for ${runLabel}?\n\n` +
+      'Their payroll entry and any lieu time accruals for this period will be permanently deleted. ' +
+      'This cannot be undone.'
+    );
+    if (!confirmed) return;
+
+    setDeletingEntryId(entry.id);
+    setSaveMessage('');
+
+    try {
+      await logSecurityEvent('payroll_entry_delete_attempt', {
+        business_id: effectiveBusinessId,
+        payroll_run_id: selectedRun?.id,
+        entry_id: entry.id,
+        user_id: entry.user_id
+      }, 'high');
+
+      // Delete the payroll entry first, then re-sync lieu from the ledger.
+      const { error: entryError } = await supabase
+        .from('hrpayroll_entries')
+        .delete()
+        .eq('id', entry.id);
+
+      if (entryError) throw entryError;
+
+      try {
+        await supabase
+          .from('hrpayroll_lieu_time_transactions')
+          .delete()
+          .eq('payroll_run_id', selectedRun?.id)
+          .eq('user_id', entry.user_id);
+      } catch (_) {
+        // Table may not exist; not fatal
+      }
+
+      await syncUsersLieuBalanceFromLedger(supabase, effectiveBusinessId, [entry.user_id]);
+
+      await logSecurityEvent('payroll_entry_deleted', {
+        business_id: effectiveBusinessId,
+        payroll_run_id: selectedRun?.id,
+        entry_id: entry.id,
+        user_id: entry.user_id,
+        deleted_by: authUser?.id
+      }, 'high');
+
+      await recordAction({
+        action: 'delete_payroll_entry',
+        details: {
+          payroll_run_id: selectedRun?.id,
+          entry_id: entry.id,
+          user_id: entry.user_id,
+          employee_name: employeeName
+        }
+      });
+
+      // Remove from local state
+      setPayrollEntries(prev => prev.filter(e => e.id !== entry.id));
+      setEmployeeHours(prev => { const n = { ...prev }; delete n[entry.user_id]; return n; });
+      setEmployeePremiums(prev => { const n = { ...prev }; delete n[entry.user_id]; return n; });
+      setEditedEmployees(prev => { const n = new Set(prev); n.delete(entry.user_id); return n; });
+
+      setSaveMessage(`${employeeName} has been removed from this payroll run.`);
+    } catch (error) {
+      console.error('Error deleting payroll entry:', error);
+      setSaveMessage(`Error removing employee: ${error.message || 'Unknown error'}`);
+      await logSecurityEvent('payroll_entry_delete_error', {
+        business_id: effectiveBusinessId,
+        entry_id: entry.id,
+        error: error.message
+      }, 'high').catch(() => {});
+    } finally {
+      setDeletingEntryId(null);
+    }
+  }, [
+    deletingEntryId,
+    selectedRun,
+    effectiveBusinessId,
+    authUser?.id,
+    formatDateForBusiness,
+    logSecurityEvent,
+    recordAction
+  ]);
+
   const handleDeleteRun = useCallback(async () => {
     if (!selectedRun || deletingRun) {
       return;
@@ -484,123 +582,19 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
     setSaveMessage('');
 
     try {
-      await logSecurityEvent('payroll_run_delete_attempt', {
-        business_id: effectiveBusinessId,
-        payroll_run_id: selectedRun.id,
-        entries: entryCount
-      }, 'high');
-
-      // Reverse lieu time usage/earn accruals applied by this payroll run
-      const lieuAdjustments = payrollEntries.reduce((acc, entry) => {
-        if (!entry?.user_id) {
-          return acc;
-        }
-
-        const userId = entry.user_id;
-        if (!acc[userId]) {
-          acc[userId] = { used: 0, earned: 0 };
-        }
-
-        acc[userId].used += parseFloat(entry.lieu_hours) || 0;
-        acc[userId].earned += parseFloat(entry.lieu_earned) || 0;
-        return acc;
-      }, {});
-
-      if (Object.keys(lieuAdjustments).length > 0) {
-        const userIds = Object.keys(lieuAdjustments);
-        const { data: userBalances, error: balancesError } = await supabase
-          .from('users')
-          .select('id, lieu_time_balance')
-          .in('id', userIds);
-
-        if (balancesError) {
-          throw balancesError;
-        }
-
-        const nowIso = new Date().toISOString();
-        await Promise.all(
-          (userBalances || []).map(async (user) => {
-            const adjustments = lieuAdjustments[user.id];
-            if (!adjustments) return;
-
-            const currentBalance = parseFloat(user.lieu_time_balance) || 0;
-            const restoredBalance = currentBalance + adjustments.used - adjustments.earned;
-
-            const { error: balanceUpdateError } = await supabase
-              .from('users')
-              .update({
-                lieu_time_balance: restoredBalance,
-                updated_at: nowIso
-              })
-              .eq('id', user.id);
-
-            if (balanceUpdateError) {
-              throw balanceUpdateError;
-            }
-          })
-        );
-
-        try {
-          await logSecurityEvent('lieu_time_reverted_from_payroll_delete', {
-            business_id: effectiveBusinessId,
-            payroll_run_id: selectedRun.id,
-            adjustments_applied: lieuAdjustments
-          }, 'high');
-        } catch (lieuLogError) {
-          console.warn('Failed to log lieu time reversal audit event:', lieuLogError);
-        }
-      }
-
-      const { error: entriesError } = await supabase
-        .from('hrpayroll_entries')
-        .delete()
-        .eq('payroll_run_id', selectedRun.id);
-
-      if (entriesError) {
-        throw entriesError;
-      }
-
-      try {
-        const { error: lieuTransactionError } = await supabase
-          .from('hrpayroll_lieu_time_transactions')
-          .delete()
-          .eq('payroll_run_id', selectedRun.id);
-
-        if (lieuTransactionError && lieuTransactionError.code !== '42P01') {
-          throw lieuTransactionError;
-        }
-      } catch (lieuError) {
-        if (lieuError?.code === '42P01') {
-          console.warn('Lieu time transactions table not available; skipping cleanup.');
-        } else {
-          throw lieuError;
-        }
-      }
-
-      const { error: runError } = await supabase
-        .from('hrpayroll_runs')
-        .delete()
-        .eq('id', selectedRun.id);
-
-      if (runError) {
-        throw runError;
-      }
-
-      await logSecurityEvent('payroll_run_deleted', {
-        business_id: effectiveBusinessId,
-        payroll_run_id: selectedRun.id,
-        deleted_by: authUser?.id,
-        entries_deleted: entryCount
-      }, 'critical');
-
-      await recordAction({
-        action: 'delete_payroll_run',
-        details: {
-          payroll_run_id: selectedRun.id,
-          period_start: selectedRun.period_start,
-          period_end: selectedRun.period_end,
-          entries_deleted: entryCount
-        }
+      await deletePayrollRunWithRefunds({
+        supabase,
+        run: {
+          id: selectedRun.id,
+          business_id: effectiveBusinessId,
+          pay_period_start: selectedRun.period_start || selectedRun.pay_period_start,
+          pay_period_end: selectedRun.period_end || selectedRun.pay_period_end,
+          status: selectedRun.status || 'finalized',
+        },
+        payrollEntries,
+        authUser,
+        logSecurityEvent,
+        recordAction
       });
 
       setSaveMessage(`Payroll run for ${runLabel} deleted successfully.`);
@@ -614,28 +608,6 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
     } catch (error) {
       console.error('Error deleting payroll run:', error);
       setSaveMessage(`Error deleting payroll run: ${error.message || 'Unknown error'}`);
-
-      try {
-        await logSecurityEvent('payroll_run_delete_error', {
-          business_id: effectiveBusinessId,
-          payroll_run_id: selectedRun?.id,
-          error: error.message
-        }, 'critical');
-      } catch (logError) {
-        console.warn('Failed to log payroll_run_delete_error:', logError);
-      }
-
-      try {
-        await recordAction({
-          action: 'delete_payroll_run_failed',
-          details: {
-            payroll_run_id: selectedRun?.id,
-            error: error.message
-          }
-        });
-      } catch (recordError) {
-        console.warn('Failed to record delete payroll run failure action:', recordError);
-      }
     } finally {
       setDeletingRun(false);
     }
@@ -927,6 +899,7 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
                       <th style={styles.th}>EI</th>
                       <th style={styles.th}>CPP</th>
                       <th style={styles.th}>Net Pay</th>
+                      <th style={{ ...styles.th, backgroundColor: '#C53030' }}>Remove</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -948,7 +921,7 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
                               {employeeName}
                               {isEdited && <span style={styles.editBadge}>EDITED</span>}
                             </div>
-                            <div style={{ fontSize: '12px', color: '#666' }}>
+                            <div style={{ fontSize: '12px', color: '#333' }}>
                               ${entry.employee?.wage || '15.00'}/hr
                             </div>
                           </td>
@@ -1030,6 +1003,26 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
                               ${displayValues.net_pay.toFixed(2)}
                             </div>
                           </td>
+                          <td style={styles.td}>
+                            <button
+                              onClick={() => handleDeleteEntry(entry)}
+                              disabled={!!deletingEntryId || saving}
+                              style={{
+                                padding: '6px 12px',
+                                backgroundColor: deletingEntryId === entry.id ? '#FC8181' : '#E53E3E',
+                                color: '#fff',
+                                border: 'none',
+                                borderRadius: '4px',
+                                fontSize: '14px',
+                                fontWeight: 'bold',
+                                cursor: (deletingEntryId || saving) ? 'not-allowed' : 'pointer',
+                                opacity: (deletingEntryId && deletingEntryId !== entry.id) ? 0.5 : 1,
+                                whiteSpace: 'nowrap'
+                              }}
+                            >
+                              {deletingEntryId === entry.id ? 'Removing...' : 'Remove'}
+                            </button>
+                          </td>
                         </tr>
                       );
                     })}
@@ -1048,7 +1041,7 @@ const EditPayrollTab = ({ selectedBusinessId, businessData }) => {
                 >
                   {saving ? 'Saving Changes...' : `Save Payroll Edits (${editedEmployees.size} edited)`}
                 </button>
-                <div style={{ marginTop: '8px', fontSize: '14px', color: '#666' }}>
+                <div style={{ marginTop: '8px', fontSize: '11px', color: '#333' }}>
                   Estimated values shown for edited employees. Accurate calculations will be saved to database.
                 </div>
               </div>

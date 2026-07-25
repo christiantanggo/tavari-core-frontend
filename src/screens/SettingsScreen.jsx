@@ -26,6 +26,8 @@ import HolidayHoursTab from '../components/Settings/HolidayHoursTab';
 import RoleManagementTab from '../components/Settings/RoleManagementTab';
 import ColorsTab from '../components/Settings/ColorsTab';
 import SchedulingSettingsTab from '../components/Settings/SchedulingSettingsTab';
+import KioskLinksTab from '../components/Settings/KioskLinksTab';
+import TavariModuleHeader from '../components/UI/TavariModuleHeader';
 
 // Success Modal Component
 const SuccessModal = ({ isOpen, onClose }) => {
@@ -566,7 +568,11 @@ const SettingsScreen = () => {
       toast.success(`${assetType} uploaded successfully`);
     } catch (error) {
       console.error(`Error uploading ${assetType}:`, error);
-      toast.error(`Failed to upload ${assetType}`);
+      const msg =
+        typeof error?.message === 'string' && error.message.trim()
+          ? error.message.trim()
+          : `Failed to upload ${assetType}`;
+      toast.error(msg);
     }
   };
 
@@ -975,6 +981,8 @@ const SettingsScreen = () => {
     );
   }
 
+  const showSaveHeaderAction = ['basic', 'hours', 'holidays', 'colors'].includes(activeTab);
+
   // Main render
   return (
     <POSAuthWrapper
@@ -985,11 +993,14 @@ const SettingsScreen = () => {
       <SecurityWrapper>
         <SessionManager>
           <div style={styles.container}>
-            <div style={styles.header}>
-              <h2>Business Settings</h2>
-              <p>Update your business information and manage system access</p>
-              <p style={styles.deploymentDate}>Deployed: November 17, 2025 v2</p>
-            </div>
+            <TavariModuleHeader
+              title="System Settings"
+              description="Update business details, scheduling, branding, access roles, operational settings, and copy kiosk / employee app URLs for legacy devices."
+              actionLabel={showSaveHeaderAction ? (saving ? 'Saving Changes...' : 'Save Business Settings') : 'View Audit Logs'}
+              actionVariant={showSaveHeaderAction ? 'primary' : 'secondary'}
+              actionDisabled={showSaveHeaderAction ? (saving || !businessData) : false}
+              onAction={showSaveHeaderAction ? handleSave : () => navigate('/dashboard/audit-logs')}
+            />
 
             {/* Tab Navigation */}
             <div style={styles.tabNav}>
@@ -1044,6 +1055,16 @@ const SettingsScreen = () => {
                   onClick={() => setActiveTab('scheduling')}
                 >
                   📆 Scheduling
+                </button>
+              </PermissionGate>
+
+              <PermissionGate permission="business.settings.view" fallback={null}>
+                <button
+                  type="button"
+                  style={{...styles.tab, ...(activeTab === 'kiosk-links' ? styles.activeTab : {})}}
+                  onClick={() => setActiveTab('kiosk-links')}
+                >
+                  🔗 Kiosk links
                 </button>
               </PermissionGate>
 
@@ -1121,6 +1142,10 @@ const SettingsScreen = () => {
                 />
               )}
 
+              {activeTab === 'kiosk-links' && canViewSettings && (
+                <KioskLinksTab styles={styles} />
+              )}
+
               {/* Tavari Pay Tab */}
               {activeTab === 'tavari-pay' && canManageTavariPay && renderTavariPayTab()}
 
@@ -1170,7 +1195,7 @@ const styles = {
     height: '100vh',
     backgroundColor: '#f8f9fa',
     padding: '20px',
-    paddingTop: '120px',
+    paddingTop: '80px',
     boxSizing: 'border-box'
   },
   header: {
@@ -1227,12 +1252,6 @@ const styles = {
     fontSize: '14px',
     margin: '8px 0 0 0'
   },
-  deploymentDate: {
-    color: '#9ca3af',
-    fontSize: '12px',
-    margin: '4px 0 0 0',
-    fontStyle: 'italic'
-  },
   formGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
@@ -1243,7 +1262,7 @@ const styles = {
     flexDirection: 'column'
   },
   label: {
-    fontSize: '14px',
+    fontSize: '12px',
     fontWeight: 'bold',
     color: '#374151',
     marginBottom: '6px'
@@ -1252,7 +1271,7 @@ const styles = {
     padding: '12px',
     border: '2px solid #d1d5db',
     borderRadius: '6px',
-    fontSize: '16px',
+    fontSize: '14px',
     transition: 'border-color 0.2s ease'
   },
   select: {
@@ -1264,7 +1283,7 @@ const styles = {
     cursor: 'pointer'
   },
   helpText: {
-    fontSize: '12px',
+    fontSize: '16px',
     color: '#6b7280',
     marginTop: '4px',
     fontStyle: 'italic'
@@ -1289,7 +1308,7 @@ const styles = {
     color: 'white',
     border: 'none',
     borderRadius: '8px',
-    fontSize: '16px',
+    fontSize: '12px',
     fontWeight: 'bold',
     cursor: 'pointer',
     transition: 'all 0.2s ease'
@@ -1311,14 +1330,14 @@ const styles = {
     justifyContent: 'center',
     alignItems: 'center',
     height: '200px',
-    fontSize: '18px',
+    fontSize: '16px',
     color: '#6b7280'
   },
   error: {
     textAlign: 'center',
     padding: '40px',
     color: '#dc2626',
-    fontSize: '16px'
+    fontSize: '18px'
   },
   // Tavari Pay specific styles
   tavariPayHeader: {
@@ -1348,7 +1367,7 @@ const styles = {
     margin: '20px 0'
   },
   featureItem: {
-    fontSize: '15px',
+    fontSize: '16px',
     color: '#374151',
     padding: '8px 0'
   },
@@ -1358,7 +1377,7 @@ const styles = {
     color: 'white',
     border: 'none',
     borderRadius: '6px',
-    fontSize: '16px',
+    fontSize: '15px',
     fontWeight: 'bold',
     cursor: 'pointer',
     marginTop: '10px'
@@ -1386,14 +1405,14 @@ const styles = {
     border: '1px solid #e5e7eb'
   },
   detailLabel: {
-    fontSize: '12px',
+    fontSize: '16px',
     color: '#6b7280',
     fontWeight: 'bold',
     textTransform: 'uppercase',
     marginBottom: '4px'
   },
   detailValue: {
-    fontSize: '16px',
+    fontSize: '12px',
     color: '#1f2937',
     fontWeight: '500'
   },
@@ -1404,7 +1423,7 @@ const styles = {
     borderRadius: '6px',
     marginBottom: '15px',
     border: '1px solid #fecaca',
-    fontSize: '14px'
+    fontSize: '16px'
   },
   warningBanner: {
     backgroundColor: '#fef3c7',

@@ -1,0 +1,150 @@
+{
+  "Version": "2019-10-30",
+  "StartAction": "InitialGreeting",
+  "Metadata": {
+    "entryPointPosition": {
+      "x": 10,
+      "y": 10
+    },
+    "snapshotFileVersion": "1.0"
+  },
+  "Actions": [
+    {
+      "Type": "InvokeLambdaFunction",
+      "Parameters": {
+        "FunctionArn": "arn:aws:lambda:REGION:ACCOUNT_ID:function:tavari-voice-agent",
+        "FunctionTimeout": "3000"
+      },
+      "Transitions": {
+        "Success": "CheckLambdaResult",
+        "Error": "ErrorHandler"
+      },
+      "Identifier": "InvokeLambda",
+      "TypeName": "InvokeLambdaFunction"
+    },
+    {
+      "Type": "CheckAttributeCondition",
+      "Parameters": {
+        "Conditions": [
+          {
+            "AttributeName": "result",
+            "ComparisonType": "Equals",
+            "Value": "success"
+          }
+        ]
+      },
+      "Transitions": {
+        "Matched": "PlayGreeting",
+        "NotMatched": "NoAgentHandler"
+      },
+      "Identifier": "CheckLambdaResult",
+      "TypeName": "CheckAttributeCondition"
+    },
+    {
+      "Type": "PlayPrompt",
+      "Parameters": {
+        "Text": "${greeting}",
+        "TextToSpeechVoice": "Joanna"
+      },
+      "Transitions": {
+        "Success": "GetCustomerInput",
+        "Error": "ErrorHandler"
+      },
+      "Identifier": "PlayGreeting",
+      "TypeName": "PlayPrompt"
+    },
+    {
+      "Type": "GetCustomerInput",
+      "Parameters": {
+        "Text": "Please speak your request.",
+        "TextToSpeechVoice": "Joanna",
+        "Timeout": "5000"
+      },
+      "Transitions": {
+        "Success": "ProcessCustomerInput",
+        "CustomerTimeout": "GetCustomerInput",
+        "Error": "ErrorHandler"
+      },
+      "Identifier": "GetCustomerInput",
+      "TypeName": "GetCustomerInput"
+    },
+    {
+      "Type": "InvokeLambdaFunction",
+      "Parameters": {
+        "FunctionArn": "arn:aws:lambda:REGION:ACCOUNT_ID:function:tavari-voice-agent",
+        "FunctionTimeout": "8000",
+        "Attributes": {
+          "transcript": "${CustomerInput.Transcript}",
+          "action": "AUDIO_STREAM"
+        }
+      },
+      "Transitions": {
+        "Success": "PlayAIResponse",
+        "Error": "ErrorHandler"
+      },
+      "Identifier": "ProcessCustomerInput",
+      "TypeName": "InvokeLambdaFunction"
+    },
+    {
+      "Type": "PlayPrompt",
+      "Parameters": {
+        "Text": "${message}",
+        "TextToSpeechVoice": "Joanna"
+      },
+      "Transitions": {
+        "Success": "GetCustomerInput",
+        "Error": "ErrorHandler"
+      },
+      "Identifier": "PlayAIResponse",
+      "TypeName": "PlayPrompt"
+    },
+    {
+      "Type": "PlayPrompt",
+      "Parameters": {
+        "Text": "Sorry, no agent is configured for this number. Goodbye.",
+        "TextToSpeechVoice": "Joanna"
+      },
+      "Transitions": {
+        "Success": "DisconnectCall",
+        "Error": "DisconnectCall"
+      },
+      "Identifier": "NoAgentHandler",
+      "TypeName": "PlayPrompt"
+    },
+    {
+      "Type": "PlayPrompt",
+      "Parameters": {
+        "Text": "I apologize, I encountered an error. Please try calling again later.",
+        "TextToSpeechVoice": "Joanna"
+      },
+      "Transitions": {
+        "Success": "DisconnectCall",
+        "Error": "DisconnectCall"
+      },
+      "Identifier": "ErrorHandler",
+      "TypeName": "PlayPrompt"
+    },
+    {
+      "Type": "Disconnect",
+      "Parameters": {},
+      "Transitions": {},
+      "Identifier": "DisconnectCall",
+      "TypeName": "Disconnect"
+    }
+  ],
+  "InitialAction": {
+    "Type": "InvokeLambdaFunction",
+    "Parameters": {
+      "FunctionArn": "arn:aws:lambda:REGION:ACCOUNT_ID:function:tavari-voice-agent",
+      "FunctionTimeout": "3000"
+    },
+    "Transitions": {
+      "Success": "CheckLambdaResult",
+      "Error": "ErrorHandler"
+    },
+    "Identifier": "InitialGreeting",
+    "TypeName": "InvokeLambdaFunction"
+  }
+}
+
+

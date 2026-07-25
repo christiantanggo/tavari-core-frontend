@@ -1,5 +1,6 @@
 // screens/Mail/PerformanceMonitoringScreen.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import EmailPauseBanner, { blockEmailSendIfPaused } from '../../components/EmailPauseBanner';
@@ -16,9 +17,12 @@ import PermissionGate from '../../components/Auth/PermissionGate';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MAIL_USAGE_TABS, MailModuleSubTabs, MailUsageTabs } from '../../components/Mail/MailModuleNavigation';
 import toast from 'react-hot-toast';
 
 const PerformanceMonitoringScreen = () => {
+  const navigate = useNavigate();
   const { business } = useBusiness();
   
   // Security context for performance monitoring
@@ -79,7 +83,11 @@ const PerformanceMonitoringScreen = () => {
   });
   const [showSettings, setShowSettings] = useState(false);
 
-  const businessId = selectedBusinessId || business?.id;
+  const businessId =
+    selectedBusinessId ||
+    localStorage.getItem('currentBusinessId') ||
+    business?.id ||
+    localStorage.getItem('businessId');
 
   // Permission checks
   const canViewPerformance = hasAnyPermission([
@@ -90,6 +98,19 @@ const PerformanceMonitoringScreen = () => {
   const canRunBenchmarks = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
   const canModifyThresholds = hasElevatedPrivileges(); // Only elevated users
   const canAcknowledgeAlerts = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+  const usageTabs = MAIL_USAGE_TABS.filter((tab) => (
+    !tab.requiresElevated || hasElevatedPrivileges()
+  ));
+  const handleUsageTabChange = (tabId) => {
+    if (tabId === 'overview' || tabId === 'history' || tabId === 'settings') {
+      navigate('/dashboard/mail/billing');
+      return;
+    }
+    if (tabId === 'compliance') {
+      navigate('/dashboard/mail/compliance');
+      return;
+    }
+  };
 
   // Check permissions on mount
   useEffect(() => {
@@ -556,6 +577,20 @@ const PerformanceMonitoringScreen = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner 
+            customMessage="Performance benchmarks that send test emails are paused. Monitoring and alerts remain active."
+          />
+          <MailModuleHeader />
+          <MailUsageTabs tabs={usageTabs} activeTab="monitor-logs" onTabChange={handleUsageTabChange} />
+          <MailModuleSubTabs
+            ariaLabel="Monitor and logs navigation"
+            activeTab="performance"
+            onTabChange={(tabId) => navigate(tabId === 'logs' ? '/dashboard/mail/logs' : '/dashboard/mail/performance')}
+            tabs={[
+              { id: 'performance', label: 'Performance Monitor' },
+              { id: 'logs', label: 'Send Logs' }
+            ]}
+          />
           <div style={styles.loading}>
             <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
             <div>Loading performance data...</div>
@@ -569,6 +604,20 @@ const PerformanceMonitoringScreen = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner 
+            customMessage="Performance benchmarks that send test emails are paused. Monitoring and alerts remain active."
+          />
+          <MailModuleHeader />
+          <MailUsageTabs tabs={usageTabs} activeTab="monitor-logs" onTabChange={handleUsageTabChange} />
+          <MailModuleSubTabs
+            ariaLabel="Monitor and logs navigation"
+            activeTab="performance"
+            onTabChange={(tabId) => navigate(tabId === 'logs' ? '/dashboard/mail/logs' : '/dashboard/mail/performance')}
+            tabs={[
+              { id: 'performance', label: 'Performance Monitor' },
+              { id: 'logs', label: 'Send Logs' }
+            ]}
+          />
           <div style={styles.errorState}>
             <FiAlertCircle style={styles.errorIcon} />
             <h2>Authentication Error</h2>
@@ -586,6 +635,18 @@ const PerformanceMonitoringScreen = () => {
           {/* Email Pause Banner */}
           <EmailPauseBanner 
             customMessage="Performance benchmarks that send test emails are paused. Monitoring and alerts remain active."
+          />
+
+          <MailModuleHeader />
+          <MailUsageTabs tabs={usageTabs} activeTab="monitor-logs" onTabChange={handleUsageTabChange} />
+          <MailModuleSubTabs
+            ariaLabel="Monitor and logs navigation"
+            activeTab="performance"
+            onTabChange={(tabId) => navigate(tabId === 'logs' ? '/dashboard/mail/logs' : '/dashboard/mail/performance')}
+            tabs={[
+              { id: 'performance', label: 'Performance Monitor' },
+              { id: 'logs', label: 'Send Logs' }
+            ]}
           />
 
           {/* Header */}

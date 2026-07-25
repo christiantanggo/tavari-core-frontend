@@ -1,0 +1,112 @@
+[
+  {
+    "id": "hst-recoverable",
+    "topics": ["accounting", "hst", "gst", "tax"],
+    "keywords": ["recoverable", "itc", "input tax credit", "hst paid", "expense hst"],
+    "content": "Recoverable HST/GST means the business paid tax on a purchase and can claim it back as an Input Tax Credit (ITC) on your return. Use Recoverable for most business expenses where HST was charged on the invoice."
+  },
+  {
+    "id": "hst-collected",
+    "topics": ["accounting", "hst", "gst", "tax"],
+    "keywords": ["collected", "hst charged", "sales tax collected", "output tax"],
+    "content": "Collected HST/GST means tax the business charges to customers on sales. This is tax you remit to CRA, not tax you paid on purchases."
+  },
+  {
+    "id": "hst-included",
+    "topics": ["accounting", "hst", "gst", "tax"],
+    "keywords": ["included", "tax included", "all-in price"],
+    "content": "Included means the listed price already contains HST/GST. The system treats the tax as embedded in the amount rather than added on top."
+  },
+  {
+    "id": "hst-exempt",
+    "topics": ["accounting", "hst", "gst", "tax"],
+    "keywords": ["exempt", "zero rated", "no hst", "no tax"],
+    "content": "Exempt means no HST/GST applies to that category or transaction. Use for truly non-taxable items per Canadian rules."
+  },
+  {
+    "id": "accounting-queue-workflow",
+    "topics": ["accounting", "queue", "invoices"],
+    "keywords": ["accounting queue", "expense draft", "invoice extraction", "categorize", "match vendor"],
+    "content": "The Accounting Queue is where emailed or uploaded invoices land as drafts. Review extracted amounts, match vendors, assign categories with correct HST treatment, then approve to post the expense."
+  },
+  {
+    "id": "accounting-categories-setup",
+    "topics": ["accounting", "categories"],
+    "keywords": ["expense category", "category setup", "default hst", "chart of accounts"],
+    "content": "Expense categories in Tavari Accounting control how expenses are grouped and what default HST treatment applies. Set categories under Sidebar → Tavari Accounting → Categories. When staff ask which category to use, recommend from this business's actual category list and give one clear pick."
+  },
+  {
+    "id": "accounting-category-classification",
+    "topics": ["accounting", "categories", "expenses"],
+    "keywords": ["what category", "classify expense", "which category", "trivia", "entertainment", "marketing", "cogs", "professional fees", "bar expense", "contractor", "host fee"],
+    "content": "Classify expenses using this business's category list. Quick rules: COGS / COGS-Bar / COGS-Kitchen / Concession = inventory or resale goods you buy to sell (food, liquor, balloons)—not contractor/host fees. Advertising / Marketing = spend whose main purpose is attracting customers. Professional Fees / Professional / Corporate Fees = contracted services (trivia host, DJ, bookkeeping, legal, consultants). Repair & Maintenance = fixing/maintaining premises or equipment. Wages and Salaries = payroll to employees, not vendor invoices. When unsure between Marketing and Professional Fees for a guest entertainment contractor, prefer Professional Fees; mention Marketing only if the spend is clearly promotional media/ads. Prefer Recoverable HST when the invoice charged HST. Give a direct recommendation; do not refuse ordinary categorization questions."
+  },
+  {
+    "id": "accounting-vendors",
+    "topics": ["accounting", "vendors"],
+    "keywords": ["vendor", "supplier", "vendor setup", "new vendor"],
+    "content": "Vendors are suppliers you pay. Set them up under Sidebar → Tavari Accounting → Vendors so invoices can be matched and expenses tracked by supplier."
+  },
+  {
+    "id": "accounting-inbox",
+    "topics": ["accounting", "settings", "email"],
+    "keywords": ["accounting inbox", "forward invoices", "email expenses", "accounting email"],
+    "content": "Accounting Settings configures the accounting inbox email address. Forward supplier invoices to that address and they appear in the Accounting Queue for processing."
+  },
+  {
+    "id": "camp-registration-print-chat",
+    "topics": ["bookings", "camp", "registration", "print"],
+    "keywords": ["print camp registration", "print camper form", "print registration form"],
+    "content": "Staff can ask Tavari AI Help to print a camper's submitted registration (for example, \"Print the camp registration form for Elijah Leader\"). AI Help will find the form and open the browser print dialog."
+  },
+  {
+    "id": "camp-registration-staff-search",
+    "topics": ["bookings", "camp", "registration"],
+    "keywords": ["camp registration", "camper form", "find registration", "submitted form", "medical form"],
+    "content": "Staff find submitted camp registration and medical forms under Sidebar → Tavari Bookings → Registration forms → Form Search. Use the Links tab to copy the customer-facing camp registration portal URL for parents."
+  },
+  {
+    "id": "camp-registration-customer",
+    "topics": ["bookings", "camp", "registration", "customer"],
+    "keywords": ["parent portal", "customer camp registration", "public link", "annual form"],
+    "content": "Parents complete camp registration on the customer portal camp registration page (link available in Bookings → Registration forms → Links tab). Each minor camper needs a current annual registration before check-in when the activity requires it."
+  },
+  {
+    "id": "camp-registration-enable",
+    "topics": ["bookings", "settings", "camp"],
+    "keywords": ["enable camper registration", "require registration", "camper registration required"],
+    "content": "To require camp registration for an activity, open Bookings → Settings, edit the activity, and enable Camper registration required. Customize the form under Settings → Registration Form or Sidebar → Registration forms → Form Builder."
+  },
+  {
+    "id": "waivers-overview",
+    "topics": ["waivers"],
+    "keywords": ["waiver", "sign waiver", "waiver template", "kiosk"],
+    "content": "Tavari Waivers (Sidebar → Tavari Waivers) manages templates, signed waivers, and kiosk links. This is separate from camp registration forms in Bookings."
+  },
+  {
+    "id": "ai-help-shareable-links",
+    "topics": ["links", "kiosk", "portal", "customer"],
+    "keywords": [
+      "copy link",
+      "share link",
+      "kiosk link",
+      "guest list link",
+      "booking portal link",
+      "waiver kiosk",
+      "customer portal url"
+    ],
+    "content": "Ask Tavari AI Help to copy or list shareable links: customer booking portal, party guest list, camp registration portal, waiver signing, review link, waiver/music/signage kiosks, time clock kiosk, and employee portal. Examples: \"Copy the party guest list link\" or \"Show me all kiosk links\"."
+  },
+  {
+    "id": "kiosk-links-settings",
+    "topics": ["kiosk", "settings"],
+    "keywords": ["kiosk links tab", "system settings kiosk", "bookmark kiosk"],
+    "content": "Full kiosk URLs for bookmarks and legacy devices are also listed under Sidebar → System Settings → Kiosk links (music kiosk, waiver kiosk, signage player, employee app)."
+  },
+  {
+    "id": "forms-vs-camp-registration",
+    "topics": ["forms", "bookings", "camp"],
+    "keywords": ["tavari forms", "custom forms", "camp registration difference"],
+    "content": "Tavari Forms (Sidebar → Tavari Forms) is a general custom forms module. Camp registration and medical forms are managed under Tavari Bookings → Registration forms, not under Tavari Forms."
+  }
+]

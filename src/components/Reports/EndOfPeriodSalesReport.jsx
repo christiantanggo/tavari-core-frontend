@@ -68,6 +68,18 @@ const EndOfPeriodSalesReport = ({
   const [includeEmployeeBreakdown, setIncludeEmployeeBreakdown] = useState(true);
   const [showComparison, setShowComparison] = useState(false);
 
+  const getDrawerStartingAmount = (drawer) =>
+    Number(drawer?.starting_cash ?? drawer?.starting_amount ?? 0);
+
+  const getDrawerExpectedAmount = (drawer) =>
+    Number(drawer?.expected_cash ?? drawer?.expected_amount ?? 0);
+
+  const getDrawerActualAmount = (drawer) =>
+    Number(drawer?.actual_cash ?? drawer?.actual_amount ?? 0);
+
+  const getDrawerVarianceAmount = (drawer) =>
+    Number(drawer?.variance ?? (getDrawerActualAmount(drawer) - getDrawerExpectedAmount(drawer)) ?? 0);
+
   useEffect(() => {
     if (auth.selectedBusinessId) {
       loadPeriodData();
@@ -135,7 +147,7 @@ const EndOfPeriodSalesReport = ({
       if (includeDrawerInfo) {
         const { data: drawers, error: drawerError } = await supabase
           .from('pos_drawers')
-          .select('starting_cash, expected_cash, actual_cash, variance, opened_at, closed_at')
+          .select('*')
           .eq('business_id', auth.selectedBusinessId)
           .gte('opened_at', start)
           .lt('opened_at', end);
@@ -298,10 +310,10 @@ const EndOfPeriodSalesReport = ({
 
     // Drawer Summary
     const drawerSummary = {
-      openingCash: drawers.reduce((sum, d) => sum + (Number(d.starting_cash) || 0), 0),
-      expectedCash: drawers.reduce((sum, d) => sum + (Number(d.expected_cash) || 0), 0),
-      actualCash: drawers.reduce((sum, d) => sum + (Number(d.actual_cash) || 0), 0),
-      variance: drawers.reduce((sum, d) => sum + (Number(d.variance) || 0), 0),
+      openingCash: drawers.reduce((sum, d) => sum + getDrawerStartingAmount(d), 0),
+      expectedCash: drawers.reduce((sum, d) => sum + getDrawerExpectedAmount(d), 0),
+      actualCash: drawers.reduce((sum, d) => sum + getDrawerActualAmount(d), 0),
+      variance: drawers.reduce((sum, d) => sum + getDrawerVarianceAmount(d), 0),
       drawerCount: drawers.length
     };
 

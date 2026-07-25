@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Connect customer display</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        background: #0f1419;
+        color: #e8eaed;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      }
+      .card {
+        width: 100%;
+        max-width: 380px;
+        background: #1a2332;
+        border-radius: 12px;
+        padding: 28px 24px;
+        border: 1px solid #2d3a4d;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 20px;
+        font-weight: 700;
+      }
+      p {
+        margin: 0 0 18px;
+        font-size: 14px;
+        line-height: 1.45;
+        color: #9aa5b5;
+      }
+      label {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        margin-bottom: 8px;
+        color: #c5cdd8;
+      }
+      input {
+        width: 100%;
+        padding: 14px 16px;
+        font-size: 22px;
+        letter-spacing: 0.35em;
+        text-align: center;
+        border-radius: 8px;
+        border: 2px solid #2d3a4d;
+        background: #0f1419;
+        color: #fff;
+        font-weight: 600;
+      }
+      input:focus {
+        outline: none;
+        border-color: #2563eb;
+      }
+      button {
+        width: 100%;
+        margin-top: 18px;
+        padding: 14px;
+        font-size: 15px;
+        font-weight: 700;
+        border: none;
+        border-radius: 8px;
+        background: #2563eb;
+        color: #fff;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .err {
+        margin-top: 12px;
+        font-size: 13px;
+        color: #f87171;
+        min-height: 1.2em;
+      }
+      .hint {
+        margin-top: 14px;
+        font-size: 12px;
+        color: #6b7788;
+        line-height: 1.4;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Connect this screen</h1>
+      <p>
+        On your register, open <strong>POS → Customer display</strong>, download the app, then enter the
+        <strong>6-digit code</strong> shown there.
+      </p>
+      <label for="code">Pairing code</label>
+      <input id="code" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" />
+      <button type="button" id="go">Connect</button>
+      <div class="err" id="err"></div>
+      <p class="hint">
+        Codes expire in about 15 minutes. Ask for a new code from the same screen if needed. After this computer is
+        paired, you can close the app anytime and open it again from the <strong>Start menu</strong> or
+        <strong>desktop shortcut</strong> — you do not need to run the installer again.
+      </p>
+    </div>
+    <script>
+      const input = document.getElementById('code');
+      const btn = document.getElementById('go');
+      const err = document.getElementById('err');
+
+      function digitsOnly(s) {
+        return String(s || '').replace(/\D/g, '').slice(0, 6);
+      }
+
+      input.addEventListener('input', () => {
+        const v = digitsOnly(input.value);
+        input.value = v;
+        err.textContent = '';
+      });
+
+      async function submit() {
+        const code = digitsOnly(input.value);
+        if (code.length !== 6) {
+          err.textContent = 'Enter all 6 digits.';
+          return;
+        }
+        err.textContent = '';
+        btn.disabled = true;
+        try {
+          const res = await window.tavariCustomerDisplayPairing.submitCode(code);
+          if (!res || !res.ok) {
+            err.textContent =
+              res && res.error === 'not_found_or_expired'
+                ? 'Invalid or expired code. Get a new code from POS → Customer display.'
+                : res && res.error === 'invalid_code'
+                  ? 'Enter a valid 6-digit code.'
+                  : res && res.message
+                    ? res.message
+                    : 'Could not connect. Try again.';
+            btn.disabled = false;
+            return;
+          }
+        } catch (e) {
+          err.textContent = e && e.message ? e.message : 'Connection failed.';
+          btn.disabled = false;
+        }
+      }
+
+      btn.addEventListener('click', submit);
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') submit();
+      });
+      input.focus();
+    </script>
+  </body>
+</html>

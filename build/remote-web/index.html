@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tavari Music Remote</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #20c997, #17a2b8);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .logo {
+            width: 60px;
+            height: 60px;
+            background: #20c997;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 15px;
+            font-size: 24px;
+            color: white;
+            font-weight: bold;
+        }
+        
+        .title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .current-track {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        
+        .track-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .track-artist {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .controls {
+            display: grid;
+            grid-template-columns: 1fr 80px 1fr;
+            gap: 15px;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+        
+        .control-btn {
+            background: #20c997;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .control-btn:hover {
+            background: #17a085;
+            transform: scale(1.05);
+        }
+        
+        .control-btn.play {
+            width: 80px;
+            height: 80px;
+            font-size: 30px;
+        }
+        
+        .volume-section {
+            margin-bottom: 30px;
+        }
+        
+        .volume-label {
+            font-weight: 500;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .volume-slider {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #e9ecef;
+            outline: none;
+            cursor: pointer;
+        }
+        
+        .status {
+            text-align: center;
+            padding: 15px;
+            background: #d4edda;
+            border-radius: 8px;
+            color: #155724;
+            font-size: 14px;
+        }
+        
+        @media (max-width: 480px) {
+            .container {
+                margin: 10px;
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">T</div>
+            <h1 class="title">Tavari Music</h1>
+            <p class="subtitle">Remote Control</p>
+        </div>
+        
+        <div class="current-track">
+            <div class="track-title" id="trackTitle">No track playing</div>
+            <div class="track-artist" id="trackArtist">Select a song to start</div>
+        </div>
+        
+        <div class="controls">
+            <button class="control-btn" onclick="previousTrack()">⏮</button>
+            <button class="control-btn play" id="playBtn" onclick="togglePlay()">▶️</button>
+            <button class="control-btn" onclick="nextTrack()">⏭</button>
+        </div>
+        
+        <div class="volume-section">
+            <div class="volume-label">
+                🔊 Volume
+                <span id="volumeValue">80%</span>
+            </div>
+            <input type="range" class="volume-slider" id="volumeSlider" 
+                   min="0" max="100" value="80" onchange="setVolume(this.value)">
+        </div>
+        
+        <div class="status" id="status">
+            Connected to Tavari Music
+        </div>
+    </div>
+
+    <script>
+        let isPlaying = false;
+        let currentVolume = 80;
+        
+        // API Base URL (same host as this page)
+        const API_BASE = '';
+        
+        async function apiCall(endpoint, method = 'GET', data = null) {
+            try {
+                const options = {
+                    method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                };
+                
+                if (data) {
+                    options.body = JSON.stringify(data);
+                }
+                
+                const response = await fetch(`${API_BASE}/api${endpoint}`, options);
+                const result = await response.json();
+                
+                updateStatus('Command sent successfully');
+                return result;
+            } catch (error) {
+                updateStatus('Connection error: ' + error.message, true);
+                console.error('API Error:', error);
+            }
+        }
+        
+        async function togglePlay() {
+            const action = isPlaying ? 'pause' : 'play';
+            await apiCall(`/music/${action}`, 'POST');
+            
+            isPlaying = !isPlaying;
+            document.getElementById('playBtn').textContent = isPlaying ? '⏸️' : '▶️';
+        }
+        
+        async function nextTrack() {
+            await apiCall('/music/skip', 'POST');
+            updateStatus('Skipped to next track');
+        }
+        
+        async function previousTrack() {
+            // Previous track functionality
+            updateStatus('Previous track not implemented');
+        }
+        
+        async function setVolume(value) {
+            currentVolume = value;
+            document.getElementById('volumeValue').textContent = value + '%';
+            
+            await apiCall('/music/volume', 'POST', { volume: value / 100 });
+        }
+        
+        function updateStatus(message, isError = false) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.style.background = isError ? '#f8d7da' : '#d4edda';
+            statusEl.style.color = isError ? '#721c24' : '#155724';
+            
+            // Clear status after 3 seconds
+            setTimeout(() => {
+                statusEl.textContent = 'Connected to Tavari Music';
+                statusEl.style.background = '#d4edda';
+                statusEl.style.color = '#155724';
+            }, 3000);
+        }
+        
+        // Check connection and get current track info
+        async function initializeRemote() {
+            try {
+                const status = await apiCall('/status');
+                if (status) {
+                    updateStatus('Connected successfully');
+                    
+                    // Get current track
+                    const currentTrack = await apiCall('/music/current');
+                    if (currentTrack && currentTrack.track) {
+                        document.getElementById('trackTitle').textContent = currentTrack.track.title;
+                        document.getElementById('trackArtist').textContent = currentTrack.track.artist;
+                        isPlaying = currentTrack.isPlaying;
+                        document.getElementById('playBtn').textContent = isPlaying ? '⏸️' : '▶️';
+                    }
+                }
+            } catch (error) {
+                updateStatus('Failed to connect to music system', true);
+            }
+        }
+        
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', initializeRemote);
+        
+        // Refresh track info every 5 seconds
+        setInterval(async () => {
+            try {
+                const currentTrack = await apiCall('/music/current');
+                if (currentTrack && currentTrack.track) {
+                    document.getElementById('trackTitle').textContent = currentTrack.track.title;
+                    document.getElementById('trackArtist').textContent = currentTrack.track.artist;
+                    
+                    if (currentTrack.isPlaying !== isPlaying) {
+                        isPlaying = currentTrack.isPlaying;
+                        document.getElementById('playBtn').textContent = isPlaying ? '⏸️' : '▶️';
+                    }
+                }
+            } catch (error) {
+                // Silent fail for background updates
+            }
+        }, 5000);
+    </script>
+</body>
+</html>

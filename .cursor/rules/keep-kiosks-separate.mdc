@@ -1,0 +1,23 @@
+---
+description: Keep music kiosk and waiver kiosk launchers separate
+alwaysApply: true
+---
+
+# Keep kiosks separate
+
+The **music kiosk** and **waiver kiosk** are separate products and must never replace each other.
+
+## Required rules
+
+1. Keep the **music kiosk** launcher pointed at `/kiosk/music`.
+2. Keep the **waiver kiosk** launcher pointed at `/kiosk/waiver`.
+3. **Never overwrite** `build/electron/main.cjs` for waiver work.
+4. If a waiver-specific Electron launcher is needed, use a separate file such as `build/electron/waiver-kiosk-main.cjs`.
+5. Waiver build/dev scripts may target the waiver-specific launcher only; they must not replace the music kiosk launcher as part of normal project state.
+6. Treat **web deploys** and **desktop/electron kiosk builds** as separate deployment targets.
+
+## Do not do this
+
+- Do not switch the music kiosk entrypoint to the waiver kiosk.
+- Do not add native/bootstrap logic that forces the main app into waiver kiosk mode unless the change is explicitly limited to the waiver kiosk build.
+- Do not assume waiver kiosk changes are safe for the music desktop app.

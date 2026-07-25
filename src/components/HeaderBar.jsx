@@ -1,15 +1,23 @@
 // components/HeaderBar.jsx - FIXED WITH CENTRALIZED AUTH CLEANUP
 import React, { useState, useEffect, useRef } from 'react';
-import { FiBell, FiSettings, FiUser, FiMenu, FiLogOut, FiDollarSign } from 'react-icons/fi';
+import { FiBell, FiSettings, FiUser, FiMenu, FiLogOut, FiDollarSign, FiMessageCircle, FiList } from 'react-icons/fi';
 import './HeaderBar.css';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { useUserProfile } from '../hooks/useUserProfile';
 import { useBusiness } from '../contexts/BusinessContext';
 import { sessionPersistence } from '../services/SessionPersistence';
-import { clearAllAuthData, validateCachedBusinessId, setBusinessId } from '../utils/authCleanup';
+import { clearAllAuthData, clearAuthDataForExplicitLogout, validateCachedBusinessId, setBusinessId } from '../utils/authCleanup';
+import toast from 'react-hot-toast';
+import { isOwnerBusinessUserRole } from '../helpers/businessTenantGuards';
 
-const HeaderBar = ({ onLogoClick }) => {
+const HeaderBar = ({
+  onLogoClick,
+  onChatClick,
+  mobileNavOpen = false,
+  onMobileNavToggle,
+  onCloseNavDrawer,
+}) => {
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [showAccountDropdown, setShowAccountDropdown] = useState(false);
   const [showMobileAccountDropdown, setShowMobileAccountDropdown] = useState(false);
@@ -22,6 +30,8 @@ const HeaderBar = ({ onLogoClick }) => {
   const setSelectedBiz = setBusiness;
 
   const [businesses, setBusinesses] = useState([]);
+  /** Only owners may create another tenant (multi-business). */
+  const [canOpenNewBusiness, setCanOpenNewBusiness] = useState(false);
   const [lastUserId, setLastUserId] = useState(null);
 
   // Close dropdown when clicking outside
@@ -40,6 +50,13 @@ const HeaderBar = ({ onLogoClick }) => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showAccountDropdown]);
+
+  useEffect(() => {
+    if (mobileNavOpen) {
+      setShowMobileMenu(false);
+      setShowMobileAccountDropdown(false);
+    }
+  }, [mobileNavOpen]);
 
   useEffect(() => {
     const fetchBusinesses = async () => {
@@ -67,10 +84,13 @@ const HeaderBar = ({ onLogoClick }) => {
 
       if (error) {
         console.error('Error fetching businesses:', error);
+        setCanOpenNewBusiness(false);
         return;
       }
 
       if (data) {
+        setCanOpenNewBusiness(data.some((row) => isOwnerBusinessUserRole(row.role)));
+
         // Extract businesses from the joined data
         const bizList = data
           .map((d) => d.businesses)
@@ -113,6 +133,9 @@ const HeaderBar = ({ onLogoClick }) => {
             }
           }
         }
+      } else {
+        setCanOpenNewBusiness(false);
+        setBusinesses([]);
       }
     };
 
@@ -147,7 +170,7 @@ const HeaderBar = ({ onLogoClick }) => {
       }
 
       // 🔧 CRITICAL: Use centralized cleanup function
-      clearAllAuthData('user_logout');
+      clearAuthDataForExplicitLogout('user_logout');
       
       // Stop session persistence
       sessionPersistence.disablePersistence();
@@ -160,7 +183,7 @@ const HeaderBar = ({ onLogoClick }) => {
     } catch (error) {
       console.error('❌ Error during logout:', error);
       // Even if there's an error, still try to clean up and navigate
-      clearAllAuthData('logout_error');
+      clearAuthDataForExplicitLogout('logout_error');
       sessionPersistence.disablePersistence();
       navigate('/login');
     }
@@ -168,6 +191,11 @@ const HeaderBar = ({ onLogoClick }) => {
 
   const handleBusinessChange = (e) => {
     if (e.target.value === 'new') {
+      if (!canOpenNewBusiness) {
+        toast.error('Only business owners can create a new business.');
+        e.target.value = selectedBiz || '';
+        return;
+      }
       navigate('/dashboard/new-business');
     } else {
       const newBizId = e.target.value;
@@ -177,8 +205,37 @@ const HeaderBar = ({ onLogoClick }) => {
     }
   };
 
+  const toggleUtilityMenu = () => {
+    if (!showMobileMenu) {
+      onCloseNavDrawer?.();
+    }
+    setShowMobileMenu(!showMobileMenu);
+  };
+
+  const handleMobileNavButtonClick = () => {
+    setShowMobileMenu(false);
+    setShowMobileAccountDropdown(false);
+    onMobileNavToggle?.();
+  };
+
   return (
     <div className="header">
+      <div className="header-mobile-left">
+        {typeof onMobileNavToggle === 'function' ? (
+          <button
+            type="button"
+            className="nav-left-btn"
+            aria-label={mobileNavOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            aria-expanded={mobileNavOpen}
+            onClick={handleMobileNavButtonClick}
+          >
+            <FiList size={24} />
+          </button>
+        ) : (
+          <span className="header-mobile-left-spacer" aria-hidden />
+        )}
+      </div>
+
       <div className="logo" onClick={onLogoClick}>
         <img src="/logo.png" alt="Tavari Logo" className="logoImage" />
       </div>
@@ -196,9 +253,14 @@ const HeaderBar = ({ onLogoClick }) => {
               {biz.name}
             </option>
           ))}
-          <option value="new">+ Open New Business</option>
+          {canOpenNewBusiness ? (
+            <option value="new">+ Open New Business</option>
+          ) : null}
         </select>
         <FiBell className="icon" />
+        {typeof onChatClick === 'function' && (
+          <FiMessageCircle className="icon" onClick={onChatClick} title="AI Help" />
+        )}
         <FiSettings className="icon" onClick={() => navigate('/dashboard/settings')} />
         
         {/* Account Icon with Dropdown */}
@@ -216,9 +278,9 @@ const HeaderBar = ({ onLogoClick }) => {
                 <div className="dropdown-user-email">{profile?.email}</div>
               </div>
               <div className="dropdown-divider"></div>
-              <div className="dropdown-item" onClick={() => { navigate('/dashboard/employee/pay-statements'); setShowAccountDropdown(false); }}>
+              <div className="dropdown-item" onClick={() => { navigate('/portal'); setShowAccountDropdown(false); }}>
                 <FiDollarSign className="dropdown-icon" />
-                <span>My Pay Statements</span>
+                <span>Employee Portal</span>
               </div>
               <div className="dropdown-divider"></div>
               <div className="dropdown-item logout" onClick={handleLogout}>
@@ -230,7 +292,7 @@ const HeaderBar = ({ onLogoClick }) => {
         </div>
       </div>
 
-      <div className="hamburger" onClick={() => setShowMobileMenu(!showMobileMenu)}>
+      <div className="hamburger" onClick={toggleUtilityMenu}>
         <FiMenu size={24} />
       </div>
 
@@ -248,13 +310,21 @@ const HeaderBar = ({ onLogoClick }) => {
                   {biz.name}
                 </option>
               ))}
-              <option value="new">+ Open New Business</option>
+              {canOpenNewBusiness ? (
+                <option value="new">+ Open New Business</option>
+              ) : null}
             </select>
           </div>
           <div className="mobileMenuItem">
             <FiBell className="icon" />
             <span className="label">Notifications</span>
           </div>
+          {typeof onChatClick === 'function' && (
+            <div className="mobileMenuItem" onClick={() => { onChatClick(); setShowMobileMenu(false); }}>
+              <FiMessageCircle className="icon" />
+              <span className="label">AI Help</span>
+            </div>
+          )}
           <div className="mobileMenuItem" onClick={() => navigate('/dashboard/settings')}>
             <FiSettings className="icon" />
             <span className="label">Settings</span>
@@ -268,9 +338,9 @@ const HeaderBar = ({ onLogoClick }) => {
           </div>
           {showMobileAccountDropdown && (
             <>
-              <div className="mobileMenuItem indent" onClick={() => { navigate('/dashboard/employee/pay-statements'); setShowMobileAccountDropdown(false); setShowMobileMenu(false); }}>
+              <div className="mobileMenuItem indent" onClick={() => { navigate('/portal'); setShowMobileAccountDropdown(false); setShowMobileMenu(false); }}>
                 <FiDollarSign className="mobile-dropdown-icon" />
-                <span className="label">My Pay Statements</span>
+                <span className="label">Employee Portal</span>
               </div>
               <div className="mobileMenuItem indent" onClick={handleLogout}>
                 <FiLogOut className="mobile-dropdown-icon" />

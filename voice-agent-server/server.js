@@ -6,6 +6,7 @@ import bodyParser from 'body-parser';
 import axios from 'axios';
 import WebSocket from 'ws';
 import dotenv from 'dotenv';
+import { createServer } from 'http';
 
 dotenv.config();
 
@@ -20,6 +21,13 @@ if (!OPENAI_API_KEY || !TELNYX_API_KEY) {
 }
 
 const app = express();
+const server = createServer(app);
+
+// Create WebSocket server for media streaming
+const wss = new WebSocket.Server({ 
+  server,
+  path: '/media-stream-ws'
+});
 
 // Middleware
 app.use(bodyParser.json());
@@ -116,8 +124,20 @@ async function handleCallAnswered(payload, callId) {
     
     console.log(`✅ Call answered: ${callControlId}`);
 
-    // Start media streaming to receive audio
-    await startMediaStream(callControlId);
+    // Check if OpenAI session is ready
+    const session = sessions.get(callId);
+    if (session && session.openaiWs && session.openaiWs.readyState === WebSocket.OPEN) {
+      console.log(`✅ OpenAI session ready, starting media stream for ${callId}`);
+      // Start media streaming to receive audio
+      await startMediaStream(callControlId, callId);
+    } else {
+      console.log(`⚠️  OpenAI session not ready yet for ${callId}, marking for pending media start`);
+      // Mark this session as needing media stream start when OpenAI is ready
+      if (session) {
+        session.pendingMediaStart = true;
+        session.callControlId = callControlId;
+      }
+    }
 
   } catch (error) {
     console.error('❌ Error handling call answered:', error);
@@ -140,6 +160,16 @@ async function handleCallHangup(callId) {
           console.log(`🔌 Closed OpenAI WebSocket for ${callId}`);
         } catch (error) {
           console.error('Error closing OpenAI:', error);
+        }
+      }
+
+      // Close Telnyx media WebSocket
+      if (session.telnyxWs) {
+        try {
+          session.telnyxWs.close();
+          console.log(`🔌 Closed Telnyx WebSocket for ${callId}`);
+        } catch (error) {
+          console.error('Error closing Telnyx:', error);
         }
       }
 
@@ -176,38 +206,40 @@ async function answerCall(callControlId) {
 }
 
 /**
- * Start media streaming to receive audio
+ * Start media streaming to receive audio via WebSocket
  */
-async function startMediaStream(callControlId) {
+async function startMediaStream(callControlId, callId) {
   try {
-    // Get Railway public domain (Railway sets this automatically)
-    let baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL || `http://localhost:${PORT}`;
+    // Fix Railway domain URL normalization
+    let base = process.env.RAILWAY_PUBLIC_DOMAIN || `localhost:${PORT}`;
     
-    // Ensure URL has https:// protocol (required by Telnyx)
-    if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-      baseUrl = `https://${baseUrl}`;
-    }
+    // Remove protocol if present and normalize
+    base = base.replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '');
     
-    const webhookUrl = `${baseUrl}/media-stream`;
-    console.log(`🎵 Starting media stream with URL: ${webhookUrl}`);
-    
+    // Use WebSocket URL for media streaming
+    const webhookUrl = `wss://${base}/media-stream-ws?call_id=${callId}`;
+
+    console.log("🚀 Using media stream URL:", webhookUrl);
+
     const response = await axios.post(
       `https://api.telnyx.com/v2/calls/${callControlId}/actions/streaming_start`,
       {
         stream_url: webhookUrl,
-        stream_track: 'both_tracks' // Receive both inbound and outbound audio
+        stream_track: "both_tracks"
       },
       {
         headers: {
-          'Authorization': `Bearer ${TELNYX_API_KEY}`,
-          'Content-Type': 'application/json'
+          Authorization: `Bearer ${TELNYX_API_KEY}`,
+          "Content-Type": "application/json",
         }
       }
     );
+
     console.log(`🎵 Media streaming started: ${callControlId}`);
     return response.data;
+
   } catch (error) {
-    console.error('❌ Error starting media stream:', error.response?.data || error.message);
+    console.error("❌ Error starting media stream:", error.response?.data || error.message);
     throw error;
   }
 }
@@ -235,7 +267,7 @@ async function startOpenAIRealtimeSession(callId, callControlId) {
     });
 
     // WebSocket event handlers
-    ws.on('open', () => {
+    ws.on('open', async () => {
       console.log(`✅ OpenAI Realtime WebSocket connected for ${callId}`);
       
       // Send session configuration
@@ -243,7 +275,7 @@ async function startOpenAIRealtimeSession(callId, callControlId) {
         type: 'session.update',
         session: {
           modalities: ['text', 'audio'],
-          instructions: 'You are a helpful AI assistant. Be concise and natural in conversation.',
+          instructions: 'You are a helpful AI assistant for Tavari. Be concise and natural in conversation.',
           voice: 'alloy',
           input_audio_format: 'pcm16',
           output_audio_format: 'pcm16',
@@ -261,15 +293,44 @@ async function startOpenAIRealtimeSession(callId, callControlId) {
         }
       }));
 
-      // Send greeting
-      const greeting = 'Hello, thank you for calling. How can I help you today?';
+      console.log(`✅ OpenAI session configured for ${callId}`);
+
+      // Create conversation item and request response
+      ws.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: 'Hello, thank you for calling Tavari. How can I help you today?'
+          }]
+        }
+      }));
+
+      console.log(`✅ Conversation item created for ${callId}`);
+
+      // Request response with both audio and text
       ws.send(JSON.stringify({
         type: 'response.create',
         response: {
-          modalities: ['text'],
-          instructions: greeting
+          modalities: ['text', 'audio']
         }
       }));
+
+      console.log(`🎤 Requested audio+text response for ${callId}`);
+
+      // Check if media stream start was pending (race condition fix)
+      const session = sessions.get(callId);
+      if (session && session.pendingMediaStart && session.callControlId) {
+        console.log(`🔄 Starting pending media stream for ${callId}`);
+        try {
+          await startMediaStream(session.callControlId, callId);
+          session.pendingMediaStart = false;
+        } catch (error) {
+          console.error(`❌ Error starting pending media stream for ${callId}:`, error);
+        }
+      }
     });
 
     ws.on('message', (data) => {
@@ -298,12 +359,24 @@ async function startOpenAIRealtimeSession(callId, callControlId) {
           case 'response.audio.done':
             console.log(`🎵 Audio response complete for ${callId}`);
             break;
+
+          case 'response.done':
+            console.log(`✅ Response complete for ${callId}`);
+            break;
           
-          case 'conversation.item.input_audio_buffer.speech_started':
+          case 'conversation.item.input_audio_transcription.completed':
+            console.log(`👤 User said: "${message.transcript}"`);
+            break;
+          
+          case 'conversation.item.input_audio_transcription.failed':
+            console.log(`❌ Transcription failed for ${callId}`);
+            break;
+          
+          case 'input_audio_buffer.speech_started':
             console.log(`👤 User started speaking for ${callId}`);
             break;
           
-          case 'conversation.item.input_audio_buffer.speech_stopped':
+          case 'input_audio_buffer.speech_stopped':
             console.log(`👤 User stopped speaking for ${callId}`);
             break;
           
@@ -341,86 +414,117 @@ async function startOpenAIRealtimeSession(callId, callControlId) {
 }
 
 /**
- * Send audio to Telnyx call
+ * Send audio to Telnyx call using streaming
  */
 async function sendAudioToTelnyx(callId, audioBuffer) {
   try {
     const session = sessions.get(callId);
-    if (!session || !session.callControlId) {
-      console.warn(`⚠️  No session found for ${callId}`);
+    if (!session || !session.telnyxWs) {
+      console.warn(`⚠️  No Telnyx WebSocket session found for ${callId}`);
       return;
     }
 
-    // Convert audio buffer to base64
-    const audioBase64 = Buffer.from(audioBuffer).toString('base64');
+    // Encode audio as base64 for Telnyx
+    const base64Audio = audioBuffer.toString('base64');
 
-    // Send to Telnyx using speak action
-    await axios.post(
-      `https://api.telnyx.com/v2/calls/${session.callControlId}/actions/speak`,
-      {
-        payload: audioBase64,
-        payload_type: 'base64',
-        voice: 'female'
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${TELNYX_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
+    // Telnyx requires a JSON wrapper event
+    const packet = {
+      event: "media",
+      media: {
+        payload: base64Audio
       }
-    );
+    };
+
+    if (session.telnyxWs.readyState === WebSocket.OPEN) {
+      session.telnyxWs.send(JSON.stringify(packet));
+      console.log(`📤 Sent ${audioBuffer.length} bytes wrapped PCM audio to Telnyx (call: ${callId})`);
+    }
 
   } catch (error) {
-    console.error(`❌ Error sending audio to Telnyx for ${callId}:`, error.response?.data || error.message);
+    console.error(`❌ Error sending audio to Telnyx for ${callId}:`, error);
   }
 }
 
-/**
- * Handle media stream webhook (receives audio from Telnyx)
- */
-app.post('/media-stream', async (req, res) => {
-  try {
-    const event = req.body;
-    const callId = event.call_control_id;
+// WebSocket server for media streaming from Telnyx
+wss.on('connection', (ws, req) => {
+  console.log('🔌 Telnyx WebSocket connection established');
+  console.log('🔍 WebSocket URL:', req.url);
+  console.log('🔍 WebSocket headers:', req.headers);
+  
+  // Extract call_id from URL parameters
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const callId = url.searchParams.get('call_id');
+  
+  console.log('🔍 Extracted call_id from URL:', callId);
+
+  if (!callId) {
+    console.error('❌ No call_id in WebSocket connection');
+    ws.close();
+    return;
+  }
+
+  // Store the Telnyx WebSocket in the session
+  const session = sessions.get(callId);
+  if (session) {
+    session.telnyxWs = ws;
+    console.log(`🎵 Telnyx media stream WebSocket connected (call: ${callId})`);
+  } else {
+    console.warn(`⚠️  No session found for call_id: ${callId}`);
+  }
+
+  ws.on('message', (data) => {
+    console.log(`📥 Received ${data.length} bytes from Telnyx WebSocket`);
     
-    console.log(`🎵 Media stream event for ${callId}:`, event.event_type);
-
-    // Respond to Telnyx
-    res.status(200).send('OK');
-
-    const session = sessions.get(callId);
-    if (!session || !session.openaiWs) {
-      console.warn(`⚠️  No OpenAI session for ${callId}`);
-      return;
-    }
-
-    // Handle audio data
-    if (event.event_type === 'media.audio' && event.audio) {
-      // Decode base64 audio
-      const audioBuffer = Buffer.from(event.audio, 'base64');
-      const audioBase64 = audioBuffer.toString('base64');
+    try {
+      const event = JSON.parse(data.toString());
       
-      // Send to OpenAI Realtime API
-      if (session.openaiWs.readyState === WebSocket.OPEN) {
-        session.openaiWs.send(JSON.stringify({
-          type: 'input_audio_buffer.append',
-          audio: audioBase64
-        }));
+      if (event.event === 'media' && event.media && event.media.payload) {
+        // Get the session and forward audio to OpenAI
+        const session = sessions.get(callId);
+        if (session && session.openaiWs && session.openaiWs.readyState === WebSocket.OPEN) {
+          session.openaiWs.send(JSON.stringify({
+            type: 'input_audio_buffer.append',
+            audio: event.media.payload
+          }));
+        }
+      }
+    } catch (error) {
+      // Handle binary audio data
+      if (data.length > 0) {
+        const session = sessions.get(callId);
+        if (session && session.openaiWs && session.openaiWs.readyState === WebSocket.OPEN) {
+          const audioBase64 = data.toString('base64');
+          session.openaiWs.send(JSON.stringify({
+            type: 'input_audio_buffer.append',
+            audio: audioBase64
+          }));
+        }
       }
     }
+  });
 
-  } catch (error) {
-    console.error('❌ Error handling media stream:', error);
-  }
+  ws.on('close', () => {
+    console.log(`🔌 Telnyx WebSocket closed for ${callId}`);
+    const session = sessions.get(callId);
+    if (session) {
+      session.telnyxWs = null;
+    }
+  });
+
+  ws.on('error', (error) => {
+    console.error(`❌ Telnyx WebSocket error for ${callId}:`, error);
+  });
+
+  console.log('✅ WebSocket ready to receive audio from Telnyx');
 });
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Tavari Voice Agent server running on port ${PORT}`);
   const PUBLIC_URL = process.env.RAILWAY_PUBLIC_DOMAIN || `http://localhost:${PORT}`;
 
   console.log(`📞 Webhook: POST ${PUBLIC_URL}/webhook`);
-  console.log(`🎵 Media stream: POST ${PUBLIC_URL}/media-stream`);
+  console.log(`🎵 Media stream WebSocket: wss://${PUBLIC_URL}/media-stream-ws`);
   console.log(`❤️  Health check: GET ${PUBLIC_URL}/health`);
   console.log(`\n✅ Ready to receive calls!`);
 });
@@ -433,6 +537,9 @@ process.on('SIGTERM', () => {
     if (session.openaiWs) {
       session.openaiWs.close();
     }
+    if (session.telnyxWs) {
+      session.telnyxWs.close();
+    }
   });
   process.exit(0);
 });
@@ -443,7 +550,9 @@ process.on('SIGINT', () => {
     if (session.openaiWs) {
       session.openaiWs.close();
     }
+    if (session.telnyxWs) {
+      session.telnyxWs.close();
+    }
   });
   process.exit(0);
 });
-

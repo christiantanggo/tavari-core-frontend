@@ -94,9 +94,10 @@ const AdSettings = () => {
         .from('music_settings')
         .select('*')
         .eq('business_id', business.id)
-        .single();
+        .limit(1)
+        .maybeSingle();
 
-      if (musicError && musicError.code !== 'PGRST116') throw musicError;
+      if (musicError) throw musicError;
       
       // Load business API settings
       const { data: apiSettings, error: apiError } = await supabase

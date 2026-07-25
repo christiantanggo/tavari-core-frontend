@@ -21,10 +21,10 @@ const BlockEditor = ({
 }) => {
   const insertDynamicField = (field) => {
     const dynamicFields = {
-      first_name: '{FirstName}',
-      last_name: '{LastName}',
-      email: '{Email}',
-      full_name: '{FirstName} {LastName}'
+      first_name: '{{First Name}}',
+      last_name: '{{Last Name}}',
+      email: '{{Email}}',
+      full_name: '{{Full Name}}'
     };
 
     onUpdate(block.id, {
@@ -50,13 +50,18 @@ const BlockEditor = ({
             <div style={styles.textControls}>
               <div style={styles.dynamicFields}>
                 <span style={styles.dynamicFieldsLabel}>Insert:</span>
-                {['first_name', 'last_name', 'email'].map(field => (
+                {[
+                  { key: 'first_name', label: 'First Name' },
+                  { key: 'last_name', label: 'Last Name' },
+                  { key: 'full_name', label: 'Full Name' },
+                  { key: 'email', label: 'Email' }
+                ].map(field => (
                   <button
-                    key={field}
+                    key={field.key}
                     style={styles.dynamicFieldButton}
-                    onClick={() => insertDynamicField(field)}
+                    onClick={() => insertDynamicField(field.key)}
                   >
-                    {field.replace('_', ' ')}
+                    {field.label}
                   </button>
                 ))}
               </div>

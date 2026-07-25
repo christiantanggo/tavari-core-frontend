@@ -24,5 +24,48 @@ dist-ssr
 *.sw?
 
 .vercel
-.env 
-.env 
+.env
+
+# Generated at build from env (legacy static pages for old tablets)
+public/legacy-waiver-kiosk/config.js
+public/waiver-browser-kiosk/config.js
+public/legacy-kiosk-downloads/config.js
+public/task-manager-kiosk/config.js
+
+# Customer display .exe — Supabase URL + anon key for pairing (from .env at build time)
+build/electron/customer-display-runtime.json
+
+# Large desktop installers (hosted on Supabase Storage, not committed / not Vercel)
+public/installers/*.exe
+
+.vercel
+
+# Local secrets / backups (keep off GitHub)
+.env.backup
+.env*.backup
+*.env.backup
+tavari-voice-server/server/setup.env
+**/setup.env
+tmp-*.mjs
+tmp-*.sql
+tmp-*.png
+
+# Local password/admin helper scripts with secrets — never commit
+src/supabase/*password*
+src/supabase/RESET_PASSWORD*
+src/supabase/IMMEDIATE_PASSWORD*
+
+src/supabase/RUN_THIS.txt
+src (Original)/
+
+# Load-test fixtures with session tokens
+artillery-load.yaml
+public/vending-tablet-download/config.js
+
+
+# Desktop installers / portable builds (host on Supabase Storage, not GitHub)
+public/installers/
+
+# Temporarily keep local until PAT has workflow scope
+# (file still on disk / OneDrive; re-add after token update)
+

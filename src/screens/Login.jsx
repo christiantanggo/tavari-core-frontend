@@ -13,7 +13,13 @@ import {
   validateFormSecurity 
 } from '../Security';
 import { sessionPersistence } from '../services/SessionPersistence';
-import { clearAllAuthData } from '../utils/authCleanup';
+import { setBusinessId } from '../utils/authCleanup';
+import { getPublicUserId } from '../utils/getPublicUserId';
+import { membershipUserIdOrFilter } from '../utils/employeePortalMembership';
+import {
+  clearPermissionsSessionCache,
+  clearPosAuthSessionCache,
+} from '../utils/posAuthSessionCache';
 
 const LoginComponent = () => {
   const [email, setEmail] = useState('');
@@ -33,6 +39,27 @@ const LoginComponent = () => {
   const navigate = useNavigate();
   const passwordInputRef = useRef(null);
   const emailInputRef = useRef(null);
+
+  // If the day session is still active, send staff to PIN unlock — not email/password again.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!sessionPersistence.isPersistenceEnabled()) return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (cancelled) return;
+      if (session?.user) {
+        navigate('/unlock', { replace: true });
+        return;
+      }
+      const restoreResult = await sessionPersistence.restoreSession();
+      if (!cancelled && restoreResult.restored) {
+        navigate('/unlock', { replace: true });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate]);
 
   // Initialize security context with admin-level security for login
   const {
@@ -55,10 +82,8 @@ const LoginComponent = () => {
     }
   });
 
-  // 🔧 CRITICAL: Clear all cached data when component mounts
-  useEffect(() => {
-    clearAllAuthData('arrived_at_login_page');
-  }, []);
+  // Do not wipe an active shift session just because the login screen was opened briefly
+  // (e.g. a transient auth hiccup on POS). Full cleanup happens on explicit logout or new login.
 
   const handleLogin = async () => {
     // Prevent multiple simultaneous login attempts
@@ -69,9 +94,6 @@ const LoginComponent = () => {
     clearValidationErrors();
 
     try {
-      // 🔧 CRITICAL: Clear all auth data BEFORE login attempt
-      clearAllAuthData('new_login_attempt');
-
       // Validate inputs using security context
       const emailValidation = await validateInput(email, 'email', 'email');
       const passwordValidation = await validateInput(password, 'password', 'password');
@@ -303,13 +325,15 @@ const LoginComponent = () => {
       }
 
       const userId = authData.user.id;
+      const publicUserId = await getPublicUserId(authData.user.email);
+      const membershipFilter = membershipUserIdOrFilter(userId, publicUserId);
 
       // Get user roles - with fresh data, no cache
-      // Note: Get all roles across all businesses for user selection
-      const { data: roleList, error: roleError } = await supabase
+      // Match auth.users.id OR public.users.id (split identity); see PortalLogin / RLS email-match policies
+      const { data: roleRows, error: roleError } = await supabase
         .from("user_roles")
         .select("id, user_id, business_id, role, active, businesses(id, name)")
-        .eq("user_id", userId)
+        .or(membershipFilter)
         .eq("active", true);
 
       if (roleError) {
@@ -324,6 +348,43 @@ const LoginComponent = () => {
         setErrorMsg('Login succeeded, but unable to load user roles.');
         setIsLoading(false);
         return;
+      }
+
+      const dedupeByBusiness = (rows, normalizeUserId) => {
+        const map = new Map();
+        for (const row of rows || []) {
+          if (!row?.business_id) continue;
+          if (!map.has(row.business_id)) {
+            map.set(row.business_id, normalizeUserId ? { ...row, user_id: userId } : { ...row });
+          }
+        }
+        return Array.from(map.values());
+      };
+
+      let roleList = dedupeByBusiness(roleRows, true);
+
+      // Fallback: business_users only (e.g. manual DB change or failed user_roles sync)
+      if (!roleList.length) {
+        const { data: buRows, error: buError } = await supabase
+          .from('business_users')
+          .select('id, user_id, business_id, role, businesses(id, name)')
+          .or(membershipFilter);
+
+        if (buError) {
+          console.warn('Login: business_users fallback failed:', buError);
+        } else if (buRows?.length) {
+          roleList = dedupeByBusiness(
+            buRows.map((bu) => ({
+              id: bu.id,
+              user_id: userId,
+              business_id: bu.business_id,
+              role: bu.role,
+              active: true,
+              businesses: bu.businesses
+            })),
+            false
+          );
+        }
       }
 
       if (!roleList || roleList.length === 0) {
@@ -346,9 +407,8 @@ const LoginComponent = () => {
       localStorage.setItem('businessList', JSON.stringify(roleList));
       const currentBusiness = roleList[0];
       
-      // Set BOTH business IDs to keep them in sync
-      localStorage.setItem('currentBusinessId', currentBusiness.business_id);
-      localStorage.setItem('selectedBusinessId', currentBusiness.business_id);
+      // Set business IDs for the shift (pinned across PIN locks)
+      setBusinessId(currentBusiness.business_id);
       localStorage.setItem('lastAuthUserId', userId);
 
       try {
@@ -378,6 +438,8 @@ const LoginComponent = () => {
         localStorage.setItem('posActiveUser', JSON.stringify(initialActivePosUser));
         localStorage.setItem('posLoginUser', JSON.stringify(initialActivePosUser));
         localStorage.setItem('posLastUnlockedBy', JSON.stringify(initialActivePosUser));
+        clearPermissionsSessionCache(currentBusiness.business_id);
+        clearPosAuthSessionCache(currentBusiness.business_id);
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new Event('pos-active-user-changed'));
         }
@@ -623,14 +685,6 @@ const LoginComponent = () => {
       color: TavariStyles.colors.primaryDark
     },
     
-    deploymentDate: {
-      marginTop: TavariStyles.spacing.lg,
-      fontSize: TavariStyles.typography.fontSize.xs,
-      color: TavariStyles.colors.gray400,
-      textAlign: 'center',
-      fontStyle: 'italic'
-    },
-    
     errorMessage: {
       ...TavariStyles.components.banner.base,
       ...TavariStyles.components.banner.variants.error,
@@ -795,10 +849,6 @@ const LoginComponent = () => {
             Create Account
           </span>
         </p>
-        
-        <div style={styles.deploymentDate}>
-          January 28 2026 V3
-        </div>
       </div>
       
       {/* Add CSS for spinner animation */}

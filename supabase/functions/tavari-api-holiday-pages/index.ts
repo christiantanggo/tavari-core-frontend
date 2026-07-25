@@ -1,0 +1,95 @@
+// Holiday landing page config keyed to special-hour event keys (OTWK).
+
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { loadPublicWebsiteHolidayPages } from "../_shared/tavariPublicHolidayPages.ts";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Max-Age": "86400",
+};
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function json(body: Record<string, unknown>, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function resolveBusinessId(req: Request, body: Record<string, unknown>): string {
+  const url = new URL(req.url);
+  return String(
+    body.businessId ?? body.business_id ?? url.searchParams.get("businessId") ??
+      url.searchParams.get("business_id") ?? "",
+  ).trim();
+}
+
+serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { status: 200, headers: corsHeaders });
+  }
+
+  if (req.method !== "GET" && req.method !== "POST") {
+    return json({ ok: false, error: "Method not allowed" }, 405);
+  }
+
+  try {
+    const url = new URL(req.url);
+    const body = req.method === "POST"
+      ? await req.json().catch(() => ({})) as Record<string, unknown>
+      : {};
+    const businessId = resolveBusinessId(req, body);
+
+    if (!businessId || !UUID_RE.test(businessId)) {
+      return json({ ok: false, error: "Valid businessId is required" }, 400);
+    }
+
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+    );
+
+    const { data: moduleRow, error: moduleErr } = await supabase
+      .from("business_module_usage")
+      .select("enabled")
+      .eq("business_id", businessId)
+      .eq("module_key", "tavari_apis")
+      .maybeSingle();
+
+    if (moduleErr) {
+      console.error("[tavari-api-holiday-pages] module check", moduleErr);
+      return json({ ok: false, error: "Could not verify API access" }, 500);
+    }
+
+    if (!moduleRow?.enabled) {
+      return json({ ok: false, error: "Tavari APIs is not enabled for this business" }, 403);
+    }
+
+    const slug = String(body.slug ?? url.searchParams.get("slug") ?? "").trim().toLowerCase();
+    const activeOnly = String(
+      body.activeOnly ?? url.searchParams.get("activeOnly") ?? "true",
+    ).toLowerCase() !== "false";
+    const includePastSpecials = String(
+      body.includePastSpecials ?? url.searchParams.get("includePastSpecials") ?? "false",
+    ).toLowerCase() === "true";
+
+    const payload = await loadPublicWebsiteHolidayPages(supabase, businessId, {
+      slug: slug || undefined,
+      activeOnly,
+      includePastSpecials,
+    });
+
+    return json(payload as unknown as Record<string, unknown>);
+  } catch (error) {
+    console.error("[tavari-api-holiday-pages]", error);
+    return json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Internal error",
+    }, 500);
+  }
+});

@@ -1,0 +1,166 @@
+.vending-debug-fab {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  z-index: 10200;
+  width: 52px;
+  height: 52px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.92);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.vending-debug-panel {
+  position: fixed;
+  bottom: 5.5rem;
+  right: 1.25rem;
+  left: 1.25rem;
+  z-index: 10199;
+  max-width: 520px;
+  margin-left: auto;
+  max-height: min(62vh, 520px);
+  overflow: auto;
+  background: rgba(15, 23, 42, 0.97);
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 14px;
+  padding: 14px 16px;
+  font-size: 13px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.vending-debug-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.vending-debug-panel-header h3 {
+  margin: 0;
+  font-size: 15px;
+  color: #f8fafc;
+}
+
+.vending-debug-panel-time {
+  color: #94a3b8;
+  font-family: ui-monospace, monospace;
+}
+
+.vending-debug-meta {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 5px 10px;
+  margin: 0 0 12px;
+}
+
+.vending-debug-meta dt {
+  color: #94a3b8;
+  margin: 0;
+}
+
+.vending-debug-meta dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  word-break: break-word;
+}
+
+.vending-debug-val-ok {
+  color: #86efac;
+}
+
+.vending-debug-val-bad {
+  color: #fca5a5;
+}
+
+.vending-debug-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.vending-debug-actions button {
+  padding: 7px 11px;
+  border: none;
+  border-radius: 8px;
+  background: #334155;
+  color: #f1f5f9;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.vending-debug-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.vending-debug-actions button:first-child {
+  background: #2563eb;
+}
+
+.vending-debug-log-wrap h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.vending-debug-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vending-debug-log li {
+  margin-bottom: 8px;
+  padding: 8px;
+  background: rgba(30, 41, 59, 0.8);
+  border-radius: 8px;
+  border-left: 3px solid #64748b;
+}
+
+.vending-debug-log--ok {
+  border-left-color: #22c55e;
+}
+
+.vending-debug-log--warn {
+  border-left-color: #eab308;
+}
+
+.vending-debug-log--error {
+  border-left-color: #ef4444;
+}
+
+.vending-debug-log-time {
+  color: #94a3b8;
+  font-family: ui-monospace, monospace;
+}
+
+.vending-debug-log-msg {
+  color: #f1f5f9;
+}
+
+.vending-debug-log-detail {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 6px;
+  font-size: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #cbd5e1;
+}
+
+.vending-debug-muted {
+  margin: 0;
+  color: #64748b;
+}

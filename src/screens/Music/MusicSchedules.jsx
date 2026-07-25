@@ -93,8 +93,8 @@ const MusicSchedules = () => {
         await window.globalMusicService.loadSchedules();
         console.log('✅ GlobalMusicService schedules reloaded!');
         
-        // Force immediate schedule check
-        window.globalMusicService.checkSchedules();
+        // Force immediate schedule check (now async)
+        await window.globalMusicService.checkSchedules();
         console.log('✅ Schedule check triggered!');
       }
     } catch (error) {

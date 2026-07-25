@@ -1,6 +1,7 @@
 // screens/Reports/ReportsScreen.jsx - WITH PERMISSION SYSTEM + NO CONSOLE LOGGING
 import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
+import { useSearchParams } from 'react-router-dom';
 
 // Security & Authentication
 import { SecurityWrapper, useSecurityContext } from '../../Security';
@@ -11,9 +12,14 @@ import PermissionGate from '../../components/Auth/PermissionGate';
 
 // Foundation Components
 import POSReportsScreen from '../POS/POSReportsScreen';
+import MusicReportsContent from './MusicReportsContent';
 import { TavariStyles } from '../../utils/TavariStyles';
+import CampaignAnalyticsDashboard from '../../components/Mail/CampaignAnalyticsDashboard';
+import TavariModuleHeader from '../../components/UI/TavariModuleHeader';
 
 const ReportsScreen = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+
   // Security context for sensitive reports access
   const {
     validateInput,
@@ -46,11 +52,44 @@ const ReportsScreen = () => {
   } = usePermissions();
 
   // Permission checks
-  const canViewReports = hasPermission('pos.reports.view') || hasElevatedPrivileges();
-  const canExportReports = hasPermission('pos.reports.export') || hasElevatedPrivileges();
-  const canViewPOSReports = hasPermission('pos.reports.view') || hasElevatedPrivileges();
+  const canViewReports =
+    hasAnyPermission([
+      'reports.dashboard.view',
+      'pos.reports.view',
+      'reports.pos.view',
+      'reports.music.view',
+      'reports.mail.view',
+      'reports.hr.view',
+      'reports.overview.view'
+    ]) || hasElevatedPrivileges();
+  const canExportReports =
+    hasAnyPermission(['pos.reports.export', 'reports.music.edit']) || hasElevatedPrivileges();
+  const canViewPOSReports =
+    hasAnyPermission(['pos.reports.view', 'reports.pos.view']) || hasElevatedPrivileges();
+  const canViewMusicReports = hasPermission('reports.music.view') || hasElevatedPrivileges();
+  const canViewMailReports =
+    hasAnyPermission(['reports.mail.view', 'mail.campaigns.view', 'mail.contacts.view']) ||
+    hasElevatedPrivileges();
 
-  const [activeTab, setActiveTab] = useState('pos');
+  const tabs = [
+    { id: 'pos', name: 'POS Reports', icon: '🪙', permissions: ['pos.reports.view', 'reports.pos.view'] },
+    { id: 'music', name: 'Music Reports', icon: '🎵', permissions: ['reports.music.view'] },
+    { id: 'mail', name: 'Mail Reports', icon: '📧', permissions: ['reports.mail.view', 'mail.campaigns.view', 'mail.contacts.view'] },
+    { id: 'hr', name: 'HR Reports', icon: '👥', disabled: true },
+    { id: 'overview', name: 'Business Overview', icon: '📊', disabled: true }
+  ];
+
+  const requestedTab = searchParams.get('tab');
+  const initialTab = tabs.some((tab) => tab.id === requestedTab) ? requestedTab : 'pos';
+  const [activeTab, setActiveTab] = useState(initialTab);
+
+  const hasTabAccess = (tab) => {
+    if (!tab?.permissions || tab.permissions.length === 0) {
+      return true;
+    }
+
+    return tab.permissions.some(permission => hasPermission(permission)) || hasElevatedPrivileges();
+  };
 
   // Check permissions on mount
   useEffect(() => {
@@ -58,6 +97,19 @@ const ReportsScreen = () => {
       toast.error('You do not have permission to view reports');
     }
   }, [permissionsLoading, canViewReports]);
+
+  useEffect(() => {
+    if (permissionsLoading) return;
+
+    const requested = tabs.find((tab) => tab.id === requestedTab);
+    if (!requested || requested.disabled || !hasTabAccess(requested)) {
+      return;
+    }
+
+    if (requested.id !== activeTab) {
+      setActiveTab(requested.id);
+    }
+  }, [requestedTab, permissionsLoading, activeTab, hasPermission, hasElevatedPrivileges]);
 
   // Log initial access
   useEffect(() => {
@@ -69,21 +121,28 @@ const ReportsScreen = () => {
         initial_tab: activeTab
       }, 'low');
     }
-  }, [auth.selectedBusinessId, permissionsLoading, canViewReports]);
+  }, [auth.selectedBusinessId, permissionsLoading, canViewReports, activeTab]);
 
-  const tabs = [
-    { id: 'pos', name: 'POS Reports', icon: '🪙', permission: 'pos.reports.view' },
-    { id: 'music', name: 'Music Reports', icon: '🎵', disabled: true },
-    { id: 'mail', name: 'Mail Reports', icon: '📧', disabled: true },
-    { id: 'hr', name: 'HR Reports', icon: '👥', disabled: true },
-    { id: 'overview', name: 'Business Overview', icon: '📊', disabled: true }
-  ];
+  useEffect(() => {
+    if (permissionsLoading) return;
+
+    const currentTab = tabs.find(tab => tab.id === activeTab);
+    const currentTabAvailable = currentTab && !currentTab.disabled && hasTabAccess(currentTab);
+
+    if (!currentTabAvailable) {
+      const firstAvailableTab = tabs.find(tab => !tab.disabled && hasTabAccess(tab));
+      if (firstAvailableTab && firstAvailableTab.id !== activeTab) {
+        setActiveTab(firstAvailableTab.id);
+        setSearchParams({ tab: firstAvailableTab.id });
+      }
+    }
+  }, [activeTab, permissionsLoading, hasPermission, hasElevatedPrivileges, setSearchParams]);
 
   const handleTabChange = async (tabId) => {
     const tab = tabs.find(t => t.id === tabId);
     
     // Check permission if tab requires one
-    if (tab.permission && !hasPermission(tab.permission) && !hasElevatedPrivileges()) {
+    if (!hasTabAccess(tab)) {
       toast.error(`You do not have permission to view ${tab.name}`);
       return;
     }
@@ -98,11 +157,21 @@ const ReportsScreen = () => {
     await recordAction('reports_tab_changed', auth.selectedBusinessId, true);
 
     setActiveTab(tabId);
+    setSearchParams({ tab: tabId });
   };
+
+  const primaryTabAction = canViewPOSReports
+    ? { label: 'POS Reports', tabId: 'pos' }
+    : canViewMusicReports
+      ? { label: 'Music Reports', tabId: 'music' }
+      : canViewMailReports
+        ? { label: 'Mail Reports', tabId: 'mail' }
+        : null;
 
   const styles = {
     container: {
-      ...TavariStyles.layout.container
+      ...TavariStyles.layout.container,
+      paddingTop: '80px'
     },
     
     header: {
@@ -197,7 +266,7 @@ const ReportsScreen = () => {
   const renderTabContent = () => {
     // Check permission for active tab
     const currentTab = tabs.find(t => t.id === activeTab);
-    if (currentTab?.permission && !hasPermission(currentTab.permission) && !hasElevatedPrivileges()) {
+    if (currentTab && !hasTabAccess(currentTab)) {
       return (
         <div style={styles.noPermission}>
           <h3>Access Denied</h3>
@@ -218,21 +287,26 @@ const ReportsScreen = () => {
       
       case 'music':
         return (
-          <div style={styles.placeholderContent}>
-            <div style={styles.comingSoon}>Music Reports Coming Soon</div>
-            <div style={styles.comingDescription}>
-              Track music performance, licensing fees, playlist analytics, and venue engagement metrics.
-            </div>
+          <div style={styles.tabContent}>
+            <PermissionGate permissions={['reports.music.view']}>
+              <MusicReportsContent
+                businessId={auth.selectedBusinessId}
+                canEditMusicReports={canExportReports}
+              />
+            </PermissionGate>
           </div>
         );
       
       case 'mail':
         return (
-          <div style={styles.placeholderContent}>
-            <div style={styles.comingSoon}>Mail Reports Coming Soon</div>
-            <div style={styles.comingDescription}>
-              Analyze email campaign performance, delivery rates, customer engagement, and ROI metrics.
-            </div>
+          <div style={styles.tabContent}>
+            <PermissionGate permissions={['reports.mail.view', 'mail.campaigns.view', 'mail.contacts.view']} requireAny>
+              <CampaignAnalyticsDashboard
+                businessId={auth.selectedBusinessId}
+                embedded={true}
+                isOpen={canViewMailReports}
+              />
+            </PermissionGate>
           </div>
         );
       
@@ -269,17 +343,19 @@ const ReportsScreen = () => {
       securityLevel="high"
     >
       <div style={styles.container}>
-        <div style={styles.header}>
-          <h1 style={styles.title}>Business Reports & Analytics</h1>
-          <p style={styles.subtitle}>Comprehensive reporting across all Tavari modules</p>
-        </div>
+        <TavariModuleHeader
+          title="Reports & Analytics"
+          description="Review reporting across POS, music, mail, and upcoming cross-module analytics."
+          actionLabel={primaryTabAction?.label}
+          onAction={primaryTabAction ? () => handleTabChange(primaryTabAction.tabId) : undefined}
+        />
 
         <div style={styles.tabContainer}>
           <div style={styles.tabList}>
             {tabs.map((tab) => {
               // Check if user has permission for this tab
-              const hasTabPermission = !tab.permission || hasPermission(tab.permission) || hasElevatedPrivileges();
-              const isDisabled = tab.disabled || (!hasTabPermission && tab.permission);
+              const hasTabPermission = hasTabAccess(tab);
+              const isDisabled = tab.disabled || !hasTabPermission;
 
               return (
                 <button
@@ -291,12 +367,12 @@ const ReportsScreen = () => {
                     ...(isDisabled ? styles.tabDisabled : {})
                   }}
                   disabled={isDisabled}
-                  title={!hasTabPermission && tab.permission ? 'You do not have permission to view this report' : ''}
+                  title={!hasTabPermission ? 'You do not have permission to view this report' : ''}
                 >
                   <span>{tab.icon}</span>
                   <span>{tab.name}</span>
                   {tab.disabled && <span style={{ fontSize: '10px' }}>(Soon)</span>}
-                  {!hasTabPermission && tab.permission && <span style={{ fontSize: '10px' }}>🔒</span>}
+                  {!hasTabPermission && <span style={{ fontSize: '10px' }}>🔒</span>}
                 </button>
               );
             })}

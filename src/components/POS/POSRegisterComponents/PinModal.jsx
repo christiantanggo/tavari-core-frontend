@@ -10,7 +10,16 @@ const PinModal = ({
   setPinError,
   failedAttempts,
   currentUnlockingUser,
-  onPinUnlock
+  onPinUnlock,
+  onCancel = null,
+  title = 'Register Locked',
+  subtitle = "Enter any staff member's 4-digit PIN to unlock the register.",
+  helperText = 'Any employee with a PIN can unlock and complete sales.',
+  buttonLabel = 'Unlock Register',
+  lockedButtonLabel = 'Locked - Contact Manager',
+  cancelButtonLabel = 'Cancel',
+  showUserInfo = true,
+  userInfoLabel = 'Last unlocked by:'
 }) => {
   const pinInputRef = useRef(null);
   const modalRef = useRef(null);
@@ -103,7 +112,9 @@ const PinModal = ({
     
     modalFooter: {
       padding: TavariStyles.spacing.lg,
-      borderTop: `1px solid ${TavariStyles.colors.gray200}`
+      borderTop: `1px solid ${TavariStyles.colors.gray200}`,
+      display: 'flex',
+      gap: TavariStyles.spacing.sm,
     },
     
     pinInput: {
@@ -130,11 +141,17 @@ const PinModal = ({
       fontSize: '12px',
       color: TavariStyles.colors.gray600
     },
+
+    cancelButton: {
+      ...TavariStyles.components.button.base,
+      ...TavariStyles.components.button.variants.secondary,
+      flex: 1,
+    },
     
     unlockButton: {
       ...TavariStyles.components.button.base,
       ...TavariStyles.components.button.variants.primary,
-      width: '100%'
+      flex: 1,
     },
     
     userInfo: {
@@ -178,12 +195,17 @@ const PinModal = ({
         }}
       >
         <div style={styles.modalHeader}>
-          <h3>Register Locked</h3>
+          <h3>{title}</h3>
         </div>
         
         <div style={styles.modalBody}>
           <p style={{ marginBottom: '20px', textAlign: 'center' }}>
-            Enter any staff member's 4-digit PIN to unlock the register
+            {subtitle}
+            {helperText ? (
+              <span style={{ fontSize: '10px', color: '#666', marginTop: '8px', display: 'block' }}>
+                {helperText}
+              </span>
+            ) : null}
           </p>
           
           <input
@@ -238,6 +260,15 @@ const PinModal = ({
         </div>
         
         <div style={styles.modalFooter}>
+          {typeof onCancel === 'function' ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              style={styles.cancelButton}
+            >
+              {cancelButtonLabel}
+            </button>
+          ) : null}
           <button
             onClick={onPinUnlock}
             disabled={failedAttempts >= 3 || pinInput.length !== 4}
@@ -247,13 +278,13 @@ const PinModal = ({
               cursor: (failedAttempts >= 3 || pinInput.length !== 4) ? 'not-allowed' : 'pointer'
             }}
           >
-            {failedAttempts >= 3 ? 'Locked - Contact Manager' : 'Unlock Register'}
+            {failedAttempts >= 3 ? lockedButtonLabel : buttonLabel}
           </button>
         </div>
         
-        {currentUnlockingUser && (
+        {showUserInfo && currentUnlockingUser && (
           <div style={styles.userInfo}>
-            Last unlocked by: {currentUnlockingUser.name || currentUnlockingUser.full_name || currentUnlockingUser.email}
+            {userInfoLabel} {currentUnlockingUser.name || currentUnlockingUser.full_name || currentUnlockingUser.email}
           </div>
         )}
       </div>

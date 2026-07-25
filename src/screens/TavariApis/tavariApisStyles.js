@@ -1,0 +1,102 @@
+import { TavariStyles } from '../../utils/TavariStyles';
+
+export const tavariApisPageStyles = {
+  page: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: TavariStyles.spacing.lg,
+  },
+  summaryRow: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+    gap: TavariStyles.spacing.md,
+  },
+  summaryCard: {
+    backgroundColor: TavariStyles.colors.white,
+    border: `1px solid ${TavariStyles.colors.gray200}`,
+    borderRadius: 16,
+    padding: TavariStyles.spacing.lg,
+  },
+  summaryValue: {
+    fontSize: '28px',
+    fontWeight: TavariStyles.typography.fontWeight.bold,
+    color: TavariStyles.colors.gray900,
+    lineHeight: 1.1,
+  },
+  summaryLabel: {
+    marginTop: 6,
+    fontSize: TavariStyles.typography.fontSize.sm,
+    color: TavariStyles.colors.gray600,
+  },
+  panel: {
+    backgroundColor: TavariStyles.colors.white,
+    border: `1px solid ${TavariStyles.colors.gray200}`,
+    borderRadius: 16,
+    padding: TavariStyles.spacing.lg,
+  },
+  panelTitle: {
+    margin: 0,
+    fontSize: TavariStyles.typography.fontSize.lg,
+    fontWeight: TavariStyles.typography.fontWeight.bold,
+    color: TavariStyles.colors.gray900,
+  },
+  panelText: {
+    margin: '10px 0 0',
+    color: TavariStyles.colors.gray600,
+    lineHeight: 1.55,
+    fontSize: TavariStyles.typography.fontSize.sm,
+  },
+  list: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: TavariStyles.spacing.md,
+    margin: `${TavariStyles.spacing.lg} 0 0`,
+  },
+  card: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) auto',
+    gap: TavariStyles.spacing.lg,
+    backgroundColor: TavariStyles.colors.white,
+    border: `1px solid ${TavariStyles.colors.gray200}`,
+    borderRadius: 16,
+    padding: TavariStyles.spacing.lg,
+  },
+  cardTitle: {
+    margin: '4px 0 0',
+    color: TavariStyles.colors.gray900,
+    fontSize: TavariStyles.typography.fontSize.lg,
+    fontWeight: TavariStyles.typography.fontWeight.semibold,
+  },
+  kicker: {
+    color: TavariStyles.colors.primary,
+    fontSize: TavariStyles.typography.fontSize.xs || 12,
+    fontWeight: 800,
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+  },
+  badge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    borderRadius: 999,
+    padding: '4px 10px',
+    fontSize: 13,
+    fontWeight: 700,
+    background: TavariStyles.colors.infoBg || '#eff6ff',
+    color: TavariStyles.colors.primary,
+  },
+  badgeMuted: {
+    background: TavariStyles.colors.gray100,
+    color: TavariStyles.colors.gray700,
+  },
+  code: {
+    display: 'inline-block',
+    marginTop: 8,
+    padding: '8px 10px',
+    borderRadius: 8,
+    backgroundColor: TavariStyles.colors.gray100,
+    color: TavariStyles.colors.gray800,
+    fontFamily: 'Consolas, Monaco, monospace',
+    fontSize: 13,
+    wordBreak: 'break-all',
+  },
+};

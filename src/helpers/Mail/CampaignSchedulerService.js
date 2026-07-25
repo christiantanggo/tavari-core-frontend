@@ -1,5 +1,13 @@
 // helpers/Mail/CampaignSchedulerService.js - Production Ready Version
 import { supabase } from '../../supabaseClient';
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import timezonePlugin from 'dayjs/plugin/timezone';
+
+dayjs.extend(utc);
+dayjs.extend(timezonePlugin);
+
+const DEFAULT_BUSINESS_TIMEZONE = 'America/Toronto';
 
 class CampaignSchedulerService {
   constructor() {
@@ -15,6 +23,62 @@ class CampaignSchedulerService {
     this.cacheTimeout = 5 * 60 * 1000; // 5 minutes
     this.maxRetries = 3;
     this.retryDelay = 1000; // 1 second
+  }
+
+  getSafeTimezone(timezone) {
+    const timezoneToUse = timezone || DEFAULT_BUSINESS_TIMEZONE;
+
+    try {
+      Intl.DateTimeFormat('en-CA', { timeZone: timezoneToUse }).format(new Date());
+      return timezoneToUse;
+    } catch (error) {
+      console.warn('Invalid scheduler timezone, falling back to default:', timezoneToUse, error);
+      return DEFAULT_BUSINESS_TIMEZONE;
+    }
+  }
+
+  async getBusinessTimezoneForRecommendations(businessId) {
+    const cacheKey = `${businessId}_timezone`;
+    const cached = this.getCachedData(cacheKey);
+    if (cached) {
+      return this.getSafeTimezone(cached);
+    }
+
+    const { data, error } = await supabase
+      .from('businesses')
+      .select('timezone')
+      .eq('id', businessId)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    const resolvedTimezone = this.getSafeTimezone(data?.timezone);
+    this.setCachedData(cacheKey, resolvedTimezone);
+    return resolvedTimezone;
+  }
+
+  getZonedDateParts(dateInput, timezone) {
+    const date = new Date(dateInput);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: this.getSafeTimezone(timezone),
+      weekday: 'long',
+      hour: '2-digit',
+      hourCycle: 'h23'
+    });
+
+    const parts = formatter.formatToParts(date);
+    const weekday = parts.find((part) => part.type === 'weekday')?.value?.toLowerCase();
+    const hour = Number(parts.find((part) => part.type === 'hour')?.value);
+
+    if (!weekday || Number.isNaN(hour)) {
+      return null;
+    }
+
+    return { weekday, hour };
   }
 
   // Get cached data
@@ -79,6 +143,168 @@ class CampaignSchedulerService {
     throw lastError;
   }
 
+  getCampaignContentBlocks(campaign) {
+    if (Array.isArray(campaign?.content_json)) return campaign.content_json;
+    if (Array.isArray(campaign?.content_blocks)) return campaign.content_blocks;
+    return [];
+  }
+
+  hasUnsubscribeLink(campaign) {
+    const contentBlocks = this.getCampaignContentBlocks(campaign);
+    const hasBlockLink = contentBlocks.some(block =>
+      (block.type === 'text' && String(block.content || '').includes('{UnsubscribeLink}')) ||
+      (block.type === 'button' && String(block.content?.url || '').toLowerCase().includes('unsubscribe'))
+    );
+
+    if (hasBlockLink) return true;
+
+    return String(campaign?.content_html || '').toLowerCase().includes('unsubscribe');
+  }
+
+  escapeTokenForRegex(token) {
+    return String(token || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  replaceMergeTokens(content, tokens, value) {
+    return tokens.reduce((output, token) => (
+      output.replace(new RegExp(this.escapeTokenForRegex(token), 'g'), String(value ?? ''))
+    ), String(content || ''));
+  }
+
+  personalizeEmailContent(htmlContent, contact, businessId = '') {
+    const firstName = contact?.first_name || contact?.firstName || '';
+    const lastName = contact?.last_name || contact?.lastName || '';
+    const email = contact?.email || '';
+    const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+    const loyaltyPoints = contact?.loyalty_points ?? contact?.loyaltyPoints ?? contact?.points_balance ?? contact?.pointsBalance ?? '';
+
+    let output = String(htmlContent || '');
+    output = this.replaceMergeTokens(output, ['{{First Name}}', '{{FirstName}}', '{FirstName}'], firstName);
+    output = this.replaceMergeTokens(output, ['{{Last Name}}', '{{LastName}}', '{LastName}'], lastName);
+    output = this.replaceMergeTokens(output, ['{{Full Name}}', '{{FullName}}', '{FullName}'], fullName);
+    output = this.replaceMergeTokens(output, ['{{Email Address}}', '{{Email}}', '{Email}'], email);
+    output = this.replaceMergeTokens(output, ['{{LoyaltyPoints}}', '{{Loyalty Points}}'], loyaltyPoints);
+
+    const reviewLink = businessId
+      ? `${this.resolvePublicSiteUrlForScheduler()}/reputation/review/${businessId}`
+      : '';
+    const checkedInDemo = String(firstName || '').trim();
+    output = this.replaceMergeTokens(output, ['{{{ReviewLink}}}', '{{{Review Link}}}'], reviewLink);
+    output = this.replaceMergeTokens(output, ['{{ReviewLink}}', '{{Review Link}}'], reviewLink);
+    output = this.replaceMergeTokens(
+      output,
+      ['{{CheckedInName}}', '{{Checked-In Name}}', '{{Checked In Name}}'],
+      checkedInDemo,
+    );
+
+    return output;
+  }
+
+  resolvePublicSiteUrlForScheduler() {
+    const envUrl = String(
+      import.meta.env.VITE_PUBLIC_SITE_URL ||
+        import.meta.env.VITE_APP_URL ||
+        import.meta.env.REACT_APP_BASE_URL ||
+        ''
+    ).trim();
+    if (envUrl && !/localhost|127\.0\.0\.1/i.test(envUrl)) {
+      return envUrl.replace(/\/$/, '');
+    }
+    return 'https://tavarios.ca';
+  }
+
+  async queueCampaignRecipients(campaign, businessId) {
+    const { data: contacts, error: contactsError } = await supabase
+      .from('mail_contacts')
+      .select('id, email, first_name, last_name')
+      .eq('business_id', businessId)
+      .eq('subscribed', true)
+      .not('consent_method', 'is', null)
+      .not('consent_timestamp', 'is', null);
+
+    if (contactsError) throw contactsError;
+
+    const validContacts = (contacts || []).filter(contact => contact.email);
+    if (validContacts.length === 0) {
+      throw new Error('No subscribed contacts with recorded consent are available for this campaign');
+    }
+
+    await supabase
+      .from('mail_sending_queue')
+      .delete()
+      .eq('campaign_id', campaign.id)
+      .in('status', ['queued', 'processing']);
+
+    const queueItems = validContacts.map(contact => ({
+      campaign_id: campaign.id,
+      contact_id: contact.id,
+      email_address: contact.email,
+      status: 'queued',
+      priority: 5,
+      scheduled_for: new Date().toISOString(),
+      business_id: businessId,
+      personalized_content: this.personalizeEmailContent(campaign.content_html || '', contact, businessId)
+    }));
+
+    const batchSize = 1000;
+    for (let i = 0; i < queueItems.length; i += batchSize) {
+      const batch = queueItems.slice(i, i + batchSize);
+      const { error } = await supabase
+        .from('mail_sending_queue')
+        .insert(batch);
+
+      if (error) throw error;
+    }
+
+    await supabase
+      .from('mail_campaigns')
+      .update({
+        status: 'sending',
+        total_recipients: validContacts.length,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', campaign.id)
+      .eq('business_id', businessId);
+
+    return {
+      queued: queueItems.length
+    };
+  }
+
+  async processQueuedCampaign(businessId) {
+    const totals = {
+      processed: 0,
+      sent: 0,
+      failed: 0,
+      errors: []
+    };
+
+    for (let i = 0; i < 200; i++) {
+      const { data, error } = await supabase.functions.invoke('mail-process-queue', {
+        body: {
+          businessId,
+          batchSize: 50
+        }
+      });
+
+      if (error) throw error;
+
+      const processed = data?.processed || 0;
+      totals.processed += processed;
+      totals.sent += data?.sent || 0;
+      totals.failed += data?.failed || 0;
+      if (Array.isArray(data?.errors)) {
+        totals.errors.push(...data.errors);
+      }
+
+      if (processed === 0) {
+        break;
+      }
+    }
+
+    return totals;
+  }
+
   // Enhanced schedule campaign with comprehensive error handling
   async scheduleCampaign(campaignId, scheduleData, businessId) {
     try {
@@ -97,7 +323,7 @@ class CampaignSchedulerService {
       // Check campaign exists and belongs to business
       const { data: campaign, error: campaignError } = await supabase
         .from('mail_campaigns')
-        .select('id, name, status, business_id, content_blocks, subject_line')
+        .select('id, name, status, business_id, content_json, content_html, subject_line')
         .eq('id', campaignId)
         .eq('business_id', businessId)
         .single();
@@ -119,32 +345,35 @@ class CampaignSchedulerService {
         };
       }
 
-      // Create enhanced schedule record
+      if (type === 'send_now') {
+        return await this.triggerImmediateSend(campaignId, businessId);
+      }
+
+      await supabase
+        .from('mail_campaign_schedules')
+        .delete()
+        .eq('campaign_id', campaignId)
+        .in('status', ['scheduled', 'processing', 'failed']);
+
+      // Create schedule record using the columns that exist in production
       const scheduleRecord = {
         id: `schedule_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         campaign_id: campaignId,
-        business_id: businessId,
         schedule_type: type,
         timezone: timezone || 'America/Toronto',
-        status: type === 'send_now' ? 'processing' : 'scheduled',
+        status: 'scheduled',
         created_at: new Date().toISOString(),
-        created_by: scheduleData.created_by || null,
-        retry_count: 0,
-        max_retries: this.maxRetries
+        updated_at: new Date().toISOString()
       };
 
-      if (type !== 'send_now') {
-        scheduleRecord.scheduled_for = scheduled_for;
-        
-        // Calculate optimal send time if optimization is enabled
-        if (optimization?.optimize_send_time) {
-          const optimizedTime = await this.getOptimalSendTime(businessId, scheduled_for);
-          if (optimizedTime) {
-            scheduleRecord.original_scheduled_for = scheduled_for;
-            scheduleRecord.scheduled_for = optimizedTime;
-            scheduleRecord.optimization_applied = true;
-          }
+      scheduleRecord.scheduled_for = scheduled_for;
+
+      if (optimization?.enabled) {
+        const optimizedTime = await this.getOptimalSendTime(businessId, scheduled_for);
+        if (optimizedTime) {
+          scheduleRecord.scheduled_for = optimizedTime;
         }
+        scheduleRecord.optimization_settings = optimization;
       }
 
       if (type === 'recurring' && recurring_settings) {
@@ -165,10 +394,6 @@ class CampaignSchedulerService {
         scheduleRecord.next_send_times = nextSendTimes;
       }
 
-      if (optimization) {
-        scheduleRecord.optimization_settings = optimization;
-      }
-
       // Store schedule in database with retry logic
       const { data, error } = await this.executeWithRetry(async () => {
         return await supabase
@@ -180,13 +405,12 @@ class CampaignSchedulerService {
 
       if (error) throw error;
 
-      // Update campaign status with atomic operation
-      const campaignStatus = type === 'send_now' ? 'sending' : 'scheduled';
+      // Update campaign status
       const { error: campaignError2 } = await supabase
         .from('mail_campaigns')
         .update({ 
-          status: campaignStatus,
-          scheduled_for: type !== 'send_now' ? scheduleRecord.scheduled_for : null,
+          status: 'scheduled',
+          scheduled_at: scheduleRecord.scheduled_for,
           updated_at: new Date().toISOString()
         })
         .eq('id', campaignId)
@@ -204,11 +428,6 @@ class CampaignSchedulerService {
       // Clear relevant caches
       this.clearCacheForBusiness(businessId);
 
-      // If send_now, trigger immediate processing
-      if (type === 'send_now') {
-        await this.triggerImmediateSend(campaignId, businessId);
-      }
-
       // Log successful scheduling
       await this.logSchedulingEvent('scheduled', {
         campaign_id: campaignId,
@@ -222,10 +441,9 @@ class CampaignSchedulerService {
         success: true,
         schedule_id: scheduleRecord.id,
         schedule: data,
-        optimized: scheduleRecord.optimization_applied || false,
+        optimized: !!optimization?.enabled,
         next_send_times: scheduleRecord.next_send_times || [],
-        message: type === 'send_now' ? 'Campaign queued for immediate sending' : 
-                 type === 'send_later' ? 'Campaign scheduled successfully' :
+        message: type === 'send_later' ? 'Campaign scheduled successfully' :
                  `Recurring campaign scheduled with ${scheduleRecord.next_send_times?.length || 0} future sends`
       };
     } catch (error) {
@@ -259,7 +477,9 @@ class CampaignSchedulerService {
       errors.push('Campaign must have a subject line');
     }
     
-    if (!campaign.content_blocks || campaign.content_blocks.length === 0) {
+    const contentBlocks = this.getCampaignContentBlocks(campaign);
+
+    if (!contentBlocks || contentBlocks.length === 0) {
       errors.push('Campaign must have content blocks');
     }
     
@@ -272,12 +492,7 @@ class CampaignSchedulerService {
     }
 
     // Check for unsubscribe link compliance
-    const hasUnsubscribe = campaign.content_blocks?.some(block => 
-      (block.type === 'text' && block.content?.includes('{UnsubscribeLink}')) ||
-      (block.type === 'button' && block.content?.url?.includes('unsubscribe'))
-    );
-    
-    if (!hasUnsubscribe) {
+    if (!this.hasUnsubscribeLink(campaign)) {
       errors.push('Campaign must include an unsubscribe link for compliance');
     }
     
@@ -534,44 +749,79 @@ class CampaignSchedulerService {
   // Enhanced immediate send trigger
   async triggerImmediateSend(campaignId, businessId) {
     try {
-      const { error } = await supabase
+      const { data: campaign, error: campaignError } = await supabase
+        .from('mail_campaigns')
+        .select('id, business_id, name, subject_line, content_json, content_html')
+        .eq('id', campaignId)
+        .eq('business_id', businessId)
+        .single();
+
+      if (campaignError || !campaign) {
+        throw campaignError || new Error('Campaign not found');
+      }
+
+      const queueResult = await this.queueCampaignRecipients(campaign, businessId);
+      if (!queueResult?.queued) {
+        throw new Error('No recipients were queued for sending');
+      }
+
+      const processResult = await this.processQueuedCampaign(businessId);
+
+      let finalStatus = 'failed';
+      let success = false;
+      let message = 'Campaign send failed';
+
+      if (processResult.sent > 0 && processResult.failed === 0) {
+        finalStatus = 'sent';
+        success = true;
+        message = 'Campaign sent successfully';
+      } else if (processResult.sent > 0 && processResult.failed > 0) {
+        finalStatus = 'partial_failure';
+        message = `Campaign sent partially: ${processResult.sent} sent, ${processResult.failed} failed`;
+      } else if (processResult.failed > 0) {
+        finalStatus = 'failed';
+        message = `Campaign send failed for ${processResult.failed} recipient(s)`;
+      } else {
+        finalStatus = 'failed';
+        message = 'No recipients were processed';
+      }
+
+      await supabase
         .from('mail_campaigns')
         .update({ 
-          status: 'sending',
-          send_started_at: new Date().toISOString()
+          status: finalStatus,
+          emails_sent: processResult.sent,
+          sent_at: finalStatus === 'sent' ? new Date().toISOString() : null,
+          scheduled_at: null,
+          updated_at: new Date().toISOString()
         })
         .eq('id', campaignId)
         .eq('business_id', businessId);
 
-      if (error) throw error;
+      this.clearCacheForBusiness(businessId);
 
-      // TODO: Integrate with actual email sending service when Amazon SES is ready
-      // For now, we'll simulate the send process
-      setTimeout(async () => {
-        try {
-          await supabase
-            .from('mail_campaigns')
-            .update({ 
-              status: 'sent',
-              sent_at: new Date().toISOString()
-            })
-            .eq('id', campaignId)
-            .eq('business_id', businessId);
-            
-          await this.logSchedulingEvent('sent', {
-            campaign_id: campaignId,
-            business_id: businessId,
-            sent_at: new Date().toISOString()
-          });
-        } catch (error) {
-          console.error('Error updating campaign after send:', error);
-        }
-      }, 5000); // Simulate 5 second send time
+      await this.logSchedulingEvent('sent', {
+        campaign_id: campaignId,
+        business_id: businessId,
+        sent_at: new Date().toISOString(),
+        queued: queueResult.queued,
+        sent_count: processResult.sent,
+        failed_count: processResult.failed
+      });
 
-      return { success: true };
+      return {
+        success,
+        status: finalStatus,
+        message,
+        queued: queueResult.queued,
+        sent: processResult.sent,
+        failed: processResult.failed,
+        processed: processResult.processed,
+        errors: processResult.errors || []
+      };
     } catch (error) {
       console.error('Error triggering immediate send:', error);
-      return { success: false, error: error.message };
+      return { success: false, status: 'failed', error: error.message };
     }
   }
 
@@ -579,7 +829,6 @@ class CampaignSchedulerService {
   async processScheduledCampaigns() {
     try {
       const now = new Date();
-      const fiveMinutesFromNow = new Date(now.getTime() + (5 * 60 * 1000));
 
       const { data: scheduledCampaigns, error } = await supabase
         .from('mail_campaign_schedules')
@@ -588,8 +837,8 @@ class CampaignSchedulerService {
           campaign:mail_campaigns(id, name, status, business_id)
         `)
         .eq('status', 'scheduled')
-        .lte('scheduled_for', fiveMinutesFromNow.toISOString())
-        .gte('scheduled_for', now.toISOString());
+        .lte('scheduled_for', now.toISOString())
+        .order('scheduled_for', { ascending: true });
 
       if (error) throw error;
 
@@ -601,11 +850,14 @@ class CampaignSchedulerService {
             .update({ status: 'processing', processed_at: new Date().toISOString() })
             .eq('id', schedule.id);
 
-          await this.triggerImmediateSend(schedule.campaign_id, schedule.campaign.business_id);
+          const sendResult = await this.triggerImmediateSend(schedule.campaign_id, schedule.campaign.business_id);
+          if (!sendResult.success) {
+            throw new Error(sendResult.error || 'Scheduled send failed');
+          }
 
           await supabase
             .from('mail_campaign_schedules')
-            .update({ status: 'completed' })
+            .update({ status: 'completed', updated_at: new Date().toISOString() })
             .eq('id', schedule.id);
 
           results.push({
@@ -615,7 +867,18 @@ class CampaignSchedulerService {
           });
 
           if (schedule.schedule_type === 'recurring' && schedule.recurring_settings) {
-            await this.scheduleNextRecurrence(schedule);
+            const recurrenceResult = await this.scheduleNextRecurrence(schedule);
+            if (recurrenceResult?.next_scheduled_for) {
+              await supabase
+                .from('mail_campaigns')
+                .update({
+                  status: 'scheduled',
+                  scheduled_at: recurrenceResult.next_scheduled_for,
+                  updated_at: new Date().toISOString()
+                })
+                .eq('id', schedule.campaign_id)
+                .eq('business_id', schedule.campaign.business_id);
+            }
           }
 
         } catch (error) {
@@ -672,7 +935,6 @@ class CampaignSchedulerService {
       const nextSchedule = {
         id: `schedule_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         campaign_id: campaign_id,
-        business_id: schedule.business_id,
         schedule_type: 'recurring',
         scheduled_for: nextSendTime,
         timezone: schedule.timezone,
@@ -689,35 +951,175 @@ class CampaignSchedulerService {
 
       if (error) throw error;
 
-      return { success: true, next_schedule_id: nextSchedule.id };
+      return { success: true, next_schedule_id: nextSchedule.id, next_scheduled_for: nextSendTime };
     } catch (error) {
       console.error('Error scheduling next recurrence:', error);
       return { success: false, error: error.message };
     }
   }
 
+  getFallbackRecommendations() {
+    return [
+      {
+        time: '10:00',
+        day: 'tuesday',
+        engagement_score: 92,
+        reason: 'Strong general engagement window while your account builds history',
+        data_points: 0
+      },
+      {
+        time: '14:00',
+        day: 'thursday',
+        engagement_score: 88,
+        reason: 'Reliable afternoon send window for broad audiences',
+        data_points: 0
+      },
+      {
+        time: '09:00',
+        day: 'wednesday',
+        engagement_score: 85,
+        reason: 'Good weekday morning visibility for most campaigns',
+        data_points: 0
+      }
+    ];
+  }
+
+  async buildRecommendationsFromHistory(businessId) {
+    const cacheKey = `${businessId}_optimal_times`;
+    const cached = this.getCachedData(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const businessTimezone = await this.getBusinessTimezoneForRecommendations(businessId);
+
+    const { data: campaigns, error: campaignError } = await supabase
+      .from('mail_campaigns')
+      .select('id')
+      .eq('business_id', businessId)
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (campaignError) throw campaignError;
+
+    const campaignIds = (campaigns || []).map((campaign) => campaign.id);
+    if (!campaignIds.length) {
+      const fallback = this.getFallbackRecommendations();
+      this.setCachedData(cacheKey, fallback);
+      return fallback;
+    }
+
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+    const { data: sends, error: sendsError } = await supabase
+      .from('mail_campaign_sends')
+      .select('campaign_id, status, sent_at, delivered_at, opened_at, clicked_at')
+      .in('campaign_id', campaignIds)
+      .gte('sent_at', sixMonthsAgo.toISOString())
+      .not('sent_at', 'is', null)
+      .order('sent_at', { ascending: false })
+      .limit(5000);
+
+    if (sendsError) throw sendsError;
+
+    if (!sends?.length) {
+      const fallback = this.getFallbackRecommendations();
+      this.setCachedData(cacheKey, fallback);
+      return fallback;
+    }
+
+    const bins = new Map();
+
+    for (const send of sends) {
+      const zonedParts = this.getZonedDateParts(send.sent_at, businessTimezone);
+      if (!zonedParts) continue;
+
+      const day = zonedParts.weekday;
+      const hour = zonedParts.hour;
+      const key = `${day}-${hour}`;
+      const current = bins.get(key) || {
+        day,
+        hour,
+        sends: 0,
+        opened: 0,
+        clicked: 0,
+        delivered: 0,
+        score: 0
+      };
+
+      current.sends += 1;
+      if (send.delivered_at || send.status === 'delivered' || send.status === 'opened' || send.status === 'clicked' || send.status === 'sent') {
+        current.delivered += 1;
+        current.score += 25;
+      }
+      if (send.opened_at || send.status === 'opened' || send.status === 'clicked') {
+        current.opened += 1;
+        current.score += 30;
+      }
+      if (send.clicked_at || send.status === 'clicked') {
+        current.clicked += 1;
+        current.score += 45;
+      }
+      if (send.status === 'failed' || send.status === 'bounced') {
+        current.score -= 20;
+      }
+
+      bins.set(key, current);
+    }
+
+    const recommendations = Array.from(bins.values())
+      .filter((bin) => bin.sends >= 3)
+      .map((bin) => {
+        const openRate = bin.sends > 0 ? (bin.opened / bin.sends) * 100 : 0;
+        const clickRate = bin.sends > 0 ? (bin.clicked / bin.sends) * 100 : 0;
+        const deliveryRate = bin.sends > 0 ? (bin.delivered / bin.sends) * 100 : 0;
+        const engagementScore = Math.max(
+          1,
+          Math.min(99, Math.round((bin.score / bin.sends) + Math.min(bin.sends / 4, 10)))
+        );
+
+        let reason = 'Consistent historical engagement from recent campaigns';
+        if (clickRate >= 15) {
+          reason = 'Strong click-through performance in recent campaign history';
+        } else if (openRate >= 35) {
+          reason = 'Strong open rates in recent campaign history';
+        } else if (deliveryRate >= 95) {
+          reason = 'Consistently reliable delivery performance';
+        }
+
+        return {
+          time: `${String(bin.hour).padStart(2, '0')}:00`,
+          day: bin.day,
+          engagement_score: engagementScore,
+          reason,
+          data_points: bin.sends
+        };
+      })
+      .sort((a, b) => {
+        if (b.engagement_score !== a.engagement_score) {
+          return b.engagement_score - a.engagement_score;
+        }
+        return b.data_points - a.data_points;
+      })
+      .slice(0, 3);
+
+    const finalRecommendations = recommendations.length
+      ? recommendations
+      : this.getFallbackRecommendations();
+
+    this.setCachedData(cacheKey, finalRecommendations);
+    return finalRecommendations;
+  }
+
   // Get optimal send time recommendations
   async getOptimalSendTime(businessId, requestedTime) {
     try {
-      // Check cache first
-      const cacheKey = `${businessId}_optimal_times`;
-      const cached = this.getCachedData(cacheKey);
-      if (cached) {
-        return this.findBestTimeFromRecommendations(cached, requestedTime);
-      }
-
-      // For now, return industry best practices
-      // TODO: Replace with actual analytics when data is available
-      const recommendations = [
-        { time: '10:00', day: 'tuesday', engagement_score: 92 },
-        { time: '14:00', day: 'thursday', engagement_score: 88 },
-        { time: '09:00', day: 'wednesday', engagement_score: 85 }
-      ];
-
-      // Cache the recommendations
-      this.setCachedData(cacheKey, recommendations);
-
-      return this.findBestTimeFromRecommendations(recommendations, requestedTime);
+      const [recommendations, businessTimezone] = await Promise.all([
+        this.buildRecommendationsFromHistory(businessId),
+        this.getBusinessTimezoneForRecommendations(businessId)
+      ]);
+      return this.findBestTimeFromRecommendations(recommendations, requestedTime, businessTimezone);
     } catch (error) {
       console.error('Error getting optimal send time:', error);
       return null;
@@ -725,22 +1127,28 @@ class CampaignSchedulerService {
   }
 
   // Find best time from recommendations
-  findBestTimeFromRecommendations(recommendations, requestedTime) {
-    const requestedDate = new Date(requestedTime);
-    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  findBestTimeFromRecommendations(recommendations, requestedTime, businessTimezone = DEFAULT_BUSINESS_TIMEZONE) {
+    const timezone = this.getSafeTimezone(businessTimezone);
+    const requestedDate = dayjs(requestedTime).tz(timezone);
+    if (!requestedDate.isValid()) {
+      return null;
+    }
     
     // Find recommendation for same day of week
-    const requestedDay = dayNames[requestedDate.getDay()];
+    const requestedDay = requestedDate.format('dddd').toLowerCase();
     const dayRecommendation = recommendations.find(rec => rec.day === requestedDay);
     
     if (dayRecommendation) {
       const [hours, minutes] = dayRecommendation.time.split(':');
-      const optimizedDate = new Date(requestedDate);
-      optimizedDate.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+      const optimizedDate = requestedDate
+        .hour(parseInt(hours, 10))
+        .minute(parseInt(minutes, 10))
+        .second(0)
+        .millisecond(0);
       
       // Only return if it's still in the future
-      if (optimizedDate > new Date()) {
-        return optimizedDate.toISOString();
+      if (optimizedDate.isAfter(dayjs())) {
+        return optimizedDate.utc().toISOString();
       }
     }
     
@@ -750,29 +1158,7 @@ class CampaignSchedulerService {
   // Get send time recommendations for UI
   async getSendTimeRecommendations(businessId) {
     try {
-      const recommendations = [
-        {
-          time: '10:00',
-          day: 'tuesday',
-          engagement_score: 92,
-          reason: 'Highest open rates in your industry',
-          data_points: 1500
-        },
-        {
-          time: '14:00',
-          day: 'thursday',
-          engagement_score: 88,
-          reason: 'Peak engagement time for your audience',
-          data_points: 1200
-        },
-        {
-          time: '09:00',
-          day: 'wednesday',
-          engagement_score: 85,
-          reason: 'High click-through rates historically',
-          data_points: 950
-        }
-      ];
+      const recommendations = await this.buildRecommendationsFromHistory(businessId);
 
       return {
         success: true,
@@ -867,7 +1253,7 @@ class CampaignSchedulerService {
         .from('mail_campaigns')
         .update({ 
           status: 'draft',
-          scheduled_for: null,
+          scheduled_at: null,
           updated_at: new Date().toISOString()
         })
         .eq('id', schedule.campaign_id);
@@ -926,7 +1312,8 @@ class CampaignSchedulerService {
       // Validate updates
       const validation = this.validateScheduleData({
         ...schedule,
-        ...updates
+        ...updates,
+        type: schedule.schedule_type
       }, businessId);
       
       if (!validation.isValid) {

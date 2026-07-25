@@ -8,10 +8,13 @@ const PETPeriodSetup = ({
   payrollRun, 
   loading, 
   onCreatePayrollRun,
+  onCreatePayrollRunFromSchedule,
   onShowDraftLookup,
   saveMessage,
   error 
-}) => {
+  }) => {
+  const hasScheduleModule = typeof onCreatePayrollRunFromSchedule === 'function';
+
   const styles = {
     section: {
       marginBottom: TavariStyles.spacing?.lg || '16px',
@@ -28,16 +31,32 @@ const PETPeriodSetup = ({
       color: TavariStyles.colors?.gray800 || '#1f2937',
       margin: '0 0 12px 0'
     },
-    periodForm: {
-      display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+    periodLayout: {
+      display: 'flex',
+      flexDirection: 'column',
       gap: TavariStyles.spacing?.md || '12px',
+      width: '100%'
+    },
+    dateRow: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+      gap: TavariStyles.spacing?.md || '12px',
+      width: '100%',
       alignItems: 'end'
+    },
+    buttonRow: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+      gap: TavariStyles.spacing?.md || '12px',
+      width: '100%',
+      alignItems: 'stretch'
     },
     formGroup: {
       display: 'flex',
       flexDirection: 'column',
-      gap: TavariStyles.spacing?.xs || '4px'
+      gap: TavariStyles.spacing?.xs || '4px',
+      minWidth: 0,
+      width: '100%'
     },
     label: {
       fontSize: TavariStyles.typography?.fontSize?.sm || '14px',
@@ -51,20 +70,26 @@ const PETPeriodSetup = ({
       fontSize: TavariStyles.typography?.fontSize?.sm || '14px',
       transition: 'border-color 0.2s',
       fontFamily: 'inherit',
-      backgroundColor: TavariStyles.colors?.white || '#ffffff'
+      backgroundColor: TavariStyles.colors?.white || '#ffffff',
+      width: '100%',
+      boxSizing: 'border-box'
     },
     inputDisabled: {
       backgroundColor: TavariStyles.colors?.gray100 || '#f3f4f6',
       cursor: 'not-allowed',
       opacity: 0.6
     },
-    buttonGroup: {
-      display: 'flex',
-      gap: TavariStyles.spacing?.md || '12px',
-      flexWrap: 'wrap'
+    buttonCell: {
+      minWidth: 0,
+      display: 'flex'
+    },
+    tertiaryButton: {
+      backgroundColor: TavariStyles.colors?.gray800 || '#1f2937',
+      color: TavariStyles.colors?.white || '#ffffff',
+      border: 'none'
     },
     button: {
-      padding: '12px 24px',
+      padding: '12px 16px',
       borderRadius: TavariStyles.borderRadius?.md || '6px',
       border: 'none',
       fontSize: TavariStyles.typography?.fontSize?.sm || '14px',
@@ -72,7 +97,11 @@ const PETPeriodSetup = ({
       cursor: 'pointer',
       transition: 'all 0.2s ease',
       backgroundColor: TavariStyles.colors?.primary || '#008080',
-      color: TavariStyles.colors?.white || '#ffffff'
+      color: TavariStyles.colors?.white || '#ffffff',
+      width: '100%',
+      boxSizing: 'border-box',
+      textAlign: 'center',
+      lineHeight: 1.35
     },
     secondaryButton: {
       backgroundColor: TavariStyles.colors?.white || '#ffffff',
@@ -112,52 +141,62 @@ const PETPeriodSetup = ({
         </div>
       )}
 
-      <div style={styles.periodForm}>
-        <div style={styles.formGroup}>
-          <label style={styles.label}>Start Date:</label>
-          <input 
-            type="date" 
-            style={{
-              ...styles.input,
-              ...(payrollRun || loading ? styles.inputDisabled : {})
-            }}
-            value={selectedPeriod.start} 
-            onChange={(e) => setSelectedPeriod(prev => ({ ...prev, start: e.target.value }))} 
-            disabled={!!payrollRun || loading} 
-          />
+      <div style={styles.periodLayout}>
+        <div style={styles.dateRow}>
+          <div style={styles.formGroup}>
+            <label style={styles.label}>Start Date:</label>
+            <input 
+              type="date" 
+              style={{
+                ...styles.input,
+                ...(payrollRun || loading ? styles.inputDisabled : {})
+              }}
+              value={selectedPeriod.start} 
+              onChange={(e) => setSelectedPeriod(prev => ({ ...prev, start: e.target.value }))} 
+              disabled={!!payrollRun || loading} 
+            />
+          </div>
+          
+          <div style={styles.formGroup}>
+            <label style={styles.label}>End Date:</label>
+            <input 
+              type="date" 
+              style={{
+                ...styles.input,
+                ...(payrollRun || loading ? styles.inputDisabled : {})
+              }}
+              value={selectedPeriod.end} 
+              onChange={(e) => setSelectedPeriod(prev => ({ ...prev, end: e.target.value }))} 
+              disabled={!!payrollRun || loading} 
+            />
+          </div>
+          
+          <div style={styles.formGroup}>
+            <label style={styles.label}>Pay Date:</label>
+            <input 
+              type="date" 
+              style={{
+                ...styles.input,
+                ...(payrollRun || loading ? styles.inputDisabled : {})
+              }}
+              value={selectedPeriod.payDate} 
+              onChange={(e) => setSelectedPeriod(prev => ({ ...prev, payDate: e.target.value }))} 
+              disabled={!!payrollRun || loading} 
+            />
+          </div>
         </div>
-        
-        <div style={styles.formGroup}>
-          <label style={styles.label}>End Date:</label>
-          <input 
-            type="date" 
-            style={{
-              ...styles.input,
-              ...(payrollRun || loading ? styles.inputDisabled : {})
-            }}
-            value={selectedPeriod.end} 
-            onChange={(e) => setSelectedPeriod(prev => ({ ...prev, end: e.target.value }))} 
-            disabled={!!payrollRun || loading} 
-          />
-        </div>
-        
-        <div style={styles.formGroup}>
-          <label style={styles.label}>Pay Date:</label>
-          <input 
-            type="date" 
-            style={{
-              ...styles.input,
-              ...(payrollRun || loading ? styles.inputDisabled : {})
-            }}
-            value={selectedPeriod.payDate} 
-            onChange={(e) => setSelectedPeriod(prev => ({ ...prev, payDate: e.target.value }))} 
-            disabled={!!payrollRun || loading} 
-          />
-        </div>
-        
-        <div style={styles.formGroup}>
-          <div style={styles.buttonGroup}>
+
+        <div
+          style={{
+            ...styles.buttonRow,
+            gridTemplateColumns: hasScheduleModule
+              ? 'repeat(3, minmax(0, 1fr))'
+              : 'repeat(2, minmax(0, 1fr))'
+          }}
+        >
+          <div style={styles.buttonCell}>
             <button 
+              type="button"
               style={{ 
                 ...styles.button, 
                 ...(loading || payrollRun ? styles.disabledButton : {}) 
@@ -167,8 +206,29 @@ const PETPeriodSetup = ({
             >
               {loading ? 'Creating...' : payrollRun ? 'Payroll Run Created' : 'Create Payroll Run'}
             </button>
-            
+          </div>
+
+          {hasScheduleModule && (
+            <div style={styles.buttonCell}>
+              <button
+                type="button"
+                style={{
+                  ...styles.button,
+                  ...styles.tertiaryButton,
+                  ...(loading || payrollRun ? styles.disabledButton : {})
+                }}
+                onClick={onCreatePayrollRunFromSchedule}
+                disabled={loading || !!payrollRun}
+                title="Creates a draft payroll run and fills employee hours from completed time clock punches in this pay period (Scheduling / Timesheets)."
+              >
+                {loading ? 'Creating...' : payrollRun ? 'Payroll Run Created' : 'Create Payroll Run Using Schedule Module'}
+              </button>
+            </div>
+          )}
+          
+          <div style={styles.buttonCell}>
             <button 
+              type="button"
               style={{
                 ...styles.button,
                 ...styles.secondaryButton,

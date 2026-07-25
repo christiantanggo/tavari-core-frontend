@@ -1,7 +1,7 @@
 // components/Mail/CSVImportModal.jsx
 import React, { useState } from 'react';
 import { supabase } from '../../supabaseClient';
-import { FiX, FiUpload, FiDownload, FiAlertTriangle, FiCheck, FiFileText, FiUsers } from 'react-icons/fi';
+import { FiX, FiUpload, FiDownload, FiAlertTriangle, FiCheck, FiFileText, FiUsers, FiUserX } from 'react-icons/fi';
 
 const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
   const [file, setFile] = useState(null);
@@ -13,14 +13,38 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
   const [errors, setErrors] = useState([]);
   const [validRows, setValidRows] = useState([]);
   const [importResults, setImportResults] = useState(null);
+  const [consentConfirmed, setConsentConfirmed] = useState(false);
+  const [consentMethod, setConsentMethod] = useState('express');
+  const [delimiter, setDelimiter] = useState(',');
+  const [importMode, setImportMode] = useState('contacts');
+  const [overrideExistingUnsubscribed, setOverrideExistingUnsubscribed] = useState(false);
+  const [statusSummary, setStatusSummary] = useState({ subscribed: 0, unsubscribed: 0, unknown: 0 });
 
   const requiredFields = ['email'];
-  const optionalFields = ['first_name', 'last_name', 'phone', 'tags', 'source'];
+  const optionalFields = ['first_name', 'last_name', 'phone', 'tags', 'source', 'subscribed_lists', 'blocklisted_lists', 'marketing_status'];
   const allFields = [...requiredFields, ...optionalFields];
+  const isMarketingStatusImport = importMode === 'marketing_status_sync';
+
+  const getFieldLabel = (field) => {
+    const labels = {
+      first_name: 'FIRST NAME',
+      last_name: 'LAST NAME',
+      subscribed_lists: 'SUBSCRIBED LISTS',
+      blocklisted_lists: 'BLOCKLISTED LISTS',
+      marketing_status: 'MARKETING STATUS'
+    };
+    return labels[field] || field.replace('_', ' ').toUpperCase();
+  };
 
   const handleFileSelect = (event) => {
     const selectedFile = event.target.files[0];
-    if (selectedFile && selectedFile.type === 'text/csv') {
+    const isCsvFile = selectedFile && (
+      selectedFile.type === 'text/csv' ||
+      selectedFile.type === 'application/vnd.ms-excel' ||
+      selectedFile.name?.toLowerCase().endsWith('.csv')
+    );
+
+    if (isCsvFile) {
       setFile(selectedFile);
       parseCSV(selectedFile);
     } else {
@@ -41,11 +65,12 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
 
       // Parse headers
       const headerLine = lines[0];
-      const parsedHeaders = parseCSVLine(headerLine).map(h => h.trim().toLowerCase());
+      const detectedDelimiter = detectDelimiter(headerLine);
+      const parsedHeaders = parseCSVLine(headerLine, detectedDelimiter).map(h => h.trim().toLowerCase());
       
       // Parse data rows
       const dataRows = lines.slice(1).map((line, index) => {
-        const values = parseCSVLine(line);
+        const values = parseCSVLine(line, detectedDelimiter);
         const row = {};
         parsedHeaders.forEach((header, i) => {
           row[header] = values[i] || '';
@@ -54,6 +79,12 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
         return row;
       });
 
+      const detectedStatusImport = parsedHeaders.includes('_subscribed') || parsedHeaders.includes('_blocklisted');
+      const isCurrentMarketingFile = file.name === '6056561-69ee5a867219a9467aeb67a1-l6Mcvl.csv';
+
+      setDelimiter(detectedDelimiter);
+      setImportMode(detectedStatusImport ? 'marketing_status_sync' : 'contacts');
+      setOverrideExistingUnsubscribed(detectedStatusImport && isCurrentMarketingFile);
       setHeaders(parsedHeaders);
       setCsvData(dataRows);
       
@@ -71,6 +102,12 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
           autoMapping.phone = header;
         } else if (cleanHeader.includes('tag') || cleanHeader === 'tags') {
           autoMapping.tags = header;
+        } else if (header === '_subscribed' || cleanHeader === 'subscribed') {
+          autoMapping.subscribed_lists = header;
+        } else if (header === '_blocklisted' || cleanHeader === 'blocklisted') {
+          autoMapping.blocklisted_lists = header;
+        } else if (cleanHeader.includes('marketingstatus') || cleanHeader.includes('marketingconsent')) {
+          autoMapping.marketing_status = header;
         }
       });
       
@@ -80,7 +117,13 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
     reader.readAsText(file);
   };
 
-  const parseCSVLine = (line) => {
+  const detectDelimiter = (headerLine) => {
+    const commaCount = (headerLine.match(/,/g) || []).length;
+    const semicolonCount = (headerLine.match(/;/g) || []).length;
+    return semicolonCount > commaCount ? ';' : ',';
+  };
+
+  const parseCSVLine = (line, activeDelimiter = delimiter) => {
     const result = [];
     let current = '';
     let inQuotes = false;
@@ -90,7 +133,7 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
       
       if (char === '"') {
         inQuotes = !inQuotes;
-      } else if (char === ',' && !inQuotes) {
+      } else if (char === activeDelimiter && !inQuotes) {
         result.push(current.trim());
         current = '';
       } else {
@@ -102,9 +145,24 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
     return result;
   };
 
+  const getMarketingStatus = (row) => {
+    const explicit = String(row.marketing_status || '').trim().toLowerCase();
+    if (['yes', 'y', 'true', '1', 'subscribed', 'subscribe', 'opt_in', 'opt-in', 'email_marketing'].includes(explicit)) {
+      return 'subscribed';
+    }
+    if (['no', 'n', 'false', '0', 'unsubscribed', 'unsubscribe', 'opt_out', 'opt-out', 'blocked', 'blocklisted'].includes(explicit)) {
+      return 'unsubscribed';
+    }
+
+    if (String(row.blocklisted_lists || '').toLowerCase().includes('email_marketing')) return 'unsubscribed';
+    if (String(row.subscribed_lists || '').toLowerCase().includes('email_marketing')) return 'subscribed';
+    return 'unknown';
+  };
+
   const validateData = () => {
     const newErrors = [];
     const newValidRows = [];
+    const nextStatusSummary = { subscribed: 0, unsubscribed: 0, unknown: 0 };
     
     // Check if email column is mapped
     if (!mapping.email) {
@@ -144,6 +202,8 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
             cleanRow[field] = value ? 
               value.split(/[,;|]/).map(tag => tag.trim()).filter(tag => tag) : 
               [];
+          } else if (field === 'subscribed_lists' || field === 'blocklisted_lists' || field === 'marketing_status') {
+            cleanRow[field] = value ? value.trim() : '';
           } else {
             // First name, last name, source
             cleanRow[field] = value ? value.trim() : '';
@@ -155,6 +215,11 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
       cleanRow.source = cleanRow.source || 'csv_import';
       cleanRow.business_id = businessId;
       cleanRow._originalIndex = row._originalIndex;
+
+      if (isMarketingStatusImport) {
+        cleanRow.marketing_status = getMarketingStatus(cleanRow);
+        nextStatusSummary[cleanRow.marketing_status] += 1;
+      }
 
       if (rowErrors.length > 0) {
         newErrors.push({
@@ -170,18 +235,34 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
 
     setErrors(newErrors);
     setValidRows(newValidRows);
-    return true;
+    setStatusSummary(nextStatusSummary);
+    return {
+      isValid: true,
+      errors: newErrors,
+      validRows: newValidRows
+    };
   };
 
   const handleImport = async () => {
-    if (!validateData()) return;
+    const validation = validateData();
+    if (!validation?.isValid) return;
     
-    if (validRows.length === 0) {
+    if (validation.validRows.length === 0) {
       alert('No valid rows to import.');
       return;
     }
 
-    const confirmMessage = `Import ${validRows.length} valid contacts? ${errors.length > 0 ? `(${errors.length} rows will be skipped due to errors)` : ''}`;
+    if (!consentConfirmed) {
+      alert('You must confirm you have marketing consent before importing contacts.');
+      return;
+    }
+
+    const confirmMessage = isMarketingStatusImport
+      ? `Sync marketing status for ${validation.validRows.length} valid contacts?\n\n` +
+        `${validation.validRows.filter(row => row.marketing_status === 'subscribed').length} will be marked subscribed/consented.\n` +
+        `${validation.validRows.filter(row => row.marketing_status === 'unsubscribed').length} will be marked not subscribed for marketing.\n` +
+        `${overrideExistingUnsubscribed ? 'Existing NO/unsubscribed contacts may be changed back to YES for this import.' : 'Existing NO/unsubscribed contacts will remain NO even if the file says YES.'}`
+      : `Import ${validation.validRows.length} valid contacts? ${validation.errors.length > 0 ? `(${validation.errors.length} rows will be skipped due to errors)` : ''}`;
     if (!window.confirm(confirmMessage)) return;
 
     setImporting(true);
@@ -191,65 +272,57 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
       let successCount = 0;
       let errorCount = 0;
       let duplicateCount = 0;
+      let updatedCount = 0;
+      let subscribedCount = 0;
+      let unsubscribedCount = 0;
+      let preservedUnsubscribedCount = 0;
+      let skippedStatusCount = 0;
       const importErrors = [];
 
-      // Process in batches of 50
-      const batchSize = 50;
-      for (let i = 0; i < validRows.length; i += batchSize) {
-        const batch = validRows.slice(i, i + batchSize);
-        
-        for (const row of batch) {
-          try {
-            // Use deduplication function
-            const { data: contactId, error } = await supabase.rpc('dedupe_mail_contact', {
-              p_business_id: businessId,
-              p_email: row.email,
-              p_first_name: row.first_name || '',
-              p_last_name: row.last_name || '',
-              p_phone: row.phone || '',
-              p_source: row.source
-            });
+      // Process in larger backend batches instead of one RPC per row
+      const batchSize = 1000;
+      for (let i = 0; i < validation.validRows.length; i += batchSize) {
+        const batch = validation.validRows.slice(i, i + batchSize);
 
-            if (error) throw error;
-
-            // Check if this was a new contact or existing
-            const { data: existingContact, error: checkError } = await supabase
-              .from('mail_contacts')
-              .select('created_at')
-              .eq('id', contactId)
-              .single();
-
-            if (checkError) throw checkError;
-
-            const isNew = new Date(existingContact.created_at) > new Date(Date.now() - 1000); // Created within last second
-
-            if (isNew) {
-              // Update tags if provided
-              if (row.tags && row.tags.length > 0) {
-                await supabase
-                  .from('mail_contacts')
-                  .update({ tags: row.tags })
-                  .eq('id', contactId);
-              }
-              successCount++;
-            } else {
-              duplicateCount++;
+        try {
+          const { data, error } = await supabase.functions.invoke('mail-import-contacts', {
+            body: {
+              businessId,
+              contacts: batch.map((row) => {
+                const cleanRow = { ...row };
+                delete cleanRow._originalIndex;
+                return cleanRow;
+              }),
+              consentConfirmed: true,
+              source: isMarketingStatusImport ? 'marketing_status_csv_import' : 'csv_import',
+              consentMethod,
+              consentTimestamp: new Date().toISOString(),
+              consentText: isMarketingStatusImport ? 'Marketing consent status synced from imported customer marketing CSV.' : null,
+              importMode,
+              overrideExistingUnsubscribed: isMarketingStatusImport && overrideExistingUnsubscribed,
             }
+          });
 
-          } catch (error) {
-            console.error('Error importing row:', error);
-            errorCount++;
+          if (error) throw error;
+          if (!data?.ok) throw new Error(data?.error || 'Import batch failed');
+
+          successCount += data.inserted || 0;
+          duplicateCount += data.duplicates || 0;
+          updatedCount += data.updated || 0;
+          subscribedCount += data.subscribed || 0;
+          unsubscribedCount += data.unsubscribed || 0;
+          preservedUnsubscribedCount += data.preserved_unsubscribed || 0;
+          skippedStatusCount += data.skipped_status || 0;
+        } catch (error) {
+          console.error('Error importing batch:', error);
+          errorCount += batch.length;
+          batch.forEach((row) => {
             importErrors.push({
               line: row._originalIndex,
               email: row.email,
               error: error.message
             });
-          }
-        }
-
-        // Add small delay between batches to avoid overwhelming the database
-        if (i + batchSize < validRows.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+          });
         }
       }
 
@@ -259,9 +332,16 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
         action: 'csv_import',
         details: { 
           total_rows: csvData.length,
-          valid_rows: validRows.length,
+          valid_rows: validation.validRows.length,
           success_count: successCount,
           duplicate_count: duplicateCount,
+          updated_count: updatedCount,
+          subscribed_count: subscribedCount,
+          unsubscribed_count: unsubscribedCount,
+          preserved_unsubscribed_count: preservedUnsubscribedCount,
+          skipped_status_count: skippedStatusCount,
+          import_mode: importMode,
+          override_existing_unsubscribed: isMarketingStatusImport && overrideExistingUnsubscribed,
           error_count: errorCount,
           filename: file.name
         },
@@ -270,17 +350,23 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
 
       setImportResults({
         total: csvData.length,
-        valid: validRows.length,
+        valid: validation.validRows.length,
         success: successCount,
         duplicates: duplicateCount,
-        errors: errorCount + errors.length,
+        updated: updatedCount,
+        subscribed: subscribedCount,
+        unsubscribed: unsubscribedCount,
+        preservedUnsubscribed: preservedUnsubscribedCount,
+        skippedStatus: skippedStatusCount,
+        mode: importMode,
+        errors: errorCount + validation.errors.length,
         importErrors
       });
 
       setStep('complete');
 
       if (onImportComplete) {
-        onImportComplete(successCount);
+        onImportComplete(successCount + updatedCount);
       }
 
     } catch (error) {
@@ -319,6 +405,12 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
     setErrors([]);
     setValidRows([]);
     setImportResults(null);
+    setConsentConfirmed(false);
+    setConsentMethod('express');
+    setDelimiter(',');
+    setImportMode('contacts');
+    setOverrideExistingUnsubscribed(false);
+    setStatusSummary({ subscribed: 0, unsubscribed: 0, unknown: 0 });
     setStep('upload');
   };
 
@@ -391,13 +483,29 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
               <h3 style={styles.sectionTitle}>Map CSV Columns</h3>
               <p style={styles.sectionText}>
                 Match your CSV columns to contact fields. Email is required.
+                {isMarketingStatusImport && ' This file looks like a marketing consent status export.'}
               </p>
+
+              <div style={styles.importModeBox}>
+                <div style={styles.importModeHeader}>
+                  Import mode: {isMarketingStatusImport ? 'Marketing consent status sync' : 'Contact import'}
+                </div>
+                <div style={styles.importModeText}>
+                  Detected delimiter: <strong>{delimiter === ';' ? 'semicolon (;)' : 'comma (,)'}</strong>
+                </div>
+                {isMarketingStatusImport && (
+                  <div style={styles.importModeText}>
+                    The importer will use subscribed/blocklisted fields to decide who can receive marketing email.
+                    Transactional email remains separate.
+                  </div>
+                )}
+              </div>
 
               <div style={styles.mappingGrid}>
                 {allFields.map(field => (
                   <div key={field} style={styles.mappingRow}>
                     <label style={styles.mappingLabel}>
-                      {field.replace('_', ' ').toUpperCase()}
+                      {getFieldLabel(field)}
                       {requiredFields.includes(field) && <span style={styles.required}>*</span>}
                     </label>
                     <select
@@ -419,6 +527,66 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
                   <FiFileText style={styles.statIcon} />
                   <span>{csvData.length} rows in CSV</span>
                 </div>
+                {isMarketingStatusImport && (
+                  <>
+                    <div style={styles.statItem}>
+                      <FiCheck style={styles.statIcon} />
+                      <span>{statusSummary.subscribed} email marketing YES</span>
+                    </div>
+                    <div style={styles.statItem}>
+                      <FiUserX style={styles.statIcon} />
+                      <span>{statusSummary.unsubscribed} email marketing NO</span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <label style={styles.consentBox}>
+                <input
+                  type="checkbox"
+                  checked={consentConfirmed}
+                  onChange={(e) => setConsentConfirmed(e.target.checked)}
+                  style={styles.consentCheckbox}
+                />
+                <span>
+                  {isMarketingStatusImport
+                    ? 'I confirm this file is the current customer marketing consent status source for this import.'
+                    : 'I confirm these contacts have consent to receive marketing emails and may be imported as subscribed contacts.'}
+                </span>
+              </label>
+
+              {isMarketingStatusImport && (
+                <label style={styles.overrideBox}>
+                  <input
+                    type="checkbox"
+                    checked={overrideExistingUnsubscribed}
+                    onChange={(e) => setOverrideExistingUnsubscribed(e.target.checked)}
+                    style={styles.consentCheckbox}
+                  />
+                  <span>
+                    Override existing NO/unsubscribed contacts when this file says YES.
+                    Use this only when the upload is the latest authoritative marketing approval list.
+                  </span>
+                </label>
+              )}
+
+              <div style={styles.consentDetails}>
+                <label style={styles.consentLabel}>
+                  Consent type to store
+                </label>
+                <select
+                  value={consentMethod}
+                  onChange={(e) => setConsentMethod(e.target.value)}
+                  style={styles.mappingSelect}
+                >
+                  <option value="express">Express consent</option>
+                  <option value="implied">Implied consent</option>
+                </select>
+                <p style={styles.consentHelpText}>
+                  {isMarketingStatusImport
+                    ? 'This value will be written only to contacts marked YES for email marketing and logged for consent tracking.'
+                    : 'This value will be written to each imported subscribed contact and logged for consent tracking.'}
+                </p>
               </div>
 
               {errors.length > 0 && (
@@ -459,10 +627,10 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
                 <button 
                   style={styles.importButton}
                   onClick={handleImport}
-                  disabled={!mapping.email || importing}
+                  disabled={!mapping.email || importing || !consentConfirmed}
                 >
                   <FiUsers style={styles.buttonIcon} />
-                  Import {validRows.length} Contacts
+                  {isMarketingStatusImport ? 'Sync Marketing Status' : `Import ${validRows.length} Contacts`}
                 </button>
               </div>
             </div>
@@ -495,9 +663,25 @@ const CSVImportModal = ({ isOpen, onClose, onImportComplete, businessId }) => {
                   <div style={styles.resultLabel}>New Contacts</div>
                 </div>
                 <div style={styles.resultCard}>
-                  <div style={styles.resultNumber}>{importResults.duplicates}</div>
-                  <div style={styles.resultLabel}>Duplicates Updated</div>
+                  <div style={styles.resultNumber}>{importResults.updated}</div>
+                  <div style={styles.resultLabel}>Existing Updated</div>
                 </div>
+                {importResults.mode === 'marketing_status_sync' && (
+                  <>
+                    <div style={styles.resultCard}>
+                      <div style={styles.resultNumber}>{importResults.subscribed}</div>
+                      <div style={styles.resultLabel}>Marketing YES</div>
+                    </div>
+                    <div style={styles.resultCard}>
+                      <div style={styles.resultNumber}>{importResults.unsubscribed}</div>
+                      <div style={styles.resultLabel}>Marketing NO</div>
+                    </div>
+                    <div style={styles.resultCard}>
+                      <div style={styles.resultNumber}>{importResults.preservedUnsubscribed}</div>
+                      <div style={styles.resultLabel}>Existing NO Preserved</div>
+                    </div>
+                  </>
+                )}
                 <div style={styles.resultCard}>
                   <div style={styles.resultNumber}>{importResults.errors}</div>
                   <div style={styles.resultLabel}>Errors Skipped</div>
@@ -718,23 +902,88 @@ const styles = {
   },
   previewStats: {
     display: 'flex',
+    flexWrap: 'wrap',
     gap: '20px',
     marginBottom: '20px',
     padding: '15px',
     backgroundColor: '#f8f8f8',
     borderRadius: '6px',
   },
+  importModeBox: {
+    marginBottom: '20px',
+    padding: '12px',
+    backgroundColor: '#eef7f7',
+    border: '1px solid #b2dfdb',
+    borderRadius: '6px',
+  },
+  importModeHeader: {
+    fontSize: '14px',
+    fontWeight: 'bold',
+    color: '#00695c',
+    marginBottom: '6px',
+  },
+  importModeText: {
+    fontSize: '16px',
+    color: '#355',
+    marginTop: '4px',
+  },
   statItem: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
-    fontSize: '14px',
+    fontSize: '16px',
     fontWeight: 'bold',
     color: '#333',
   },
   statIcon: {
     fontSize: '16px',
     color: 'teal',
+  },
+  consentBox: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '10px',
+    marginBottom: '20px',
+    padding: '12px',
+    backgroundColor: '#fff8e1',
+    border: '1px solid #f5c86a',
+    borderRadius: '6px',
+    fontSize: '12px',
+    color: '#5d4037',
+  },
+  overrideBox: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '10px',
+    marginBottom: '20px',
+    padding: '12px',
+    backgroundColor: '#ffebee',
+    border: '1px solid #ef9a9a',
+    borderRadius: '6px',
+    fontSize: '12px',
+    color: '#7f1d1d',
+  },
+  consentCheckbox: {
+    marginTop: '2px',
+  },
+  consentDetails: {
+    marginBottom: '20px',
+    padding: '12px',
+    backgroundColor: '#f8f8f8',
+    border: '1px solid #ddd',
+    borderRadius: '6px',
+  },
+  consentLabel: {
+    display: 'block',
+    fontSize: '12px',
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: '8px',
+  },
+  consentHelpText: {
+    margin: '8px 0 0 0',
+    fontSize: '14px',
+    color: '#666',
   },
   errorsSection: {
     marginBottom: '20px',
@@ -747,13 +996,13 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
-    fontSize: '16px',
+    fontSize: '14px',
     fontWeight: 'bold',
     color: '#c62828',
     marginBottom: '10px',
   },
   errorIcon: {
-    fontSize: '16px',
+    fontSize: '14px',
   },
   errorsList: {
     maxHeight: '200px',
@@ -769,16 +1018,16 @@ const styles = {
     borderRadius: '4px',
   },
   errorRow: {
-    fontSize: '12px',
+    fontSize: '18px',
     fontWeight: 'bold',
     color: '#c62828',
   },
   errorDetails: {
-    fontSize: '12px',
+    fontSize: '14px',
     color: '#666',
   },
   errorMore: {
-    fontSize: '12px',
+    fontSize: '24px',
     fontStyle: 'italic',
     color: '#666',
     textAlign: 'center',
@@ -795,7 +1044,7 @@ const styles = {
     border: '2px solid #ddd',
     borderRadius: '8px',
     padding: '12px 20px',
-    fontSize: '14px',
+    fontSize: '20px',
     fontWeight: 'bold',
     cursor: 'pointer',
   },
@@ -805,7 +1054,7 @@ const styles = {
     border: '2px solid teal',
     borderRadius: '8px',
     padding: '12px 20px',
-    fontSize: '14px',
+    fontSize: '24px',
     fontWeight: 'bold',
     cursor: 'pointer',
   },
@@ -836,13 +1085,13 @@ const styles = {
     margin: '0 auto 20px auto',
   },
   importingTitle: {
-    fontSize: '18px',
+    fontSize: '16px',
     fontWeight: 'bold',
     color: '#333',
     marginBottom: '8px',
   },
   importingText: {
-    fontSize: '14px',
+    fontSize: '12px',
     color: '#666',
   },
   resultsSection: {
@@ -858,11 +1107,11 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    fontSize: '24px',
+    fontSize: '14px',
     margin: '0 auto 20px auto',
   },
   resultsTitle: {
-    fontSize: '20px',
+    fontSize: '14px',
     fontWeight: 'bold',
     color: '#333',
     marginBottom: '20px',
@@ -880,13 +1129,13 @@ const styles = {
     textAlign: 'center',
   },
   resultNumber: {
-    fontSize: '24px',
+    fontSize: '19px',
     fontWeight: 'bold',
     color: 'teal',
     marginBottom: '5px',
   },
   resultLabel: {
-    fontSize: '14px',
+    fontSize: '11px',
     color: '#666',
   },
   importErrorsSection: {
@@ -897,7 +1146,7 @@ const styles = {
     textAlign: 'left',
   },
   importErrorsTitle: {
-    fontSize: '16px',
+    fontSize: '13px',
     fontWeight: 'bold',
     color: '#f57c00',
     marginBottom: '10px',
@@ -910,7 +1159,7 @@ const styles = {
     display: 'flex',
     gap: '10px',
     marginBottom: '5px',
-    fontSize: '12px',
+    fontSize: '10px',
   },
   importErrorLine: {
     fontWeight: 'bold',
@@ -936,7 +1185,7 @@ const styles = {
     border: 'none',
     borderRadius: '8px',
     padding: '12px 24px',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: 'bold',
     cursor: 'pointer',
   },
@@ -946,7 +1195,7 @@ const styles = {
     border: '2px solid teal',
     borderRadius: '8px',
     padding: '10px 22px',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: 'bold',
     cursor: 'pointer',
   },

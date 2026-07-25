@@ -6,9 +6,22 @@ import { CheckCircle, AlertCircle, X, FileText, Download, Printer } from 'lucide
 import DigitalSignature from '../../components/HR/DigitalSignature';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import toast from 'react-hot-toast';
-import html2pdf from 'html2pdf.js';
 import { TavariStyles } from '../../utils/TavariStyles';
 import { createEmployeeFromContract } from '../../utils/contractEmployeeCreation';
+import {
+  formatContractHrFromName,
+  resolveBusinessDisplayName,
+} from '../../utils/contractPersistence';
+import { syncEmployeeLifecycleFromSignedContract } from '../../utils/employeeContractContext';
+import {
+  blobToBase64,
+  blobToUint8Array,
+  embedAuthorizedRepSignature,
+  ensureContractHtml,
+  extractBodyHtml,
+  generatePdfBlobFromHtml,
+} from '../../utils/contractHtmlUtils';
+import { downloadContractPdf } from '../../utils/contractPdf';
 
 const AuthorizedRepSignScreen = () => {
   const { token } = useParams();
@@ -38,7 +51,7 @@ const AuthorizedRepSignScreen = () => {
       console.log('[AuthRepLoad] Executing query for authorized rep contract...');
       const { data, error: contractError } = await supabase
         .from('hr_contracts')
-        .select('id, business_id, employee_email, employee_first_name, employee_last_name, contract_data, contract_html, authorized_representative_signing_token, status, expires_at, signed_at, authorized_representative_name, authorized_representative_email, authorized_representative_signed_at, hr_email, digital_signature_data, signed_pdf_data')
+        .select('id, business_id, employee_email, employee_first_name, employee_last_name, contract_data, contract_html, signing_token, authorized_representative_signing_token, status, expires_at, signed_at, authorized_representative_name, authorized_representative_email, authorized_representative_signed_at, hr_email, digital_signature_data, signed_pdf_data')
         .eq('authorized_representative_signing_token', token)
         .maybeSingle();
       
@@ -105,8 +118,15 @@ const AuthorizedRepSignScreen = () => {
         return;
       }
 
-      setContract(data);
-      
+      let contractHtml = data.contract_html || '';
+      try {
+        contractHtml = await ensureContractHtml(supabase, data);
+      } catch (regenErr) {
+        console.warn('[AuthRepLoad] Could not regenerate contract HTML:', regenErr);
+      }
+
+      setContract({ ...data, contract_html: contractHtml });
+
       // Pre-fill signer name from contract
       setSignerName(data.authorized_representative_name || '');
 
@@ -144,94 +164,30 @@ const AuthorizedRepSignScreen = () => {
     console.log('[AuthRepSign] Validation Passed - Starting signature process');
     setSigning(true);
     try {
-      // Get the signed PDF that already has employee signature
       let contractHTML = contract.contract_html || '';
-      
-      // Add authorized representative signature to the contract
-      const signatureDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-      
-      // Find the authorized representative signature section and replace signature lines with actual signature
-      // Pattern captures: before label, label, content before signature line, signature line (REMOVE), date label, date line (REMOVE), after
-      // Updated to match font-size: 9px (increased from 6px)
-      const authRepSignatureSection = /(<p style="margin-bottom: 20px;">By its authorized representative:<\/p>[\s\S]*?<div style="margin-bottom: 25px;">[\s\S]*?<p style="margin-bottom: 4px; font-size: [0-9]+px;">Authorized Representative<\/p>)([\s\S]*?)(<div style="border-bottom: 1px solid #000; height: 40px; margin-bottom: 15px;"><\/div>)([\s\S]*?<p style="margin-bottom: 4px; font-size: [0-9]+px;">Date:<\/p>)([\s\S]*?<div style="border-bottom: 1px solid #000; height: 40px;"><\/div>)/;
-      
-      // Replace signature line and date line with actual signature image, name, and date (REMOVE $3 and $5 which are the border-bottom divs)
-      const signatureReplacement = `$1$2<img src="${signatureRecord.signatureData}" alt="Signature" style="max-width: 300px; height: auto; border: 1px solid #ccc; padding: 10px; background: white; margin-bottom: 10px; display: block;" /><p style="margin-bottom: 4px; font-size: 9px;"><strong>${signerName}</strong></p>$4<p style="margin-top: 8px; font-size: 9px;">${signatureDate}</p>`;
-      
-      // Try to replace the existing signature section
-      if (authRepSignatureSection.test(contractHTML)) {
-        contractHTML = contractHTML.replace(authRepSignatureSection, signatureReplacement);
-      } else {
-        // Fallback: simpler replacement - also remove date line
-        const simplePattern = /(<p style="margin-bottom: 4px; font-size: [0-9]+px;">Authorized Representative<\/p>)([\s\S]*?)(<div style="border-bottom: 1px solid #000; height: 40px; margin-bottom: 15px;"><\/div>)([\s\S]*?<p style="margin-bottom: 4px; font-size: [0-9]+px;">Date:<\/p>)([\s\S]*?<div style="border-bottom: 1px solid #000; height: 40px;"><\/div>)/;
-        if (simplePattern.test(contractHTML)) {
-          // Remove $3 (signature line) and $5 (date line)
-          contractHTML = contractHTML.replace(simplePattern, `$1<img src="${signatureRecord.signatureData}" alt="Signature" style="max-width: 300px; height: auto; border: 1px solid #ccc; padding: 10px; background: white; margin-bottom: 10px; display: block;" /><p style="margin-bottom: 4px; font-size: 9px;"><strong>${signerName}</strong></p>$4<p style="margin-top: 8px; font-size: 9px;">${signatureDate}</p>`);
-        } else {
-          // Last resort: append before </body>
-          contractHTML = contractHTML.replace('</body>', `<div style="margin-top: 20px;"><p><strong>Authorized Representative Signature:</strong></p><img src="${signatureRecord.signatureData}" alt="Signature" style="max-width: 300px; height: auto; border: 1px solid #ccc; padding: 10px; background: white;" /><p><strong>${signerName}</strong></p><p>Signed: ${signatureDate}</p></div></body>`);
-        }
+      try {
+        contractHTML = await ensureContractHtml(supabase, contract);
+      } catch (regenErr) {
+        console.warn('[AuthRepSign] ensureContractHtml before sign:', regenErr);
       }
-      
-      // Additional cleanup: Remove ALL remaining signature lines and empty divs with large heights
-      // Remove any border-bottom divs (signature lines) that might still be there
-      contractHTML = contractHTML.replace(
-        /<div style="border-bottom: 1px solid #000; height: 40px[^"]*"><\/div>/g,
-        ''
-      );
-      // Remove any empty divs with height: 40px that might be creating gaps
-      contractHTML = contractHTML.replace(
-        /<div[^>]*height:\s*40px[^>]*><\/div>/g,
-        ''
-      );
-      
-      const signedHTML = contractHTML;
 
-      // Generate final signed PDF with both signatures
-      const tempDiv = document.createElement('div');
-      tempDiv.style.position = 'absolute';
-      tempDiv.style.left = '-9999px';
-      tempDiv.style.top = '-9999px';
-      tempDiv.style.width = '8.5in';
-      tempDiv.style.backgroundColor = 'white';
-      tempDiv.innerHTML = signedHTML;
-      document.body.appendChild(tempDiv);
-      
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      const finalPdfBlob = await html2pdf().set({
-        margin: [0.5, 0.5, 0.5, 0.5],
-        filename: `Fully_Signed_Employment_Contract_${contract.employee_first_name}_${contract.employee_last_name}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { 
-          scale: 2, 
-          useCORS: true,
-          logging: false,
-          letterRendering: true,
-          allowTaint: true,
-          height: tempDiv.scrollHeight,
-          width: tempDiv.scrollWidth,
-          windowWidth: tempDiv.scrollWidth,
-          windowHeight: tempDiv.scrollHeight
-        },
-        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
-        pagebreak: { mode: ['css'], avoid: ['.contract-section'] }
-      }).from(tempDiv).outputPdf('blob');
-      
-      document.body.removeChild(tempDiv);
-
-      // Convert to base64 for storage
-      const finalPdfBase64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64String = reader.result.split(',')[1];
-          resolve(base64String);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(finalPdfBlob);
+      const signatureDate = new Date().toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
       });
 
-      const finalPdfBuffer = Uint8Array.from(atob(finalPdfBase64), c => c.charCodeAt(0));
+      const signedHTML = embedAuthorizedRepSignature(
+        contractHTML,
+        signatureRecord,
+        signerName,
+        signatureDate
+      );
+
+      const pdfFilename = `Fully_Signed_Employment_Contract_${contract.employee_first_name}_${contract.employee_last_name}.pdf`;
+      const finalPdfBlob = await generatePdfBlobFromHtml(signedHTML, pdfFilename);
+      const finalPdfBase64 = await blobToBase64(finalPdfBlob);
+      const finalPdfBuffer = await blobToUint8Array(finalPdfBlob);
 
       // ========== EXTENSIVE LOGGING FOR AUTHORIZED REP SIGNING ==========
       console.log('========== AUTHORIZED REP SIGNING - START UPDATE ==========');
@@ -301,7 +257,7 @@ const AuthorizedRepSignScreen = () => {
       console.log('[AuthRepSign] Reloading contract data to get all email fields...');
       const { data: reloadedContract, error: reloadError } = await supabase
         .from('hr_contracts')
-        .select('id, business_id, employee_email, employee_first_name, employee_last_name, hr_email, authorized_representative_email, authorized_representative_name, contract_data, signing_token, authorized_representative_signing_token')
+        .select('id, business_id, employee_email, employee_first_name, employee_last_name, hr_email, authorized_representative_email, authorized_representative_name, contract_data, contract_html, signing_token, authorized_representative_signing_token')
         .eq('id', contract.id)
         .single();
       
@@ -322,87 +278,360 @@ const AuthorizedRepSignScreen = () => {
       }
 
       // Ensure we have all required email fields - if missing, try to get from contract_data
-      if (!contractForEmail.hr_email && contractForEmail.contract_data?.hr_email) {
-        contractForEmail.hr_email = contractForEmail.contract_data.hr_email;
-        console.log('[AuthRepSign] Using hr_email from contract_data:', contractForEmail.hr_email);
-      }
-      if (!contractForEmail.authorized_representative_email && contractForEmail.contract_data?.authorized_representative_email) {
-        contractForEmail.authorized_representative_email = contractForEmail.contract_data.authorized_representative_email;
-        console.log('[AuthRepSign] Using authorized_representative_email from contract_data:', contractForEmail.authorized_representative_email);
-      }
-      if (!contractForEmail.employee_email && contractForEmail.contract_data?.employee_email) {
-        contractForEmail.employee_email = contractForEmail.contract_data.employee_email;
-        console.log('[AuthRepSign] Using employee_email from contract_data:', contractForEmail.employee_email);
-      }
-
-      // Note: Employee should already be created when contract was first created
-      // Just verify employee exists and is linked to business
-      if (updateData?.[0]?.status === 'signed' && contract.employee_id) {
-        console.log('[AuthRepSign] Contract fully signed - verifying employee exists:', contract.employee_id);
-        
-        // Verify employee is linked to business
-        const { data: roleCheck, error: roleError } = await supabase
-          .from('user_roles')
-          .select('id')
-          .eq('user_id', contract.employee_id)
-          .eq('business_id', contract.business_id)
-          .maybeSingle();
-        
-        if (!roleCheck && !roleError) {
-          // Employee exists but not linked - create link
-          console.log('[AuthRepSign] Employee not linked to business - creating link...');
-          const { error: linkError } = await supabase
-            .from('user_roles')
-            .insert({
-              user_id: contract.employee_id,
-              business_id: contract.business_id,
-              role: 'employee',
-              active: true
-            });
-          
-          if (linkError) {
-            console.error('[AuthRepSign] Error linking employee to business:', linkError);
-            toast.error('Contract signed, but employee may not appear in profiles. Please verify employee link.');
-          } else {
-            console.log('[AuthRepSign] Employee linked to business successfully');
-          }
-        } else if (roleCheck) {
-          console.log('[AuthRepSign] Employee already linked to business');
+      // This is critical because emails might be NULL in the database columns but stored in contract_data
+      if (!contractForEmail.hr_email || contractForEmail.hr_email.trim() === '') {
+        const hrEmailFromData = contractForEmail.contract_data?.hr_email || 
+                                contractForEmail.contract_data?.keyTerms?.hrEmail ||
+                                contractForEmail.contract_data?.businessData?.hrEmail;
+        if (hrEmailFromData) {
+          contractForEmail.hr_email = hrEmailFromData;
+          console.log('[AuthRepSign] Using hr_email from contract_data:', contractForEmail.hr_email);
         }
-      } else if (updateData?.[0]?.status === 'signed' && !contract.employee_id) {
-        // Contract signed but no employee_id - this shouldn't happen if employee was created when contract was created
-        console.warn('[AuthRepSign] Contract signed but no employee_id found. Employee may not have been created when contract was created.');
-        toast.error('Contract signed, but employee profile may be missing. Please check employee profiles.');
       }
+      if (!contractForEmail.authorized_representative_email || contractForEmail.authorized_representative_email.trim() === '') {
+        const authRepEmailFromData = contractForEmail.contract_data?.authorized_representative_email ||
+                                    contractForEmail.contract_data?.keyTerms?.authorizedRepresentativeEmail;
+        if (authRepEmailFromData) {
+          contractForEmail.authorized_representative_email = authRepEmailFromData;
+          console.log('[AuthRepSign] Using authorized_representative_email from contract_data:', contractForEmail.authorized_representative_email);
+        }
+      }
+      if (!contractForEmail.employee_email || contractForEmail.employee_email.trim() === '') {
+        const empEmailFromData = contractForEmail.contract_data?.employee_email ||
+                                contractForEmail.contract_data?.keyTerms?.employeeEmail;
+        if (empEmailFromData) {
+          contractForEmail.employee_email = empEmailFromData;
+          console.log('[AuthRepSign] Using employee_email from contract_data:', contractForEmail.employee_email);
+        }
+      }
+      
+      // Log final email status for debugging
+      console.log('[AuthRepSign] Final email fields after fallback:', {
+        hr_email: contractForEmail.hr_email || 'MISSING',
+        authorized_representative_email: contractForEmail.authorized_representative_email || 'MISSING',
+        employee_email: contractForEmail.employee_email || 'MISSING'
+      });
 
-      // Phase 2: Upload PDF separately (non-blocking)
-      console.log('[AuthRepSign] Phase 2: Uploading PDF data separately (non-blocking)...');
-      (async () => {
+      // CRITICAL: When contract is fully signed, ensure employee exists and is properly linked to business
+      // This ensures both business_users and user_roles entries exist
+      if (updateData?.[0]?.status === 'signed') {
+        console.log('[AuthRepSign] Contract fully signed - ensuring employee exists and is linked to business...');
+        console.log('[AuthRepSign] Contract data:', {
+          employee_id: contract.employee_id,
+          employee_email: contractForEmail.employee_email,
+          business_id: contractForEmail.business_id
+        });
+        
         try {
-          const pdfUpdateStartTime = Date.now();
-          const { error: pdfUpdateError } = await supabase
-            .from('hr_contracts')
-            .update({ signed_pdf_data: finalPdfBuffer })
-            .eq('id', contract.id);
+          // Call createEmployeeFromContract to ensure employee exists and is properly linked
+          // This function handles both new employees and existing employees
+          // It also creates portal access and returns tempPassword if a new account was created
+          const employeeCreationResult = await createEmployeeFromContract({
+            id: contractForEmail.id,
+            business_id: contractForEmail.business_id,
+            employee_email: contractForEmail.employee_email,
+            employee_first_name: contractForEmail.employee_first_name,
+            employee_last_name: contractForEmail.employee_last_name,
+            employee_address: contractForEmail.contract_data?.keyTerms?.employeeAddress || null,
+            position_title: contractForEmail.contract_data?.keyTerms?.positionTitle || null,
+            contract_data: contractForEmail.contract_data
+          });
           
-          const pdfUpdateDuration = Date.now() - pdfUpdateStartTime;
-          
-          if (pdfUpdateError) {
-            console.warn('[AuthRepSign] PDF upload failed (non-critical):', {
-              error: pdfUpdateError.message,
-              code: pdfUpdateError.code,
-              duration: pdfUpdateDuration + 'ms'
-            });
+          if (employeeCreationResult.success) {
+            console.log('[AuthRepSign] ✅ Employee verified/created and linked to business successfully');
+            console.log('[AuthRepSign] Employee ID:', employeeCreationResult.employeeId);
+
+            const employeeId =
+              employeeCreationResult.employeeId || contract.employee_id || updateData?.[0]?.employee_id;
+            if (employeeId) {
+              const { data: signedContractRow } = await supabase
+                .from('hr_contracts')
+                .select(
+                  'id, business_id, status, start_date, probation_end_date, contract_data, employment_status'
+                )
+                .eq('id', contract.id)
+                .maybeSingle();
+              if (signedContractRow) {
+                await syncEmployeeLifecycleFromSignedContract(
+                  { ...signedContractRow, status: 'signed' },
+                  employeeId
+                );
+              }
+            }
+
+            // Skip portal access if employee is terminated
+            if (employeeCreationResult.skippedPortalAccess) {
+              console.log('[AuthRepSign] Portal access skipped - employee is terminated');
+            }
+            // If portal access was created (tempPassword returned), send portal credentials email
+            else if (employeeCreationResult.tempPassword && contractForEmail.employee_email) {
+              console.log('[AuthRepSign] Portal access created - sending credentials email');
+              
+              const businessName = await resolveBusinessDisplayName({
+                businessId: contractForEmail.business_id,
+                contractData: contractForEmail.contract_data,
+              });
+              const senderName = formatContractHrFromName(businessName);
+              
+              const frontendUrl = import.meta.env.VITE_FRONTEND_URL || window.location.origin;
+              const portalLoginLink = `${frontendUrl}/portal/login`;
+              
+              // Create email with portal credentials
+              const portalCredentialsEmailHTML = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                  <meta charset="UTF-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                  <title>Your Employee Portal Access</title>
+                  <style>
+                    body {
+                      font-family: Arial, sans-serif;
+                      line-height: 1.6;
+                      color: #333;
+                      max-width: 800px;
+                      margin: 0 auto;
+                      padding: 20px;
+                      background-color: #f5f5f5;
+                    }
+                    .email-wrapper {
+                      background: white;
+                      border-radius: 8px;
+                      padding: 30px;
+                      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    }
+                    .credentials-box {
+                      background-color: #f9f9f9;
+                      border: 2px solid #008080;
+                      border-radius: 8px;
+                      padding: 20px;
+                      margin: 20px 0;
+                    }
+                    .credential-item {
+                      margin: 10px 0;
+                      font-size: 9px;
+                    }
+                    .credential-label {
+                      font-weight: bold;
+                      color: #008080;
+                      display: inline-block;
+                      width: 100px;
+                    }
+                    .temp-password {
+                      font-family: monospace;
+                      font-size: 9px;
+                      font-weight: bold;
+                      color: #d9534f;
+                      background-color: #fff;
+                      padding: 5px 10px;
+                      border: 1px solid #ddd;
+                      border-radius: 4px;
+                    }
+                    .warning-box {
+                      background-color: #fff3cd;
+                      border-left: 4px solid #ffc107;
+                      padding: 15px;
+                      margin: 20px 0;
+                      border-radius: 4px;
+                    }
+                    .portal-button {
+                      display: inline-block;
+                      background-color: #008080;
+                      color: white;
+                      padding: 15px 30px;
+                      text-decoration: none;
+                      border-radius: 5px;
+                      font-weight: bold;
+                      margin: 20px 0;
+                    }
+                    .portal-button:hover {
+                      background-color: #006666;
+                    }
+                  </style>
+                </head>
+                <body>
+                  <div class="email-wrapper">
+                    <h2>Welcome to Your Employee Portal!</h2>
+                    <p>Dear ${contractForEmail.employee_first_name || 'Employee'},</p>
+                    <p>Your employment contract has been fully signed! Your Employee Portal access has been activated.</p>
+                    
+                    <div class="credentials-box">
+                      <h3 style="margin-top: 0;">Your Login Credentials:</h3>
+                      <div class="credential-item">
+                        <span class="credential-label">Email:</span>
+                        <strong>${contractForEmail.employee_email}</strong>
+                      </div>
+                      <div class="credential-item">
+                        <span class="credential-label">Password:</span>
+                        <span class="temp-password">${employeeCreationResult.tempPassword}</span>
+                      </div>
+                    </div>
+                    
+                    <div class="warning-box">
+                      <strong>⚠️ IMPORTANT:</strong> This is a temporary password. You will be asked to change it when you log in.
+                    </div>
+                    
+                    <p><strong>Click the button below to access your Employee Portal:</strong></p>
+                    <a href="${portalLoginLink}" class="portal-button" style="color: white; text-decoration: none;">Go to Employee Portal</a>
+                    
+                    <p style="margin-top: 15px; font-size: 9px; color: #666;">
+                      Or copy and paste this link into your browser:<br>
+                      <a href="${portalLoginLink}" style="color: #008080; word-break: break-all;">${portalLoginLink}</a>
+                    </p>
+                    
+                    <p style="margin-top: 30px; font-size: 9px; color: #666;">
+                      After logging in, you'll be asked to complete your profile setup, including your personal information, SIN number, and emergency contacts.
+                    </p>
+                    
+                    <p>Best regards,<br>${senderName}</p>
+                  </div>
+                </body>
+                </html>
+              `;
+              
+              const plainTextBody = `Dear ${contractForEmail.employee_first_name || 'Employee'},
+
+Your employment contract has been fully signed! Your Employee Portal access has been activated.
+
+Your Login Credentials:
+Email: ${contractForEmail.employee_email}
+Temporary Password: ${employeeCreationResult.tempPassword}
+
+⚠️ IMPORTANT: This is a temporary password. You will be asked to change it when you log in.
+
+Access your Employee Portal at:
+${portalLoginLink}
+
+After logging in, you'll be asked to complete your profile setup, including your personal information, SIN number, and emergency contacts.
+
+Best regards,
+${senderName}`;
+
+              // Send portal credentials email
+              try {
+                const portalEmailPayload = {
+                  businessId: contractForEmail.business_id,
+                  campaignId: `portal-credentials-${contractForEmail.id}-${Date.now()}`,
+                  contactId: `portal-credentials-${contractForEmail.employee_email}`,
+                  emailType: 'transactional',
+                  to: contractForEmail.employee_email,
+                  fromEmail: 'noreply@tavarios.ca',
+                  fromName: senderName,
+                  subject: `Your Employee Portal Access - ${contractForEmail.employee_first_name} ${contractForEmail.employee_last_name}`,
+                  html: portalCredentialsEmailHTML,
+                  text: plainTextBody
+                };
+
+                const portalEmailResponse = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mail-send`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+                    Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+                  },
+                  body: JSON.stringify(portalEmailPayload)
+                });
+
+                if (portalEmailResponse.ok) {
+                  console.log('[AuthRepSign] ✅ Portal credentials email sent successfully');
+                } else {
+                  console.warn('[AuthRepSign] Failed to send portal credentials email');
+                }
+              } catch (portalEmailError) {
+                console.error('[AuthRepSign] Error sending portal credentials email:', portalEmailError);
+                // Don't fail the signing process if portal email fails
+              }
+            } else {
+              console.log('[AuthRepSign] Portal access already exists or employee already had access');
+            }
           } else {
-            console.log('[AuthRepSign] PDF uploaded successfully:', {
-              duration: pdfUpdateDuration + 'ms',
-              size: finalPdfBuffer.length + ' bytes'
-            });
+            console.warn('[AuthRepSign] Employee creation/linking returned success:false');
           }
-        } catch (pdfError) {
-          console.warn('[AuthRepSign] PDF upload exception (non-critical):', pdfError.message);
+        } catch (employeeError) {
+          console.error('[AuthRepSign] Error ensuring employee is linked to business:', employeeError);
+          console.error('[AuthRepSign] This may happen if employee already exists - checking for missing links...');
+          
+          // Fallback: Try to find employee by email and create missing links
+          if (contractForEmail.employee_email && contractForEmail.business_id) {
+            const { data: employeeUser, error: findError } = await supabase
+              .from('users')
+              .select('id')
+              .eq('email', contractForEmail.employee_email)
+              .maybeSingle();
+            
+            if (employeeUser && !findError) {
+              console.log('[AuthRepSign] Found employee by email, checking links...');
+              
+              // Check and create business_users entry if missing
+              const { data: buCheck, error: buCheckError } = await supabase
+                .from('business_users')
+                .select('id')
+                .eq('user_id', employeeUser.id)
+                .eq('business_id', contractForEmail.business_id)
+                .maybeSingle();
+              
+              if (!buCheck && !buCheckError) {
+                console.log('[AuthRepSign] Missing business_users entry - creating...');
+                const { error: buInsertError } = await supabase
+                  .from('business_users')
+                  .insert({
+                    user_id: employeeUser.id,
+                    business_id: contractForEmail.business_id,
+                    role: 'employee'
+                  });
+                
+                if (buInsertError) {
+                  console.error('[AuthRepSign] Failed to create business_users entry:', buInsertError);
+                } else {
+                  console.log('[AuthRepSign] ✅ Created business_users entry');
+                }
+              }
+              
+              // Check and create user_roles entry if missing
+              const { data: urCheck, error: urCheckError } = await supabase
+                .from('user_roles')
+                .select('id')
+                .eq('user_id', employeeUser.id)
+                .eq('business_id', contractForEmail.business_id)
+                .eq('active', true)
+                .maybeSingle();
+              
+              if (!urCheck && !urCheckError) {
+                console.log('[AuthRepSign] Missing user_roles entry - creating...');
+                const { error: urInsertError } = await supabase
+                  .from('user_roles')
+                  .insert({
+                    user_id: employeeUser.id,
+                    business_id: contractForEmail.business_id,
+                    role: 'employee',
+                    active: true,
+                    custom_permissions: {}
+                  });
+                
+                if (urInsertError) {
+                  console.error('[AuthRepSign] Failed to create user_roles entry:', urInsertError);
+                } else {
+                  console.log('[AuthRepSign] ✅ Created user_roles entry');
+                }
+              }
+              
+              if ((buCheck || buCheckError) && (urCheck || urCheckError)) {
+                console.log('[AuthRepSign] ✅ Employee already has both business_users and user_roles entries');
+              }
+            }
+          }
         }
-      })();
+      }
+
+      console.log('[AuthRepSign] Phase 2: Uploading signed PDF...');
+      const { error: pdfUpdateError } = await supabase
+        .from('hr_contracts')
+        .update({ signed_pdf_data: finalPdfBuffer })
+        .eq('id', contract.id);
+
+      if (pdfUpdateError) {
+        console.warn('[AuthRepSign] PDF upload failed (emails will still use attachment):', pdfUpdateError.message);
+      }
 
       // Send completed contract to HR email, authorized rep, and employee
       console.log('========== SENDING COMPLETED CONTRACT EMAILS - START ==========');
@@ -428,7 +657,7 @@ const AuthorizedRepSignScreen = () => {
         if (typeof sendCompletedContract !== 'function') {
           throw new Error('sendCompletedContract is not a function!');
         }
-        await sendCompletedContract(finalPdfBase64, contractForEmail);
+        await sendCompletedContract(finalPdfBase64, contractForEmail, signedHTML);
         const emailDuration = Date.now() - emailStartTime;
         console.log('[Email] sendCompletedContract completed in:', emailDuration + 'ms');
         console.log('========== EMAIL SENDING COMPLETE ==========');
@@ -485,7 +714,7 @@ const AuthorizedRepSignScreen = () => {
     }
   };
 
-  const sendCompletedContract = async (pdfBase64, contractData) => {
+  const sendCompletedContract = async (pdfBase64, contractData, signedHTML = '') => {
     console.log('========== sendCompletedContract FUNCTION CALLED ==========');
     console.log('[Email] Function Entry:', {
       timestamp: new Date().toISOString(),
@@ -508,44 +737,36 @@ const AuthorizedRepSignScreen = () => {
         has_contract_data: !!contractData?.contract_data,
         contract_keys: contractData ? Object.keys(contractData) : 'NO CONTRACT DATA'
       });
-      // Get business name for sender - check contract_data first, then database
-      let businessName = 'The Company';
-      
-      // First, try to get from contract_data (already loaded)
-      if (contractData.contract_data?.businessData?.name) {
-        businessName = contractData.contract_data.businessData.name;
-        console.log('[Email] Using business name from contract_data:', businessName);
-      } else if (contractData.contract_data?.businessData?.business_name) {
-        businessName = contractData.contract_data.businessData.business_name;
-        console.log('[Email] Using business_name from contract_data:', businessName);
-      } else if (contractData.business_id) {
-        // Fallback: query database
-        console.log('[Email] Business name not in contract_data, querying database...');
-        try {
-          const { data: bizData, error: bizError } = await supabase
-            .from('businesses')
-            .select('business_name, name')
-            .eq('id', contractData.business_id)
-            .maybeSingle();
-          
-          if (bizError) {
-            console.warn('[Email] Error querying business:', bizError.message);
-          } else if (bizData) {
-            businessName = bizData.business_name || bizData.name || businessName;
-            console.log('[Email] Using business name from database:', businessName);
-          } else {
-            console.warn('[Email] Business not found in database, using default');
-          }
-        } catch (err) {
-          console.warn('[Email] Exception querying business:', err.message);
-        }
-      }
-      
+      const businessName = await resolveBusinessDisplayName({
+        businessId: contractData.business_id,
+        contractData: contractData.contract_data,
+      });
       console.log('[Email] Final business name for email:', businessName);
 
-      const senderName = `${businessName} - HR`;
+      const senderName = formatContractHrFromName(businessName);
       const employeeName = `${contractData.employee_first_name} ${contractData.employee_last_name}`;
-      
+
+      let attachmentBase64 = pdfBase64;
+      if ((!attachmentBase64 || attachmentBase64.length < 1000) && signedHTML) {
+        try {
+          const pdfBlob = await generatePdfBlobFromHtml(
+            signedHTML,
+            `Signed_Employment_Contract_${employeeName.replace(/\s+/g, '_')}.pdf`
+          );
+          attachmentBase64 = await blobToBase64(pdfBlob);
+        } catch (pdfErr) {
+          console.warn('[Email] PDF regeneration for attachment failed:', pdfErr);
+        }
+      }
+
+      const pdfAttachment = attachmentBase64
+        ? [{
+            filename: `Signed_Employment_Contract_${employeeName.replace(/\s+/g, '_')}.pdf`,
+            content: attachmentBase64,
+            contentType: 'application/pdf',
+          }]
+        : [];
+
       // Generate viewing link - use signing_token which works for all parties
       const frontendUrl = import.meta.env.VITE_FRONTEND_URL || window.location.origin;
       const contractViewLink = `${frontendUrl}/contract/view/${contractData.signing_token || contractData.authorized_representative_signing_token}`;
@@ -598,7 +819,7 @@ const AuthorizedRepSignScreen = () => {
             <p>The employment contract for <strong>${employeeName}</strong> has been fully signed by both the employee and the authorized representative.</p>
             <p><strong>You can view and download the completed contract by clicking the button below:</strong></p>
             <a href="${contractViewLink}" class="view-button" style="color: white; text-decoration: none;">View & Download Contract</a>
-            <p style="margin-top: 15px; font-size: 12px; color: #666;">
+            <p style="margin-top: 15px; font-size: 9px; color: #666;">
               Or copy and paste this link into your browser:<br>
               <a href="${contractViewLink}" style="color: #008080; word-break: break-all;">${contractViewLink}</a>
             </p>
@@ -616,32 +837,68 @@ ${contractViewLink}
 Best regards,
 ${senderName}`;
 
+      // CRITICAL: Ensure we have email fields - fallback to contract_data if missing
+      // This handles cases where emails might be NULL in database columns but stored in contract_data
+      let hrEmail = contractData?.hr_email;
+      let employeeEmail = contractData?.employee_email;
+      let authorizedRepEmail = contractData?.authorized_representative_email;
+      
+      if (!hrEmail || hrEmail.trim() === '') {
+        hrEmail = contractData?.contract_data?.hr_email || 
+                 contractData?.contract_data?.keyTerms?.hrEmail ||
+                 contractData?.contract_data?.businessData?.hrEmail;
+        if (hrEmail) {
+          console.log('[Email] Using hr_email from contract_data fallback:', hrEmail);
+        }
+      }
+      
+      if (!employeeEmail || employeeEmail.trim() === '') {
+        employeeEmail = contractData?.contract_data?.employee_email ||
+                       contractData?.contract_data?.keyTerms?.employeeEmail;
+        if (employeeEmail) {
+          console.log('[Email] Using employee_email from contract_data fallback:', employeeEmail);
+        }
+      }
+      
+      if (!authorizedRepEmail || authorizedRepEmail.trim() === '') {
+        authorizedRepEmail = contractData?.contract_data?.authorized_representative_email ||
+                            contractData?.contract_data?.keyTerms?.authorizedRepresentativeEmail;
+        if (authorizedRepEmail) {
+          console.log('[Email] Using authorized_representative_email from contract_data fallback:', authorizedRepEmail);
+        }
+      }
+      
       // Send to HR email - EXACT SAME PATTERN AS EMPLOYEE SIGNING
       console.log('========== HR EMAIL - CHECKING ==========');
       console.log('[Email] Checking if HR email should be sent:', {
-        has_hr_email: !!contractData?.hr_email,
-        hr_email: contractData?.hr_email || 'MISSING',
-        hr_email_type: typeof contractData?.hr_email,
-        hr_email_length: contractData?.hr_email?.length || 0,
+        has_hr_email: !!hrEmail,
+        hr_email: hrEmail || 'MISSING',
+        hr_email_type: typeof hrEmail,
+        hr_email_length: hrEmail?.length || 0,
         contract_id: contractData?.id,
         contract_data_type: typeof contractData
       });
-      console.log('[Email] Full contractData object:', JSON.stringify(contractData, null, 2));
+      console.log('[Email] Final email fields:', {
+        hr_email: hrEmail || 'MISSING',
+        employee_email: employeeEmail || 'MISSING',
+        authorized_representative_email: authorizedRepEmail || 'MISSING'
+      });
 
-      if (contractData?.hr_email) {
+      if (hrEmail) {
         console.log('[Email] HR Email condition met - Preparing HR email...');
-        console.log('[Email] HR Email value:', contractData.hr_email);
+        console.log('[Email] HR Email value:', hrEmail);
         const hrEmailPayload = {
           businessId: contractData.business_id,
           campaignId: `contract-completed-hr-${contractData.id}-${Date.now()}`,
-          contactId: `contract-hr-${contractData.hr_email}`,
-          to: contractData.hr_email,
+          contactId: `contract-hr-${hrEmail}`,
+          emailType: 'transactional',
+          to: hrEmail,
           fromEmail: 'noreply@tavarios.ca',
           fromName: senderName,
           subject: `Completed Contract - ${employeeName}`,
           html: emailHTML,
-          text: plainTextBody
-          // No attachments - using viewing link instead
+          text: plainTextBody,
+          attachments: pdfAttachment,
         };
 
         console.log('[Email] HR Email Payload Prepared:', {
@@ -690,7 +947,7 @@ ${senderName}`;
             const responseData = await hrResponse.json().catch(() => ({ message: 'No JSON response' }));
             console.log('========== HR EMAIL SENT SUCCESSFULLY ==========');
             console.log('[Email] Response Data:', responseData);
-            console.log('[Email] Email sent to HR:', contractData.hr_email);
+            console.log('[Email] Email sent to HR:', hrEmail);
             console.log('[Email] Message ID:', responseData.messageId || responseData.message_id || 'N/A');
             console.log('[Email] Success:', responseData.ok !== false);
             console.log('========== END HR EMAIL SUCCESS ==========');
@@ -709,7 +966,7 @@ ${senderName}`;
         console.warn('========== HR EMAIL NOT SENT - CONDITIONS NOT MET ==========');
         console.warn('[Email] Reason: Missing hr_email');
         console.warn('[Email] Contract Data:', {
-          hr_email: contractData.hr_email || 'MISSING',
+          hr_email: hrEmail || 'MISSING',
           contract_id: contractData.id
         });
         console.warn('========== END HR EMAIL SKIP LOG ==========');
@@ -717,21 +974,22 @@ ${senderName}`;
 
       // Send to employee
       console.log('[Email] Checking employee email condition...');
-      console.log('[Email] Employee Email Present:', !!contractData.employee_email);
+      console.log('[Email] Employee Email Present:', !!employeeEmail);
       
-      if (contractData.employee_email) {
+      if (employeeEmail) {
         console.log('[Email] Employee Email condition met - Preparing employee email...');
         const employeeEmailPayload = {
           businessId: contractData.business_id,
           campaignId: `contract-completed-employee-${contractData.id}-${Date.now()}`,
-          contactId: `contract-employee-${contractData.employee_email}`,
-          to: contractData.employee_email,
+          contactId: `contract-employee-${employeeEmail}`,
+          emailType: 'transactional',
+          to: employeeEmail,
           fromEmail: 'noreply@tavarios.ca',
           fromName: senderName,
           subject: `Your Completed Employment Contract`,
           html: emailHTML.replace('The employment contract for', 'Your employment contract has'),
-          text: plainTextBody.replace('The employment contract for', 'Your employment contract has')
-          // No attachments - using viewing link instead
+          text: plainTextBody.replace('The employment contract for', 'Your employment contract has'),
+          attachments: pdfAttachment,
         };
 
         console.log('[Email] Employee Email Payload:', {
@@ -769,7 +1027,7 @@ ${senderName}`;
           const responseData = await employeeResponse.json().catch(() => ({ message: 'No JSON response' }));
           console.log('========== EMPLOYEE EMAIL SENT SUCCESSFULLY ==========');
           console.log('[Email] Response Data:', responseData);
-          console.log('[Email] Email sent to employee:', contractData.employee_email);
+          console.log('[Email] Email sent to employee:', employeeEmail);
           console.log('[Email] Message ID:', responseData.messageId || responseData.message_id || 'N/A');
           console.log('[Email] Success:', responseData.ok !== false);
           console.log('========== END EMPLOYEE EMAIL SUCCESS ==========');
@@ -780,21 +1038,22 @@ ${senderName}`;
 
       // Send to authorized representative
       console.log('[Email] Checking authorized rep email condition...');
-      console.log('[Email] Authorized Rep Email Present:', !!contractData.authorized_representative_email);
+      console.log('[Email] Authorized Rep Email Present:', !!authorizedRepEmail);
       
-      if (contractData.authorized_representative_email) {
+      if (authorizedRepEmail) {
         console.log('[Email] Authorized Rep Email condition met - Preparing authorized rep email...');
         const authRepEmailPayload = {
           businessId: contractData.business_id,
           campaignId: `contract-completed-authrep-${contractData.id}-${Date.now()}`,
-          contactId: `contract-authrep-${contractData.authorized_representative_email}`,
-          to: contractData.authorized_representative_email,
+          contactId: `contract-authrep-${authorizedRepEmail}`,
+          emailType: 'transactional',
+          to: authorizedRepEmail,
           fromEmail: 'noreply@tavarios.ca',
           fromName: senderName,
           subject: `Completed Contract - ${employeeName}`,
           html: emailHTML,
-          text: plainTextBody
-          // No attachments - using viewing link instead
+          text: plainTextBody,
+          attachments: pdfAttachment,
         };
 
         console.log('[Email] Authorized Rep Email Payload:', {
@@ -832,7 +1091,7 @@ ${senderName}`;
           const responseData = await authRepResponse.json().catch(() => ({ message: 'No JSON response' }));
           console.log('========== AUTHORIZED REP EMAIL SENT SUCCESSFULLY ==========');
           console.log('[Email] Response Data:', responseData);
-          console.log('[Email] Email sent to authorized rep:', contractData.authorized_representative_email);
+          console.log('[Email] Email sent to authorized rep:', authorizedRepEmail);
           console.log('[Email] Message ID:', responseData.messageId || responseData.message_id || 'N/A');
           console.log('[Email] Success:', responseData.ok !== false);
           console.log('========== END AUTHORIZED REP EMAIL SUCCESS ==========');
@@ -873,31 +1132,8 @@ ${senderName}`;
 
     try {
       toast.loading('Generating PDF...', { id: 'pdf-generate' });
-      
-      // Create a temporary container for PDF generation
-      const element = document.createElement('div');
-      element.innerHTML = contract.contract_html;
-      
-      // Configure PDF options
-      const opt = {
-        margin: [0.5, 0.5, 0.5, 0.5],
-        filename: `Employment_Contract_${contract.employee_first_name}_${contract.employee_last_name}_${new Date().toISOString().split('T')[0]}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { 
-          scale: 2,
-          useCORS: true,
-          logging: false
-        },
-        jsPDF: { 
-          unit: 'in', 
-          format: 'letter', 
-          orientation: 'portrait' 
-        }
-      };
-
-      // Generate and download PDF
-      await html2pdf().set(opt).from(element).save();
-      
+      const filename = `Employment_Contract_${contract.employee_first_name}_${contract.employee_last_name}_${new Date().toISOString().split('T')[0]}.pdf`;
+      await downloadContractPdf(contract.contract_html, filename);
       toast.success('PDF downloaded successfully!', { id: 'pdf-generate' });
     } catch (error) {
       console.error('[AuthorizedRepSignScreen] Error generating PDF:', error);
@@ -1102,7 +1338,7 @@ ${senderName}`;
               overflowY: 'auto',
               backgroundColor: TavariStyles.colors.gray50
             }}
-            dangerouslySetInnerHTML={{ __html: contract.contract_html }}
+            dangerouslySetInnerHTML={{ __html: extractBodyHtml(contract.contract_html) }}
           />
         )}
 

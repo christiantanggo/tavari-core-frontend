@@ -29,6 +29,18 @@ const CashDrawerReport = ({
   const [showVariances, setShowVariances] = useState(true);
   const [varianceThreshold, setVarianceThreshold] = useState(5.00);
 
+  const getDrawerStartingAmount = (drawer) =>
+    Number(drawer?.starting_cash ?? drawer?.starting_amount ?? 0);
+
+  const getDrawerExpectedAmount = (drawer) =>
+    Number(drawer?.expected_cash ?? drawer?.expected_amount ?? 0);
+
+  const getDrawerActualAmount = (drawer) =>
+    Number(drawer?.actual_cash ?? drawer?.actual_amount ?? 0);
+
+  const getDrawerVarianceAmount = (drawer) =>
+    Number(drawer?.variance ?? (getDrawerActualAmount(drawer) - getDrawerExpectedAmount(drawer)) ?? 0);
+
   useEffect(() => {
     if (auth.selectedBusinessId) {
       loadDrawerData();
@@ -47,13 +59,7 @@ const CashDrawerReport = ({
       // Get drawer opening/closing data
       let drawerQuery = supabase
         .from('pos_drawers')
-        .select(`
-          id, opened_at, closed_at, opened_by, closed_by,
-          starting_cash, expected_cash, actual_cash, variance,
-          notes, status, terminal_id,
-          opener:opened_by(id, full_name, email),
-          closer:closed_by(id, full_name, email)
-        `)
+        .select('*')
         .eq('business_id', auth.selectedBusinessId)
         .gte('opened_at', start)
         .lt('opened_at', end)
@@ -65,6 +71,31 @@ const CashDrawerReport = ({
 
       const { data: drawers, error: drawerError } = await drawerQuery;
       if (drawerError) throw drawerError;
+
+      const userIds = Array.from(
+        new Set(
+          (drawers || [])
+            .flatMap((drawer) => [drawer.opened_by, drawer.closed_by])
+            .filter(Boolean)
+        )
+      );
+
+      let userMap = new Map();
+      if (userIds.length > 0) {
+        const { data: users, error: usersError } = await supabase
+          .from('users')
+          .select('id, full_name, email')
+          .in('id', userIds);
+
+        if (!usersError) {
+          userMap = new Map(
+            (users || []).map((user) => [
+              user.id,
+              user.full_name || user.email || `User ${user.id}`
+            ])
+          );
+        }
+      }
 
       // Get cash transactions for each drawer period
       const enrichedDrawers = await Promise.all(
@@ -98,16 +129,26 @@ const CashDrawerReport = ({
             const totalCashSales = (cashSales || []).reduce((sum, sale) => sum + (Number(sale.amount) || 0), 0);
             const totalCashRefunds = (cashRefunds || []).reduce((sum, refund) => sum + (Number(refund.total_refund_amount) || 0), 0);
             const netCashActivity = totalCashSales - totalCashRefunds;
+            const startingAmount = getDrawerStartingAmount(drawer);
+            const expectedAmount = getDrawerExpectedAmount(drawer);
+            const actualAmount = getDrawerActualAmount(drawer);
+            const varianceAmount = getDrawerVarianceAmount(drawer);
 
             return {
               ...drawer,
+              openerName: userMap.get(drawer.opened_by) || drawer.opened_by || 'Unknown',
+              closerName: userMap.get(drawer.closed_by) || drawer.closed_by || 'Not closed',
+              normalizedStartingAmount: startingAmount,
+              normalizedExpectedAmount: expectedAmount,
+              normalizedActualAmount: actualAmount,
+              normalizedVarianceAmount: varianceAmount,
               cashSales: cashSales || [],
               cashRefunds: cashRefunds || [],
               totalCashSales,
               totalCashRefunds,
               netCashActivity,
-              calculatedExpected: (Number(drawer.starting_cash) || 0) + netCashActivity,
-              varianceFromCalculated: (Number(drawer.actual_cash) || 0) - ((Number(drawer.starting_cash) || 0) + netCashActivity)
+              calculatedExpected: startingAmount + netCashActivity,
+              varianceFromCalculated: actualAmount - (startingAmount + netCashActivity)
             };
           } catch (err) {
             console.error('Error enriching drawer data:', err);
@@ -203,17 +244,17 @@ const CashDrawerReport = ({
       csvContent += "Opened,Closed,Opened By,Closed By,Starting Cash,Expected Cash,Actual Cash,Variance,Status,Terminal,Notes\n";
       
       drawerData.forEach(drawer => {
-        const openerName = drawer.opener?.full_name || drawer.opener?.email || 'Unknown';
-        const closerName = drawer.closer?.full_name || drawer.closer?.email || 'Unknown';
+        const openerName = drawer.openerName || 'Unknown';
+        const closerName = drawer.closerName || 'Unknown';
         
-        csvContent += `"${formatDateTime(drawer.opened_at)}","${formatDateTime(drawer.closed_at)}","${openerName}","${closerName}",${drawer.starting_cash || 0},${drawer.expected_cash || 0},${drawer.actual_cash || 0},${drawer.variance || 0},"${drawer.status || 'open'}","${drawer.terminal_id || 'N/A'}","${(drawer.notes || '').replace(/"/g, '""')}"\n`;
+        csvContent += `"${formatDateTime(drawer.opened_at)}","${formatDateTime(drawer.closed_at)}","${openerName}","${closerName}",${getDrawerStartingAmount(drawer)},${getDrawerExpectedAmount(drawer)},${getDrawerActualAmount(drawer)},${getDrawerVarianceAmount(drawer)},"${drawer.status || 'open'}","${drawer.terminal_id || 'N/A'}","${(drawer.notes || '').replace(/"/g, '""')}"\n`;
       });
       
       // Summary
-      const totalStarting = drawerData.reduce((sum, d) => sum + (Number(d.starting_cash) || 0), 0);
-      const totalExpected = drawerData.reduce((sum, d) => sum + (Number(d.expected_cash) || 0), 0);
-      const totalActual = drawerData.reduce((sum, d) => sum + (Number(d.actual_cash) || 0), 0);
-      const totalVariance = drawerData.reduce((sum, d) => sum + (Number(d.variance) || 0), 0);
+      const totalStarting = drawerData.reduce((sum, d) => sum + getDrawerStartingAmount(d), 0);
+      const totalExpected = drawerData.reduce((sum, d) => sum + getDrawerExpectedAmount(d), 0);
+      const totalActual = drawerData.reduce((sum, d) => sum + getDrawerActualAmount(d), 0);
+      const totalVariance = drawerData.reduce((sum, d) => sum + getDrawerVarianceAmount(d), 0);
       
       csvContent += `\nSummary\n`;
       csvContent += `Total Drawers,${drawerData.length}\n`;
@@ -245,14 +286,14 @@ Generated: ${new Date().toLocaleString()}
 
 DRAWER SUMMARY:
 - Total Drawers: ${drawerData.length}
-- Total Starting Cash: ${formatCurrency(drawerData.reduce((sum, d) => sum + (Number(d.starting_cash) || 0), 0))}
-- Total Expected Cash: ${formatCurrency(drawerData.reduce((sum, d) => sum + (Number(d.expected_cash) || 0), 0))}
-- Total Actual Cash: ${formatCurrency(drawerData.reduce((sum, d) => sum + (Number(d.actual_cash) || 0), 0))}
-- Total Variance: ${formatCurrency(drawerData.reduce((sum, d) => sum + (Number(d.variance) || 0), 0))}
+- Total Starting Cash: ${formatCurrency(drawerData.reduce((sum, d) => sum + getDrawerStartingAmount(d), 0))}
+- Total Expected Cash: ${formatCurrency(drawerData.reduce((sum, d) => sum + getDrawerExpectedAmount(d), 0))}
+- Total Actual Cash: ${formatCurrency(drawerData.reduce((sum, d) => sum + getDrawerActualAmount(d), 0))}
+- Total Variance: ${formatCurrency(drawerData.reduce((sum, d) => sum + getDrawerVarianceAmount(d), 0))}
 
 VARIANCES OVER $${varianceThreshold.toFixed(2)}:
-${drawerData.filter(d => Math.abs(d.variance || 0) > varianceThreshold).map(drawer => 
-  `• ${formatDateTime(drawer.opened_at)}: ${formatCurrency(drawer.variance)} (${drawer.opener?.full_name || 'Unknown'})`
+${drawerData.filter(d => Math.abs(getDrawerVarianceAmount(d)) > varianceThreshold).map(drawer => 
+  `• ${formatDateTime(drawer.opened_at)}: ${formatCurrency(getDrawerVarianceAmount(drawer))} (${drawer.openerName || 'Unknown'})`
 ).join('\n') || 'None'}
 
 This report shows cash drawer reconciliation data for the selected period.
@@ -492,14 +533,14 @@ This report shows cash drawer reconciliation data for the selected period.
     return <div style={styles.error}>{error}</div>;
   }
 
-  const totalStarting = drawerData.reduce((sum, d) => sum + (Number(d.starting_cash) || 0), 0);
-  const totalExpected = drawerData.reduce((sum, d) => sum + (Number(d.expected_cash) || 0), 0);
-  const totalActual = drawerData.reduce((sum, d) => sum + (Number(d.actual_cash) || 0), 0);
-  const totalVariance = drawerData.reduce((sum, d) => sum + (Number(d.variance) || 0), 0);
-  const varianceCount = drawerData.filter(d => Math.abs(d.variance || 0) > varianceThreshold).length;
+  const totalStarting = drawerData.reduce((sum, d) => sum + getDrawerStartingAmount(d), 0);
+  const totalExpected = drawerData.reduce((sum, d) => sum + getDrawerExpectedAmount(d), 0);
+  const totalActual = drawerData.reduce((sum, d) => sum + getDrawerActualAmount(d), 0);
+  const totalVariance = drawerData.reduce((sum, d) => sum + getDrawerVarianceAmount(d), 0);
+  const varianceCount = drawerData.filter(d => Math.abs(getDrawerVarianceAmount(d)) > varianceThreshold).length;
 
   const filteredDrawers = showVariances ? 
-    drawerData.filter(d => Math.abs(d.variance || 0) > varianceThreshold) : 
+    drawerData.filter(d => Math.abs(getDrawerVarianceAmount(d)) > varianceThreshold) : 
     drawerData;
 
   return (
@@ -620,18 +661,18 @@ This report shows cash drawer reconciliation data for the selected period.
                 <tr key={drawer.id || index}>
                   <td style={styles.td}>{formatDateTime(drawer.opened_at)}</td>
                   <td style={styles.td}>{formatDateTime(drawer.closed_at)}</td>
-                  <td style={styles.td}>{drawer.opener?.full_name || drawer.opener?.email || 'Unknown'}</td>
-                  <td style={styles.td}>{drawer.closer?.full_name || drawer.closer?.email || 'Not closed'}</td>
-                  <td style={styles.td}>{formatCurrency(drawer.starting_cash)}</td>
-                  <td style={styles.td}>{formatCurrency(drawer.expected_cash)}</td>
-                  <td style={styles.td}>{formatCurrency(drawer.actual_cash)}</td>
+                  <td style={styles.td}>{drawer.openerName || 'Unknown'}</td>
+                  <td style={styles.td}>{drawer.closerName || 'Not closed'}</td>
+                  <td style={styles.td}>{formatCurrency(getDrawerStartingAmount(drawer))}</td>
+                  <td style={styles.td}>{formatCurrency(getDrawerExpectedAmount(drawer))}</td>
+                  <td style={styles.td}>{formatCurrency(getDrawerActualAmount(drawer))}</td>
                   <td style={styles.td}>
                     <div style={{
                       ...styles.varianceCell,
-                      color: getVarianceColor(drawer.variance)
+                      color: getVarianceColor(getDrawerVarianceAmount(drawer))
                     }}>
-                      <span>{getVarianceIcon(drawer.variance)}</span>
-                      <span>{formatCurrency(drawer.variance)}</span>
+                      <span>{getVarianceIcon(getDrawerVarianceAmount(drawer))}</span>
+                      <span>{formatCurrency(getDrawerVarianceAmount(drawer))}</span>
                     </div>
                   </td>
                   <td style={styles.td}>

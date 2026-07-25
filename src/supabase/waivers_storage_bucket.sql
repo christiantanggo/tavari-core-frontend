@@ -1,0 +1,24 @@
+-- Step 166: Create WaiverStorageBucket.sql
+-- 
+-- ⚠️ IMPORTANT: This file contains INSTRUCTIONS ONLY - no SQL to execute
+-- Storage buckets CANNOT be created via SQL without owner/service role permissions
+--
+-- YOU MUST CREATE THE BUCKET MANUALLY IN SUPABASE DASHBOARD:
+--
+-- 1. Go to Supabase Dashboard > Storage
+-- 2. Click "New bucket" button
+-- 3. Configure the bucket:
+--    - Name: "waivers"
+--    - Public: false (unchecked - private bucket)
+--    - File size limit: 50MB (52428800 bytes)
+--    - Allowed MIME types: 
+--      * application/pdf
+--      * image/png
+--      * image/jpeg
+--      * image/jpg
+--      * image/gif
+--      * image/webp
+-- 4. Click "Create bucket"
+--
+-- After creating the bucket manually, proceed to Step 167 (waivers_storage_policies.sql)
+-- to create the storage policies.

@@ -134,7 +134,7 @@ const TavariModules = () => {
         "Suppliers & Purchasing: Catalogs, POs, receiving, shortages",
         "Item Cost Review System: Web price scraping, best-supplier picks",
         "Menu Engineering: Target margins, price suggestions, alerts",
-        "Accounting Bridge: QBO/Xero sync, taxes, categories, payouts feed"
+        "Accounting Bridge: Tavari Accounting with ERPNext ledger, HST reports, email receipts, and bank import"
       ]
     },
     {

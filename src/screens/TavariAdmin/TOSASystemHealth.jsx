@@ -9,6 +9,7 @@ import toast from 'react-hot-toast';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
 import { useTOSATavariAuth } from '../../hooks/useTOSATavariAuth';
 import { usePermissions } from '../../hooks/usePermissions';
+import { formatDateTimeForBusiness } from '../../utils/businessDateFormat';
 
 // Foundation Components
 import { TavariStyles } from '../../utils/TavariStyles';
@@ -475,7 +476,7 @@ const TOSASystemHealth = () => {
 
             {metrics.lastUpdated && (
               <div style={styles.lastUpdated}>
-                Last updated: {new Date(metrics.lastUpdated).toLocaleString()}
+                Last updated: {formatDateTimeForBusiness(metrics.lastUpdated, 'America/Toronto')}
               </div>
             )}
 

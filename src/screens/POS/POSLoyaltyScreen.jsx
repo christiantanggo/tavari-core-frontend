@@ -23,7 +23,7 @@ const POSLoyaltyScreen = ({
   
   // Use POS Auth hook
   const auth = usePOSAuth({
-    requiredRoles: ['cashier', 'manager', 'owner'],
+    requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'POSLoyaltyScreen'
   });
@@ -972,7 +972,7 @@ const POSLoyaltyScreen = ({
     return (
       <SecurityWrapper>
         <POSAuthWrapper
-          requiredRoles={['cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="POSLoyaltyScreen"
         >
@@ -1014,10 +1014,22 @@ const POSLoyaltyScreen = ({
               requireElevated
             >
               <button
+                style={styles.secondaryActionButton}
+                onClick={() => navigate('/dashboard/pos/loyalty-settings?tab=offers')}
+              >
+                Personalized Offers
+              </button>
+              <button
+                style={styles.secondaryActionButton}
+                onClick={() => navigate('/dashboard/pos/loyalty-settings')}
+              >
+                Program Settings
+              </button>
+              <button
                 style={styles.settingsButton}
                 onClick={() => setShowSettingsModal(true)}
               >
-                ⚙️ Settings
+                ⚙️ Quick Settings
               </button>
             </PermissionGate>
           )}
@@ -1274,7 +1286,7 @@ const POSLoyaltyScreen = ({
   return (
     <SecurityWrapper>
       <POSAuthWrapper
-        requiredRoles={['cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         requireBusiness={true}
         componentName="POSLoyaltyScreen"
       >
@@ -1305,7 +1317,8 @@ const styles = {
   topActions: {
     ...TavariStyles.layout.flexBetween,
     gap: TavariStyles.spacing.lg,
-    marginBottom: TavariStyles.spacing.xl
+    marginBottom: TavariStyles.spacing.xl,
+    flexWrap: 'wrap',
   },
   
   searchSection: {
@@ -1324,6 +1337,14 @@ const styles = {
     ...TavariStyles.components.button.variants.secondary,
     ...TavariStyles.components.button.sizes.lg,
     whiteSpace: 'nowrap'
+  },
+
+  secondaryActionButton: {
+    ...TavariStyles.components.button.base,
+    ...TavariStyles.components.button.variants.secondary,
+    ...TavariStyles.components.button.sizes.lg,
+    whiteSpace: 'nowrap',
+    backgroundColor: TavariStyles.colors.white,
   },
   
   newCustomerButton: {

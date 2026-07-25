@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#008080" />
+  <title>Tavari Task Manager Kiosk</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; }
+    html {
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      color: #111827;
+      background: #f3f4f6;
+      -webkit-text-size-adjust: 100%;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .wrap {
+      min-height: 100vh;
+      min-height: 100dvh;
+      width: 100%;
+      padding: 18px;
+      padding-bottom: max(18px, env(safe-area-inset-bottom));
+    }
+    .center {
+      display: block;
+      max-width: 760px;
+      margin: 0 auto;
+    }
+    .card {
+      width: 100%;
+      max-width: 760px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 10px 28px rgba(17, 24, 39, 0.08);
+    }
+    h1, h2, h3 { margin: 0 0 10px; }
+    p { line-height: 1.45; }
+    .muted { color: #6b7280; }
+    .row { margin-bottom: 14px; }
+    label { display: block; font-weight: bold; margin-bottom: 6px; }
+    input:not([type="checkbox"]), textarea {
+      width: 100%;
+      padding: 14px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 18px;
+    }
+    textarea { min-height: 110px; }
+    .pin {
+      font-size: 30px;
+      letter-spacing: 8px;
+      text-align: center;
+      font-weight: bold;
+    }
+    .identity-panel {
+      border: 2px solid #008080;
+      border-radius: 12px;
+      padding: 14px;
+      margin: 16px 0;
+      background: #f0fdfa;
+    }
+    .identity-panel h3 { margin-top: 0; color: #0f766e; }
+    .identity-select { font-size: 18px; }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 14px 18px;
+      font-size: 18px;
+      font-weight: bold;
+      cursor: pointer;
+      min-height: 52px;
+    }
+    .primary { background: #008080; color: #fff; }
+    .secondary { background: #e5e7eb; color: #111827; }
+    .disabledChecklistBtn { opacity: 0.55; cursor: not-allowed; }
+    .danger { background: #fee2e2; color: #991b1b; }
+    .actions { text-align: right; }
+    .actions button { margin-left: 8px; margin-top: 8px; }
+    .alert {
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 14px;
+      border: 1px solid #bfdbfe;
+      color: #1e3a8a;
+      background: #eff6ff;
+    }
+    .error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+    .success { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
+    .handoff-alert {
+      border-color: #fcd34d;
+      background: #fffbeb;
+      color: #92400e;
+    }
+    .kiosk-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: rgba(17, 24, 39, 0.55);
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 18px;
+      padding-bottom: max(40vh, calc(18px + env(safe-area-inset-bottom)));
+      box-sizing: border-box;
+    }
+    .kiosk-modal {
+      width: 100%;
+      max-width: 560px;
+      max-height: none;
+      overflow: visible;
+      margin: 0 auto 18px;
+    }
+    .kiosk-modal .actions {
+      text-align: right;
+    }
+    .pin-checklist-label { margin-top: 18px; font-size: 14px; }
+    .pin-checklist-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .pin-checklist-actions button { flex: 1 1 180px; }
+    .peer-review-photo { max-width: 100%; border-radius: 8px; border: 1px solid #d1d5db; }
+    .peer-review-actions { display: flex; flex-direction: column; gap: 8px; }
+    .peer-review-actions button { width: 100%; }
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      background: #fef3c7;
+      color: #92400e;
+      padding: 5px 10px;
+      margin-right: 8px;
+      font-size: 14px;
+      font-weight: bold;
+      text-transform: capitalize;
+    }
+    .checkrow {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .checkrow-label {
+      flex: 1;
+      padding-top: 2px;
+      line-height: 1.4;
+    }
+    .checkrow input[type="radio"] {
+      width: 22px;
+      height: 22px;
+      flex-shrink: 0;
+      margin: 0;
+    }
+    .tavari-checkbox {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      width: 28px;
+      height: 28px;
+      flex-shrink: 0;
+      cursor: pointer;
+      margin: 0;
+    }
+    .tavari-checkbox-input {
+      position: absolute;
+      opacity: 0;
+      width: 0;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      pointer-events: none;
+    }
+    .tavari-checkbox-box {
+      width: 24px;
+      height: 24px;
+      box-sizing: border-box;
+      border: 2px solid #d1d5db;
+      border-radius: 6px;
+      background: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      font-weight: bold;
+      color: #fff;
+      line-height: 1;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .tavari-checkbox-input:checked + .tavari-checkbox-box {
+      background: #008080;
+      border-color: #008080;
+    }
+    .tavari-checkbox-input:checked + .tavari-checkbox-box::after {
+      content: '✓';
+    }
+    .tavari-checkbox-input:focus-visible + .tavari-checkbox-box {
+      outline: 2px solid #14b8a6;
+      outline-offset: 2px;
+    }
+    .checklist-item {
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 10px;
+      background: #fff;
+    }
+    .checklist-item-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .checklist-item-check {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      align-self: center;
+      width: 24px;
+    }
+    .checklist-item-check-spacer {
+      display: block;
+      width: 24px;
+      height: 24px;
+    }
+    .checklist-item-body {
+      flex: 1;
+      min-width: 0;
+      align-self: flex-start;
+    }
+    .checklist-item-description {
+      color: #6b7280;
+      font-size: 15px;
+      margin-top: 4px;
+      line-height: 1.45;
+    }
+    .checklist-item-action {
+      flex-shrink: 0;
+      align-self: flex-start;
+    }
+    .checklist-item-action-stack {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+    }
+    .checklist-item-action-stack button {
+      width: 100%;
+      max-width: 220px;
+    }
+    .checklistDetailsToggle-stacked {
+      margin-top: 0;
+      min-height: 44px;
+      padding: 10px 14px;
+      font-size: 15px;
+    }
+    .checklist-item-hint {
+      margin: 6px 0 0;
+      font-size: 14px;
+    }
+    .checklist-item-alert {
+      margin: 6px 0 0;
+      padding: 8px 10px;
+      font-size: 14px;
+    }
+    .checklist-item.done {
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+      opacity: 0.85;
+    }
+    .checklist-item.na {
+      background: #f8fafc;
+      border-color: #cbd5e1;
+      opacity: 0.9;
+    }
+    .checklist-item input[type="checkbox"] {
+      width: auto;
+      height: auto;
+      margin: 0;
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+    .checklist-title { font-weight: bold; font-size: 18px; }
+    .checklist-desc { color: #6b7280; font-size: 15px; margin-top: 4px; }
+    .checklist-desc-na { color: #475569; }
+    .checklist-undo-hint { font-size: 13px; color: #9ca3af; }
+    .checklist-details {
+      margin: 10px 0 0 36px;
+      padding-top: 10px;
+      border-top: 1px solid #e5e7eb;
+    }
+    .checklist-detail-block { margin-bottom: 12px; }
+    .checklist-detail-block:last-child { margin-bottom: 0; }
+    .checklist-detail-label {
+      font-weight: bold;
+      font-size: 14px;
+      color: #374151;
+      margin-bottom: 4px;
+    }
+    .checklistDetailsToggle {
+      margin-top: 10px;
+      font-size: 15px;
+      min-height: 44px;
+      padding: 10px 14px;
+    }
+    .checklist-subitems {
+      margin: 6px 0 0 18px;
+      padding: 0;
+      color: #374151;
+    }
+    .checklist-instructions {
+      color: #1e3a8a;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .pre-wrap {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .checklist-progress {
+      font-size: 15px;
+      color: #374151;
+      margin-bottom: 12px;
+      font-weight: bold;
+    }
+    .nav-actions { margin-top: 16px; padding-top: 12px; border-top: 1px solid #e5e7eb; }
+    .resource {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .resource a { color: #008080; font-weight: bold; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app" class="wrap"><div class="center"><div class="card">Loading Tavari Task Manager...</div></div></div>
+  <script src="./bcrypt.min.js"></script>
+  <script src="./config.js"></script>
+  <script src="./app.es5.js"></script>
+</body>
+</html>

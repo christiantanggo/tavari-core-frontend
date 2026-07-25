@@ -1,0 +1,104 @@
+/* src/components/VendingMachine/MachineStatus.css */
+
+.machine-status {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.machine-status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: #f0f0f0;
+  border-radius: 20px;
+}
+
+.machine-status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #999;
+  animation: pulse 2s infinite;
+}
+
+.machine-status-dot--online {
+  background: #4caf50;
+}
+
+.machine-status-dot--ready {
+  background: #f59e0b;
+}
+
+.machine-status-dot--offline {
+  background: #f44336;
+}
+
+.machine-status-indicator--ready {
+  background: #fef3c7;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.machine-status-text {
+  font-weight: 600;
+  color: #333;
+}
+
+.machine-status-sub {
+  font-size: 0.8rem;
+  color: #92400e;
+  max-width: min(420px, 55vw);
+  line-height: 1.35;
+}
+
+.machine-status-details {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9rem;
+  color: #666;
+}
+
+.machine-status-time {
+  font-size: 0.85rem;
+}
+
+.machine-status-refresh {
+  min-width: 96px;
+  height: 44px;
+  padding: 0 1rem;
+  border: 2px solid #667eea;
+  background: #fff;
+  border-radius: 22px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #667eea;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  z-index: 10100;
+  position: relative;
+}
+
+.machine-status-refresh:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.machine-status-refresh:hover:not(:disabled) {
+  background: #667eea;
+  color: #fff;
+}
+
+

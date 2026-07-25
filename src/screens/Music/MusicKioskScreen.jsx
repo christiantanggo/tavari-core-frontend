@@ -1,15 +1,15 @@
 // src/screens/Music/MusicKioskScreen.jsx
 // Kiosk mode screen for continuous background music playback
 // Auto-detects Music V2 vs Classic system based on feature flag
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMusicService } from '../../hooks/useMusicService';
 import { useMusicV2Service } from '../../hooks/useMusicV2Service';
 import { isMusicV2Enabled } from '../../utils/musicV2FeatureFlag';
+import { ensureKioskSupabaseSession } from '../../utils/kioskAuthRestore';
 import { supabase } from '../../supabaseClient';
 import { useUserProfile } from '../../hooks/useUserProfile';
 import { FiRefreshCw, FiChevronDown, FiX, FiSettings } from 'react-icons/fi';
-import { desktopInstallationService } from '../../services/DesktopInstallationService';
 
 const MusicKioskScreen = () => {
   // DON'T USE CONTEXT - it might have stale/incorrect data
@@ -48,11 +48,190 @@ const MusicKioskScreen = () => {
   const [showSystemSelector, setShowSystemSelector] = useState(false);
   const [forcedSystemVersion, setForcedSystemVersion] = useState(null); // 'v1', 'v2', or null (auto)
   const [currentSystemVersion, setCurrentSystemVersion] = useState(null); // Track which system is active
+
+  const normalizeBusinessId = (value) => {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    if (!normalized || normalized === 'null' || normalized === 'undefined') {
+      return null;
+    }
+    return normalized;
+  };
+
+  const getStoredBusinessId = () =>
+    normalizeBusinessId(localStorage.getItem('tavariPinnedBusinessId')) ||
+    normalizeBusinessId(localStorage.getItem('selectedBusinessId')) ||
+    normalizeBusinessId(localStorage.getItem('currentBusinessId'));
+
+  const setStoredBusinessId = (businessId) => {
+    const normalizedBusinessId = normalizeBusinessId(businessId);
+    if (!normalizedBusinessId) return;
+    localStorage.setItem('tavariPinnedBusinessId', normalizedBusinessId);
+    localStorage.setItem('selectedBusinessId', normalizedBusinessId);
+    localStorage.setItem('currentBusinessId', normalizedBusinessId);
+  };
+
+  const persistPinnedBusinessId = async (businessId, sessionOverride = null) => {
+    const normalizedBusinessId = normalizeBusinessId(businessId);
+    if (!normalizedBusinessId) return;
+
+    setStoredBusinessId(normalizedBusinessId);
+
+    if (!window.electronAPI?.saveSession) {
+      window.dispatchEvent(new CustomEvent('tavari-kiosk-business-pinned'));
+      return;
+    }
+
+    try {
+      let sessionToSave = sessionOverride;
+
+      if (!sessionToSave) {
+        const { data } = await supabase.auth.getSession();
+        sessionToSave = data?.session || null;
+      }
+
+      await window.electronAPI.saveSession({
+        access_token: sessionToSave?.access_token,
+        refresh_token: sessionToSave?.refresh_token,
+        expires_at: sessionToSave?.expires_at,
+        user: sessionToSave?.user,
+        business_id: normalizedBusinessId,
+        pinned_business_id: normalizedBusinessId
+      });
+
+      console.log('✅ Pinned business ID saved to Electron session:', normalizedBusinessId);
+      window.dispatchEvent(new CustomEvent('tavari-kiosk-business-pinned'));
+    } catch (error) {
+      console.warn('⚠️ Failed to persist pinned business ID:', error);
+      window.dispatchEvent(new CustomEvent('tavari-kiosk-business-pinned'));
+    }
+  };
   
+  const musicInitRef = useRef({ inFlight: false, businessId: null });
+  const kioskPlaybackPromiseRef = useRef(null);
+  const kioskPlaybackDoneRef = useRef(false);
+  const kioskAuthHandledRef = useRef(false);
+
+  const getClassicTrackCount = useCallback(() => {
+    return classicService.tracks?.length || classicService.playlist?.length || 0;
+  }, [classicService]);
+
+  const syncKioskUiFromService = useCallback((service = null) => {
+    const svc = service || activeService || classicService;
+    if (!svc) return;
+
+    if (!activeService) {
+      setActiveService(classicService);
+    }
+
+    let state = {
+      isInitialized: false,
+      currentTrack: null,
+      isPlaying: false,
+      playlist: [],
+    };
+
+    try {
+      if (typeof svc.getState === 'function') {
+        state = { ...state, ...svc.getState() };
+      } else {
+        state = {
+          isInitialized: !!svc.isInitialized,
+          currentTrack: svc.currentTrack || null,
+          isPlaying: !!svc.isPlaying,
+          playlist: svc.playlist || svc.tracks || [],
+        };
+      }
+    } catch (error) {
+      console.warn('⚠️ syncKioskUiFromService:', error);
+    }
+
+    const playlist = state.playlist?.length
+      ? state.playlist
+      : svc.playlist || svc.tracks || classicService.playlist || classicService.tracks || [];
+
+    const ready =
+      state.isInitialized ||
+      !!svc.isInitialized ||
+      playlist.length > 0;
+
+    setCurrentTrack(state.currentTrack || svc.currentTrack || null);
+    setIsPlaying(!!(state.isPlaying || svc.isPlaying));
+    setAppState({
+      isInitialized: ready,
+      currentTrack: state.currentTrack || svc.currentTrack || null,
+      isPlaying: !!(state.isPlaying || svc.isPlaying),
+      playlist,
+    });
+  }, [activeService, classicService]);
+
+  const ensureKioskPlaybackReady = useCallback(async (businessId, reason = 'kiosk-ready') => {
+    if (!businessId) return 0;
+
+    const existingCount = getClassicTrackCount();
+    if (
+      kioskPlaybackDoneRef.current &&
+      classicService.isInitialized &&
+      classicService.businessId === businessId &&
+      existingCount > 0
+    ) {
+      syncKioskUiFromService(classicService);
+      return existingCount;
+    }
+
+    if (kioskPlaybackPromiseRef.current) {
+      return kioskPlaybackPromiseRef.current;
+    }
+
+    kioskPlaybackPromiseRef.current = (async () => {
+      try {
+        console.log(`🎵 Kiosk playback init (${reason})...`);
+        setActiveService(classicService);
+        setCurrentSystemVersion('v1');
+
+        if (!classicService.isInitialized || classicService.businessId !== businessId) {
+          await classicService.initialize(businessId);
+        }
+
+        if (window.__TAVARI_KIOSK_MODE__ && classicService.enableKioskMode) {
+          classicService.enableKioskMode();
+        }
+
+        syncKioskUiFromService(classicService);
+        const count = getClassicTrackCount();
+        kioskPlaybackDoneRef.current = count > 0;
+        console.log(`🎵 Kiosk playback ready (${reason}), tracks:`, count);
+        return count;
+      } finally {
+        kioskPlaybackPromiseRef.current = null;
+      }
+    })();
+
+    return kioskPlaybackPromiseRef.current;
+  }, [classicService, syncKioskUiFromService, getClassicTrackCount]);
+
+  const reloadKioskTracksIfEmpty = useCallback(async (businessId, reason = 'retry') => {
+    if (!businessId) return 0;
+    const existing =
+      classicService.tracks?.length || classicService.playlist?.length || 0;
+    if (existing > 0) {
+      syncKioskUiFromService(classicService);
+      return existing;
+    }
+    console.log(`🎵 Reloading kiosk tracks (${reason})...`);
+    const count = await ensureKioskPlaybackReady(businessId, reason);
+    return count;
+  }, [classicService, ensureKioskPlaybackReady, syncKioskUiFromService]);
+
   // NO AUTH CHECK - This is a dedicated music kiosk, works without login
   useEffect(() => {
     const isDesktopApp = window.electronAPI || window.__TAVARI_KIOSK_MODE__;
     console.log('🎵 Music Kiosk loaded - Desktop app:', isDesktopApp);
+
+    if (isDesktopApp) {
+      // Desktop kiosk always uses classic — v2 stub leaves UI stuck on "Initializing..."
+      localStorage.setItem('music_system_version_override', 'v1');
+      setForcedSystemVersion('v1');
+    }
     
     // CRITICAL: Ensure we're on the correct hash route
     // HashRouter might not have parsed the hash yet, so force it
@@ -64,6 +243,28 @@ const MusicKioskScreen = () => {
     // Don't check auth - just load music
   }, []);
 
+  // Bootstrap playback once when business ID is available (no staff login required).
+  useEffect(() => {
+    const bootstrapOnce = async (source) => {
+      if (kioskAuthHandledRef.current) return;
+      const businessId = getStoredBusinessId();
+      if (!businessId) return;
+
+      kioskAuthHandledRef.current = true;
+      setShowLogin(false);
+      await ensureKioskPlaybackReady(businessId, source);
+    };
+
+    bootstrapOnce('kiosk-start');
+
+    const onBusinessPinned = () => bootstrapOnce('tavari-kiosk-business-pinned');
+    window.addEventListener('tavari-kiosk-business-pinned', onBusinessPinned);
+
+    return () => {
+      window.removeEventListener('tavari-kiosk-business-pinned', onBusinessPinned);
+    };
+  }, [ensureKioskPlaybackReady]);
+
   // Fetch user's businesses and set the correct business
   // FOR ELECTRON: Skip auth - use business from localStorage or allow manual selection
   useEffect(() => {
@@ -74,32 +275,21 @@ const MusicKioskScreen = () => {
       if (isDesktopApp) {
         // CRITICAL: Set business ID from localStorage IMMEDIATELY (synchronous)
         // This prevents the "Initializing..." screen from showing
-        const storedBusinessId = localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
+        const storedBusinessId = getStoredBusinessId();
         if (storedBusinessId && !currentBusinessId) {
           setCurrentBusinessId(storedBusinessId);
           console.log('🎵 Using stored business ID for kiosk (immediate):', storedBusinessId);
         }
         
-        // Try to restore session first - needed to fetch businesses
+        // Use the pinned business immediately. Auth restoration is optional for
+        // unattended kiosks and can burn rotated refresh tokens during startup.
         const restoreSession = async () => {
-          const { data: { session } } = await supabase.auth.getSession();
-          if (!session) {
-            // Try localStorage
-            const savedSession = localStorage.getItem('tavari_session');
-            if (savedSession) {
-              try {
-                const sessionData = JSON.parse(savedSession);
-                if (sessionData.access_token && sessionData.refresh_token) {
-                  await supabase.auth.setSession({
-                    access_token: sessionData.access_token,
-                    refresh_token: sessionData.refresh_token
-                  });
-                  console.log('✅ Session restored for business fetch');
-                }
-              } catch (e) {
-                console.warn('⚠️ Session restore failed');
-              }
+          const storedBusinessId2 = getStoredBusinessId();
+          if (storedBusinessId2) {
+            if (storedBusinessId2 !== currentBusinessId) {
+              setCurrentBusinessId(storedBusinessId2);
             }
+            return;
           }
           
           // Now try to fetch businesses if we have a session
@@ -108,41 +298,64 @@ const MusicKioskScreen = () => {
             try {
               const { data: profileData } = await supabase.from('users').select('id').eq('id', currentSession.user.id).single();
               if (profileData) {
+                // Fetch ALL businesses user has access to (not just the first one)
                 const { data: bizData } = await supabase
                   .from('business_users')
                   .select('business_id, businesses(id, name)')
-                  .eq('user_id', profileData.id)
-                  .limit(1);
+                  .eq('user_id', profileData.id);
                 
-                if (bizData && bizData.length > 0 && bizData[0].businesses) {
-                  const businessId = bizData[0].businesses.id;
-                  setCurrentBusinessId(businessId);
-                  localStorage.setItem('selectedBusinessId', businessId);
-                  localStorage.setItem('currentBusinessId', businessId);
-                  console.log('✅ Business ID found from session:', businessId);
-                  return;
+                if (bizData && bizData.length > 0) {
+                  const userBusinesses = bizData
+                    .map((d) => d.businesses)
+                    .filter(biz => biz && biz.id && biz.name);
+                  
+                  setBusinesses(userBusinesses);
+                  
+                  // Check if stored business ID is valid
+                  const storedBusinessId2 = getStoredBusinessId();
+                  const validBusinessIds = userBusinesses.map(b => b.id);
+                  
+                  let businessIdToUse = null;
+                  
+                  if (storedBusinessId2 && validBusinessIds.includes(storedBusinessId2)) {
+                    // Stored ID is valid - use it
+                    businessIdToUse = storedBusinessId2;
+                    console.log('✅ Stored business ID is valid:', businessIdToUse, userBusinesses.find(b => b.id === businessIdToUse)?.name);
+                  } else if (userBusinesses.length > 0) {
+                    // Stored ID is invalid or missing - use first available business
+                    businessIdToUse = userBusinesses[0].id;
+                    if (storedBusinessId2 && !validBusinessIds.includes(storedBusinessId2)) {
+                      console.warn('⚠️ Stored business ID is not valid for this user. Stored:', storedBusinessId2, 'Using first available:', businessIdToUse);
+                    } else {
+                      console.log('✅ Using first available business:', businessIdToUse, userBusinesses[0].name);
+                    }
+                  }
+                  
+                  if (businessIdToUse) {
+                    setCurrentBusinessId(businessIdToUse);
+                    setStoredBusinessId(businessIdToUse);
+                    await persistPinnedBusinessId(businessIdToUse);
+                    return;
+                  }
+                } else {
+                  console.warn('⚠️ User has no businesses associated with their account');
                 }
               }
             } catch (e) {
-              console.warn('⚠️ Failed to fetch businesses from session');
+              console.error('⚠️ Failed to fetch businesses from session:', e);
             }
           }
           
-          // Fallback: Try to get business ID from localStorage (set during download)
-          const storedBusinessId2 = localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
-          if (storedBusinessId2 && storedBusinessId2 !== currentBusinessId) {
-            setCurrentBusinessId(storedBusinessId2);
-            console.log('🎵 Using stored business ID for kiosk:', storedBusinessId2);
-          } else if (!storedBusinessId2) {
+          if (!getStoredBusinessId()) {
             // Last resort: Check if Electron has business ID in saved session
             if (window.electronAPI) {
               try {
                 const savedSession = await window.electronAPI.loadSession();
-                if (savedSession?.business_id) {
-                  setCurrentBusinessId(savedSession.business_id);
-                  localStorage.setItem('selectedBusinessId', savedSession.business_id);
-                  localStorage.setItem('currentBusinessId', savedSession.business_id);
-                  console.log('✅ Business ID found in Electron session:', savedSession.business_id);
+                const sessionBusinessId = savedSession?.pinned_business_id || savedSession?.business_id;
+                if (sessionBusinessId) {
+                  setCurrentBusinessId(sessionBusinessId);
+                  setStoredBusinessId(sessionBusinessId);
+                  console.log('✅ Business ID found in Electron session:', sessionBusinessId);
                   return;
                 }
               } catch (e) {
@@ -196,9 +409,7 @@ const MusicKioskScreen = () => {
             const userBusinessId = bizList[0].id;
             console.log('🎵 Setting business to user\'s first business:', userBusinessId, bizList[0].name);
             setCurrentBusinessId(userBusinessId);
-            // Update localStorage to match
-            localStorage.setItem('selectedBusinessId', userBusinessId);
-            localStorage.setItem('currentBusinessId', userBusinessId);
+            setStoredBusinessId(userBusinessId);
           } else {
             console.error('🎵 User has no businesses!');
           }
@@ -225,7 +436,7 @@ const MusicKioskScreen = () => {
 
   useEffect(() => {
     // Read business ID fresh from localStorage (not context)
-    const storedBusinessId = localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
+    const storedBusinessId = getStoredBusinessId();
     console.log('🎵 MusicKioskScreen: Initializing...', { 
       storedBusinessId,
       fromSelectedKey: localStorage.getItem('selectedBusinessId'),
@@ -235,63 +446,17 @@ const MusicKioskScreen = () => {
       activeServiceBusinessId: activeService?.businessId,
       currentBusinessId
     });
-    
-    // Check if we need to re-initialize (business ID changed or service not initialized)
-    const needsReinit = !activeService || 
-                        !activeService.isInitialized || 
-                        (activeService.businessId && activeService.businessId !== currentBusinessId && currentBusinessId);
-    
-    if (activeService && activeService.isInitialized && !needsReinit) {
-      console.log('🎵 Service already initialized with correct business ID, skipping...');
-      return;
-    }
-    
-    if (needsReinit && activeService) {
-      console.log('🎵 Business ID changed or service not properly initialized - will re-initialize');
-    }
-    
-    // Enable kiosk mode will be done after we determine which service to use
 
     // Initialize music - NO AUTH REQUIRED for kiosk mode
     const initializeMusic = async () => {
       try {
-        // Try to restore session if available, but don't require it
-        let { data: { session } } = await supabase.auth.getSession();
-        
-        if (!session) {
-          // Try to restore from localStorage (optional)
-          const savedSession = localStorage.getItem('tavari_session');
-          if (savedSession) {
-            try {
-              const sessionData = JSON.parse(savedSession);
-              if (sessionData.access_token && sessionData.refresh_token) {
-                const { data, error } = await supabase.auth.setSession({
-                  access_token: sessionData.access_token,
-                  refresh_token: sessionData.refresh_token
-                }).catch(() => ({ data: null, error: { message: 'Session restore failed' } }));
-                
-                if (!error) {
-                  const { data: { session: restoredSession } } = await supabase.auth.getSession();
-                  if (restoredSession) {
-                    session = restoredSession;
-                    console.log('✅ Session restored for kiosk');
-                  }
-                }
-              }
-            } catch (e) {
-              console.warn('⚠️ Session restore failed, continuing without auth');
-            }
-          }
-          // No session is OK - kiosk works without it
-        }
-
         // Get business ID - use state first, fallback to localStorage for kiosk mode
-        let businessId = currentBusinessId;
+        let businessId = currentBusinessId || getStoredBusinessId();
         
         // For Electron kiosk: use stored business ID if available
         const isDesktopApp = window.electronAPI || window.__TAVARI_KIOSK_MODE__;
         if (!businessId && isDesktopApp) {
-          businessId = localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
+          businessId = getStoredBusinessId();
           if (businessId) {
             setCurrentBusinessId(businessId);
             console.log('🎵 Using stored business ID for kiosk:', businessId);
@@ -300,38 +465,28 @@ const MusicKioskScreen = () => {
         
         // If still no business ID, wait or show selector
         if (!businessId) {
-          console.log('🎵 ⏳ No business ID yet - will show business selector if needed');
-          // Don't return - let it try to initialize with null (service will handle it)
+          console.warn('🎵 No business ID — show setup modal');
+          setShowBusinessIdModal(true);
+          return;
         }
-        
-        console.log('🎵 Business ID sources:', {
-          fromState: currentBusinessId,
-          fromLocalStorage_selected: localStorage.getItem('selectedBusinessId'),
-          fromLocalStorage_current: localStorage.getItem('currentBusinessId'),
-          using: businessId,
-          note: 'Using state value (logged-in user\'s actual business)'
-        });
-        
-        console.log('🎵 ✅ Using business ID from logged-in user:', businessId);
 
-        // Auto-register desktop installation if in Electron and has business ID
-        if (businessId && window.electronAPI) {
-          try {
-            console.log('🔍 [MusicKioskScreen] Attempting auto-registration...');
-            const installationId = await desktopInstallationService.autoRegisterInstallation(businessId);
-            if (installationId) {
-              console.log('✅ [MusicKioskScreen] Desktop installation registered:', installationId);
-              // last_seen updates are started automatically by DesktopInstallationService
-            } else {
-              console.log('ℹ️ [MusicKioskScreen] Auto-registration skipped or failed (may already be registered)');
-            }
-          } catch (error) {
-            console.warn('⚠️ [MusicKioskScreen] Auto-registration error (non-critical):', error);
-          }
-        }
+        setStoredBusinessId(businessId);
+        await persistPinnedBusinessId(businessId);
+
+        console.log('🎵 ✅ Using business ID for kiosk:', businessId);
 
         // Initialize music service - check which system to use
         if (businessId) {
+          const isDesktopApp = window.electronAPI || window.__TAVARI_KIOSK_MODE__;
+          if (isDesktopApp && forcedSystemVersion !== 'v2') {
+            const trackCount = await ensureKioskPlaybackReady(businessId, 'initializeMusic');
+            console.log('🎵 Classic kiosk service initialized. Track count:', trackCount);
+            if (trackCount === 0) {
+              console.warn('🎵 No tracks loaded — check business ID or network');
+            }
+            return;
+          }
+
           // Check if Music V2 is enabled for this business
           console.log('🎵 Checking Music V2 feature flag for business:', businessId);
           const v2Enabled = await isMusicV2Enabled(businessId);
@@ -361,14 +516,21 @@ const MusicKioskScreen = () => {
               .maybeSingle();
             
             if (locError || !location) {
-              console.error('🎵 Music V2 location not found, falling back to Classic');
+              console.error('🎵 Music V2 location not found, falling back to Classic', {
+                locError,
+                location,
+                businessId,
+                note: 'V2 is enabled but no location exists. Using Classic system which queries music_tracks table.'
+              });
               // Fallback to classic system
               setCurrentSystemVersion('v1');
               setActiveService(classicService);
+              console.log('🎵 Initializing Classic service with businessId:', businessId);
               await classicService.initialize(businessId);
               if (window.__TAVARI_KIOSK_MODE__ && classicService.enableKioskMode) {
                 classicService.enableKioskMode();
               }
+              console.log('🎵 Classic service initialized. Track count:', classicService.tracks?.length || 0);
             } else {
               // Initialize Music V2 with location ID
               setCurrentSystemVersion('v2');
@@ -392,17 +554,33 @@ const MusicKioskScreen = () => {
               
               // Use the hook's initialize method (takes locationId only - device handled internally)
               try {
+                console.log('🎵 Attempting to initialize Music V2 service with location:', location.id);
                 await v2Service.initialize(location.id);
-                console.log('🎵 Music V2 service initialized');
+                console.log('🎵 Music V2 service initialized (NOTE: V2 is a stub - may not actually work)');
+                
+                // Check if V2 service actually has tracks (it's a stub, so it won't)
+                const v2State = typeof v2Service.getState === 'function' ? v2Service.getState() : { playlist: [] };
+                if (!v2State.playlist || v2State.playlist.length === 0) {
+                  console.warn('⚠️ V2 service has no tracks (it\'s a stub). Falling back to Classic system.');
+                  setCurrentSystemVersion('v1');
+                  setActiveService(classicService);
+                  await classicService.initialize(businessId);
+                  if (window.__TAVARI_KIOSK_MODE__ && classicService.enableKioskMode) {
+                    classicService.enableKioskMode();
+                  }
+                  console.log('🎵 Classic service initialized as fallback. Track count:', classicService.tracks?.length || 0);
+                }
               } catch (initError) {
                 console.error('🎵 V2 initialization failed, falling back to Classic:', initError);
                 // Fallback to classic
                 setCurrentSystemVersion('v1');
                 setActiveService(classicService);
+                console.log('🎵 Initializing Classic service after V2 error with businessId:', businessId);
                 await classicService.initialize(businessId);
                 if (window.__TAVARI_KIOSK_MODE__ && classicService.enableKioskMode) {
                   classicService.enableKioskMode();
                 }
+                console.log('🎵 Classic service initialized. Track count:', classicService.tracks?.length || 0);
               }
             }
           } else {
@@ -424,34 +602,52 @@ const MusicKioskScreen = () => {
       }
     };
 
-    // Initialize if we have business ID and need to (no service, not initialized, or business ID changed)
-    if (currentBusinessId) {
-      if (!activeService || !activeService.isInitialized || (activeService.businessId && activeService.businessId !== currentBusinessId)) {
-        console.log('🎵 Initializing music service with business ID:', currentBusinessId);
-        initializeMusic();
-      }
-    } else {
-      // Try to use stored business ID from localStorage
-      const storedId = localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
-      if (storedId && (!activeService || !activeService.isInitialized || activeService.businessId !== storedId)) {
-        console.log('🎵 Using stored business ID from localStorage:', storedId);
+    const businessIdForInit = currentBusinessId || getStoredBusinessId();
+    if (!businessIdForInit) {
+      const storedId = getStoredBusinessId();
+      if (storedId && !currentBusinessId) {
         setCurrentBusinessId(storedId);
-        // This will trigger the effect again with the business ID set
       }
+      return;
     }
 
-    // Auto-refresh session every 55 minutes to prevent expiration
+    if (
+      musicInitRef.current.inFlight ||
+      kioskPlaybackPromiseRef.current ||
+      (kioskPlaybackDoneRef.current && classicService?.isInitialized) ||
+      (musicInitRef.current.businessId === businessIdForInit && classicService?.isInitialized)
+    ) {
+      if (classicService?.isInitialized) {
+        syncKioskUiFromService(classicService);
+      }
+      return;
+    }
+
+    musicInitRef.current.inFlight = true;
+    console.log('🎵 Initializing music service with business ID:', businessIdForInit);
+    initializeMusic()
+      .finally(() => {
+        musicInitRef.current.inFlight = false;
+        musicInitRef.current.businessId = businessIdForInit;
+      });
+
+    // Only refresh when user has logged in on this kiosk (optional).
     const refreshInterval = setInterval(async () => {
       const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        await supabase.auth.refreshSession();
+      if (!session) return;
+      const { data, error } = await supabase.auth.refreshSession();
+      if (!error && data?.session) {
+        const businessId = getStoredBusinessId() || currentBusinessId;
+        if (businessId) {
+          await persistPinnedBusinessId(businessId, data.session);
+        }
       }
-    }, 55 * 60 * 1000); // 55 minutes
+    }, 55 * 60 * 1000);
 
     return () => {
       clearInterval(refreshInterval);
     };
-  }, [currentBusinessId, forcedSystemVersion, activeService]); // Include activeService to prevent re-init
+  }, [currentBusinessId, forcedSystemVersion]);
 
   // Minimal UI for kiosk mode - just show current track info
   const [currentTrack, setCurrentTrack] = React.useState(null);
@@ -460,44 +656,45 @@ const MusicKioskScreen = () => {
 
   // Listen to active service state changes
   useEffect(() => {
-    if (!activeService) {
-      setAppState({ isInitialized: false });
+    const service = activeService || (classicService?.isInitialized ? classicService : null);
+    if (!service) {
       return;
     }
 
     const updateState = () => {
       // Check if service has getState method (V2 service hook might not have it)
-      if (typeof activeService.getState === 'function') {
+      if (typeof service.getState === 'function') {
         try {
-          const state = activeService.getState();
+          const state = service.getState();
           setCurrentTrack(state.currentTrack || state.currentTrack);
           setIsPlaying(state.isPlaying || false);
+          const playlist = state.playlist || service.playlist || service.tracks || [];
           setAppState({
-            isInitialized: state.isInitialized || activeService.isInitialized || false,
+            isInitialized:
+              state.isInitialized || service.isInitialized || playlist.length > 0,
             currentTrack: state.currentTrack || null,
             isPlaying: state.isPlaying || false,
-            playlist: state.playlist || activeService.playlist || []
+            playlist,
           });
         } catch (error) {
           console.warn('⚠️ Error getting service state:', error);
-          // Fallback: try to get state from service properties directly
+          const playlist = service.playlist || service.tracks || [];
           setAppState({
-            isInitialized: activeService.isInitialized || false,
-            currentTrack: activeService.currentTrack || null,
-            isPlaying: activeService.isPlaying || false,
-            playlist: activeService.playlist || []
+            isInitialized: service.isInitialized || playlist.length > 0,
+            currentTrack: service.currentTrack || null,
+            isPlaying: service.isPlaying || false,
+            playlist,
           });
         }
       } else {
-        // V2 service hook or service without getState - use properties directly
-        // V2 hook returns state as properties: isInitialized, currentTrack, isPlaying, playlist
-        setCurrentTrack(activeService.currentTrack || null);
-        setIsPlaying(activeService.isPlaying || false);
+        const playlist = service.playlist || service.tracks || [];
+        setCurrentTrack(service.currentTrack || null);
+        setIsPlaying(service.isPlaying || false);
         setAppState({
-          isInitialized: activeService.isInitialized || false,
-          currentTrack: activeService.currentTrack || null,
-          isPlaying: activeService.isPlaying || false,
-          playlist: activeService.playlist || []
+          isInitialized: service.isInitialized || playlist.length > 0,
+          currentTrack: service.currentTrack || null,
+          isPlaying: service.isPlaying || false,
+          playlist,
         });
       }
     };
@@ -506,8 +703,8 @@ const MusicKioskScreen = () => {
     
     // Only subscribe to listeners if service has addListener method
     let unsubscribe = () => {};
-    if (typeof activeService.addListener === 'function') {
-      unsubscribe = activeService.addListener(updateState);
+    if (typeof service.addListener === 'function') {
+      unsubscribe = service.addListener(updateState);
     } else {
       // V2 hook doesn't have addListener - poll for state changes
       // Update immediately, then poll every second
@@ -518,19 +715,8 @@ const MusicKioskScreen = () => {
     
     // Fallback: if still initializing after 5 seconds, mark as initialized anyway
     const timeout = setTimeout(() => {
-      const currentState = typeof activeService.getState === 'function' 
-        ? activeService.getState() 
-        : { 
-            isInitialized: activeService.isInitialized || false,
-            currentTrack: activeService.currentTrack || null,
-            isPlaying: activeService.isPlaying || false,
-            playlist: activeService.playlist || []
-          };
-      if (!currentState.isInitialized && !activeService.isInitialized) {
-        console.log('🎵 Initialization timeout - showing UI anyway');
-        setAppState({ ...currentState, isInitialized: true });
-      }
-    }, 5000);
+      syncKioskUiFromService(service);
+    }, 2000);
 
     return () => {
       if (typeof unsubscribe === 'function') {
@@ -538,7 +724,7 @@ const MusicKioskScreen = () => {
       }
       clearTimeout(timeout);
     };
-  }, [activeService]);
+  }, [activeService, classicService, syncKioskUiFromService]);
 
   // Keyboard shortcut for business switching (Ctrl+B or Cmd+B)
   useEffect(() => {
@@ -562,8 +748,14 @@ const MusicKioskScreen = () => {
     };
   }, [businesses.length, showBusinessSelector]);
 
-  const hasTracks = appState.playlist?.length > 0 || false;
-  const isInitialized = appState.isInitialized || false;
+  const playlistCount =
+    appState.playlist?.length ||
+    classicService?.playlist?.length ||
+    classicService?.tracks?.length ||
+    0;
+  const hasTracks = playlistCount > 0;
+  const isInitialized =
+    appState.isInitialized || classicService?.isInitialized || hasTracks;
 
   // Handle login for kiosk (when no session found)
   const handleKioskLogin = async (e) => {
@@ -588,12 +780,6 @@ const MusicKioskScreen = () => {
       if (data.session) {
         console.log('✅ Login successful - saving session and fetching business ID');
         
-        // Save session to Electron if available
-        if (window.electronAPI?.saveSession) {
-          await window.electronAPI.saveSession(data.session);
-          console.log('✅ Session saved to Electron');
-        }
-        
         // Also save to localStorage as backup
         localStorage.setItem('tavari_session', JSON.stringify({
           access_token: data.session.access_token,
@@ -617,9 +803,10 @@ const MusicKioskScreen = () => {
           if (bizData && bizData.length > 0 && bizData[0].businesses) {
             const businessId = bizData[0].businesses.id;
             setCurrentBusinessId(businessId);
-            localStorage.setItem('selectedBusinessId', businessId);
-            localStorage.setItem('currentBusinessId', businessId);
+            setBusinesses([bizData[0].businesses]);
+            await persistPinnedBusinessId(businessId, data.session);
             setShowLogin(false);
+            await ensureKioskPlaybackReady(businessId, 'post-login');
             console.log('✅ Business ID found after login:', businessId);
           } else {
             setLoginError('No business found for this account');
@@ -655,8 +842,7 @@ const MusicKioskScreen = () => {
       }
       
       // Update localStorage
-      localStorage.setItem('selectedBusinessId', newBusinessId);
-      localStorage.setItem('currentBusinessId', newBusinessId);
+      await persistPinnedBusinessId(newBusinessId);
       
       // Clear Music V2 device info if switching businesses (device is tied to location)
       localStorage.removeItem('music_v2_device_id');
@@ -781,7 +967,7 @@ const MusicKioskScreen = () => {
                 console.log('📊 Current state:', {
                   currentBusinessId,
                   activeServiceType: currentSystemVersion,
-                  storedBusinessId: localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId'),
+                  storedBusinessId: getStoredBusinessId(),
                   serviceBusinessId: activeService.businessId || (window.globalMusicService?.businessId)
                 });
                 
@@ -794,7 +980,7 @@ const MusicKioskScreen = () => {
                 }
                 
                 // Ensure businessId is up to date before reloading
-                const businessIdToUse = currentBusinessId || localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
+                const businessIdToUse = currentBusinessId || getStoredBusinessId();
                 if (businessIdToUse && service.businessId !== businessIdToUse) {
                   console.log('🔄 Updating businessId before reload:', businessIdToUse);
                   service.businessId = businessIdToUse;
@@ -854,7 +1040,7 @@ const MusicKioskScreen = () => {
           <>
             <button
               onClick={() => {
-                const currentId = currentBusinessId || localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
+                const currentId = currentBusinessId || getStoredBusinessId();
                 setBusinessIdInput(currentId || '');
                 setShowBusinessIdModal(true);
               }}
@@ -958,7 +1144,7 @@ const MusicKioskScreen = () => {
                       color: '#6b7280',
                       wordBreak: 'break-all'
                     }}>
-                      {currentBusinessId || localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId') || 'Not set'}
+                      {currentBusinessId || getStoredBusinessId() || 'Not set'}
                     </div>
                   </div>
                   
@@ -1017,18 +1203,19 @@ const MusicKioskScreen = () => {
                           return;
                         }
                         
-                        const trimmedId = businessIdInput.trim();
-                        const currentId = currentBusinessId || localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
+                        const trimmedId = normalizeBusinessId(businessIdInput);
+                        if (!trimmedId) {
+                          alert('Please enter a valid Business ID');
+                          return;
+                        }
+                        const currentId = currentBusinessId || getStoredBusinessId();
                         
                         setCurrentBusinessId(trimmedId);
-                        localStorage.setItem('selectedBusinessId', trimmedId);
-                        localStorage.setItem('currentBusinessId', trimmedId);
+                        await persistPinnedBusinessId(trimmedId);
                         
                         // Update service
                         if (window.globalMusicService) {
-                          window.globalMusicService.businessId = trimmedId;
-                          // Force reload
-                          await window.globalMusicService.loadTracks();
+                          window.globalMusicService.destroy?.();
                         }
                         
                         // Reinitialize if needed
@@ -1075,13 +1262,71 @@ const MusicKioskScreen = () => {
             onClick={async () => {
               try {
                 const service = window.globalMusicService;
-                const businessId = service.businessId || currentBusinessId || localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
+                const businessId = service.businessId || currentBusinessId || getStoredBusinessId();
+                
+                console.log('🔍 Running full diagnostic check...');
+                
+                // First, check what businesses the user has access to
+                let userBusinesses = [];
+                let currentUserId = null;
+                
+                try {
+                  const { data: { session } } = await supabase.auth.getSession();
+                  if (session) {
+                    currentUserId = session.user.id;
+                    const { data: profileData } = await supabase.from('users').select('id').eq('id', currentUserId).single();
+                    if (profileData) {
+                      const { data: bizData } = await supabase
+                        .from('business_users')
+                        .select('business_id, businesses(id, name)')
+                        .eq('user_id', profileData.id);
+                      
+                      if (bizData) {
+                        userBusinesses = bizData
+                          .map((d) => d.businesses)
+                          .filter(biz => biz && biz.id && biz.name);
+                      }
+                    }
+                  }
+                } catch (e) {
+                  console.warn('⚠️ Could not fetch user businesses:', e);
+                }
+                
+                let message = `📊 FULL DIAGNOSTIC REPORT\n\n`;
+                
+                // Business ID section
+                message += `=== BUSINESS ID ===\n`;
+                message += `Current: ${businessId || 'NOT SET'}\n`;
+                message += `From localStorage (tavariPinnedBusinessId): ${localStorage.getItem('tavariPinnedBusinessId') || 'NOT SET'}\n`;
+                message += `From localStorage (selectedBusinessId): ${localStorage.getItem('selectedBusinessId') || 'NOT SET'}\n`;
+                message += `From localStorage (currentBusinessId): ${localStorage.getItem('currentBusinessId') || 'NOT SET'}\n`;
+                message += `From service: ${service.businessId || 'NOT SET'}\n\n`;
+                
+                // User's businesses section
+                if (userBusinesses.length > 0) {
+                  message += `=== YOUR BUSINESSES ===\n`;
+                  userBusinesses.forEach((biz, i) => {
+                    const isCurrent = biz.id === businessId;
+                    message += `${i + 1}. ${biz.name} (${biz.id})${isCurrent ? ' ✓ CURRENT' : ''}\n`;
+                  });
+                  
+                  if (businessId && !userBusinesses.find(b => b.id === businessId)) {
+                    message += `\n⚠️ WARNING: Current business ID (${businessId}) is NOT in your list of businesses!\n`;
+                    message += `This is likely why the kiosk isn't working.\n`;
+                    message += `Please use "Set Business ID" to select a valid business.\n\n`;
+                  }
+                  message += `\n`;
+                } else {
+                  message += `=== YOUR BUSINESSES ===\n`;
+                  message += `No businesses found. You may need to log in.\n\n`;
+                }
                 
                 if (!businessId) {
-                  alert('No business ID found! Use "Set Business ID" button first.');
+                  alert(message + '\n⚠️ No business ID set! Use "Set Business ID" button first.');
                   return;
                 }
                 
+                // Tracks section
                 console.log('🔍 Running diagnostic check for business:', businessId);
                 
                 // Direct database query
@@ -1093,7 +1338,7 @@ const MusicKioskScreen = () => {
                 
                 if (error) {
                   console.error('❌ Database query error:', error);
-                  alert(`Database error: ${error.message}`);
+                  alert(message + `\n❌ DATABASE ERROR: ${error.message}`);
                   return;
                 }
                 
@@ -1118,7 +1363,7 @@ const MusicKioskScreen = () => {
                 console.log('📊 Database Diagnostic:', diagnostic);
                 console.log('📋 ALL TRACKS IN DATABASE:', diagnostic.allTracks);
                 
-                let message = `📊 DATABASE DIAGNOSTIC\n\n`;
+                message += `=== MUSIC TRACKS ===\n`;
                 message += `Business ID: ${businessId}\n`;
                 message += `Total tracks in DB: ${diagnostic.totalInDb}\n`;
                 message += `Shuffle tracks: ${diagnostic.shuffleInDb}\n`;
@@ -1131,25 +1376,31 @@ const MusicKioskScreen = () => {
                 } else if (diagnostic.totalInDb === 0) {
                   message += `⚠️ NO TRACKS FOUND!\n`;
                   message += `The database has 0 tracks for this business.\n`;
-                  message += `If you uploaded tracks, they may be in a different business.\n\n`;
+                  if (userBusinesses.length > 1) {
+                    message += `\nYou have ${userBusinesses.length} businesses. The tracks might be in a different business.\n`;
+                    message += `Try switching to another business using "Set Business ID".\n\n`;
+                  }
+                  message += `\n`;
                 }
                 
-                message += `All ${diagnostic.totalInDb} tracks:\n`;
-                diagnostic.allTracks.slice(0, 20).forEach((t, i) => {
-                  const date = t.uploaded_at ? new Date(t.uploaded_at).toLocaleDateString() : 'unknown';
-                  message += `${i + 1}. ${t.title || 'Untitled'}${t.artist ? ` - ${t.artist}` : ''} (shuffle: ${t.include_in_shuffle ? 'yes' : 'no'}, uploaded: ${date})\n`;
-                });
-                
-                if (diagnostic.totalInDb > 20) {
-                  message += `\n... and ${diagnostic.totalInDb - 20} more (see console for full list)`;
+                if (diagnostic.totalInDb > 0) {
+                  message += `Recent tracks (first 10):\n`;
+                  diagnostic.allTracks.slice(0, 10).forEach((t, i) => {
+                    const date = t.uploaded_at ? new Date(t.uploaded_at).toLocaleDateString() : 'unknown';
+                    message += `${i + 1}. ${t.title || 'Untitled'}${t.artist ? ` - ${t.artist}` : ''}\n`;
+                  });
+                  
+                  if (diagnostic.totalInDb > 10) {
+                    message += `\n... and ${diagnostic.totalInDb - 10} more (see console for full list)`;
+                  }
                 }
                 
-                message += `\n\nCheck console for full track list.`;
+                message += `\n\nCheck console for full details.`;
                 
                 alert(message);
               } catch (error) {
                 console.error('❌ Diagnostic error:', error);
-                alert(`Diagnostic failed: ${error.message}`);
+                alert(`Diagnostic failed: ${error.message}\n\nCheck console for details.`);
               }
             }}
             style={{
@@ -1609,7 +1860,8 @@ const MusicKioskScreen = () => {
               Login Required
             </h2>
             <p style={{ fontSize: '14px', opacity: 0.8, marginBottom: '20px' }}>
-              Please log in to connect this kiosk to your business.
+              This device knows your business but needs a one-time login to load songs from the library.
+              (Downloading the installer on another PC only copies the business name, not a working session.)
             </p>
             <form onSubmit={handleKioskLogin}>
               <input
@@ -1691,40 +1943,33 @@ const MusicKioskScreen = () => {
               </div>
             )}
           </div>
-        ) : !isInitialized && !isPlaying ? (
-          <div style={{ fontSize: '18px', opacity: 0.8 }}>
-            Initializing...
-            {hasTracks && (
-              <div style={{ fontSize: '14px', marginTop: '10px', opacity: 0.7 }}>
-                {appState.playlist?.length || 0} tracks loaded
-              </div>
-            )}
-          </div>
+        ) : !isInitialized && !isPlaying && !hasTracks ? (
+          <div style={{ fontSize: '18px', opacity: 0.8 }}>Initializing...</div>
         ) : currentTrack ? (
           <>
-            <div style={{ fontSize: '24px', marginBottom: '10px', fontWeight: '500' }}>
+            <div style={{ fontSize: '14px', marginBottom: '10px', fontWeight: '500' }}>
               {currentTrack.title || 'Unknown Track'}
             </div>
-            <div style={{ fontSize: '18px', opacity: 0.8, marginBottom: '20px' }}>
+            <div style={{ fontSize: '24px', opacity: 0.8, marginBottom: '20px' }}>
               {currentTrack.artist || 'Unknown Artist'}
             </div>
-            <div style={{ marginTop: '20px', fontSize: '16px', opacity: 0.9 }}>
+            <div style={{ marginTop: '20px', fontSize: '18px', opacity: 0.9 }}>
               {isPlaying ? '▶️ Playing' : '⏸️ Paused'}
             </div>
-            <div style={{ marginTop: '10px', fontSize: '14px', opacity: 0.6 }}>
-              {hasTracks ? `${appState.playlist.length} tracks in playlist` : 'No tracks available'}
+            <div style={{ marginTop: '10px', fontSize: '16px', opacity: 0.6 }}>
+              {hasTracks ? `${playlistCount} tracks in playlist` : 'No tracks available'}
             </div>
           </>
         ) : hasTracks ? (
-          <div style={{ fontSize: '18px', opacity: 0.8 }}>
-            Ready to play - {appState.playlist.length} tracks loaded
+          <div style={{ fontSize: '14px', opacity: 0.8 }}>
+            Ready to play - {playlistCount} tracks loaded
           </div>
         ) : (
           <>
             <div style={{ fontSize: '18px', opacity: 0.8, marginBottom: '20px' }}>
               No tracks found
             </div>
-            <div style={{ fontSize: '14px', opacity: 0.7, lineHeight: '1.6' }}>
+            <div style={{ fontSize: '18px', opacity: 0.7, lineHeight: '1.6' }}>
               Upload music tracks from the web dashboard<br />
               to start playing background music.
             </div>
@@ -1734,14 +1979,7 @@ const MusicKioskScreen = () => {
           </>
         )}
       </div>
-      
-      {/* Hidden audio element for playback */}
-      <audio
-        id="global-audio-element"
-        style={{ display: 'none' }}
-        autoPlay
-        preload="auto"
-      />
+      {/* Music playback uses GlobalMusicService's single owned audio element (tavari-global-music-audio in document.body). Do not add a duplicate here or music can play behind ads. */}
     </div>
   );
 };

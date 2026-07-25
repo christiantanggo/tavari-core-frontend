@@ -1,8 +1,32 @@
 // components/HR/HRPayrollComponents/EETRT-EmployeeSelector.jsx
 import React from 'react';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import { resolveEmploymentFields } from '../../../utils/businessEmploymentStatus';
+
+const employeeStatusSuffix = (emp) => {
+  const { employment_status, termination_date } = resolveEmploymentFields({ user: emp.users });
+  const status = String(employment_status || '').toLowerCase();
+  if (status === 'terminated') {
+    return termination_date ? ` — Terminated ${termination_date}` : ' — Terminated';
+  }
+  if (emp.active === false) return ' — Inactive';
+  return '';
+};
 
 const EETRT_EmployeeSelector = ({ employees, selectedEmployee, onEmployeeChange, effectiveBusinessId }) => {
+  const sortedEmployees = React.useMemo(() => {
+    if (!employees?.length) return [];
+    return [...employees].sort((a, b) => {
+      const termA = String(a.users?.employment_status || '').toLowerCase() === 'terminated' || a.active === false;
+      const termB = String(b.users?.employment_status || '').toLowerCase() === 'terminated' || b.active === false;
+      if (termA !== termB) return termA ? 1 : -1;
+      const lastA = (a.users?.last_name || '').toLowerCase();
+      const lastB = (b.users?.last_name || '').toLowerCase();
+      if (lastA !== lastB) return lastA.localeCompare(lastB);
+      return (a.users?.first_name || '').toLowerCase().localeCompare((b.users?.first_name || '').toLowerCase());
+    });
+  }, [employees]);
+
   const styles = {
     section: {
       marginBottom: TavariStyles.spacing.lg,
@@ -51,9 +75,9 @@ const EETRT_EmployeeSelector = ({ employees, selectedEmployee, onEmployeeChange,
           disabled={!effectiveBusinessId}
         >
           <option value="">Choose an employee to generate comprehensive report...</option>
-          {employees.map(emp => (
+          {sortedEmployees.map(emp => (
             <option key={emp.users.id} value={emp.users.id}>
-              {emp.users.first_name} {emp.users.last_name} ({emp.users.email})
+              {emp.users.first_name} {emp.users.last_name} ({emp.users.email}){employeeStatusSuffix(emp)}
             </option>
           ))}
         </select>

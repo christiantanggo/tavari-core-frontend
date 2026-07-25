@@ -1,12 +1,21 @@
 // src/screens/Home.jsx - WITH SECURITY TRACKING
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { FiMenu, FiX } from 'react-icons/fi';
 import Footer from '../components/Footer';
 import { TavariStyles } from '../utils/TavariStyles';
 import { SecurityWrapper, useSecurityContext } from '../Security';
 
+/** Viewport max-width at which header uses hamburger instead of inline nav */
+const COMPACT_HEADER_MQ = '(max-width: 768px)';
+
 const Home = () => {
   const navigate = useNavigate();
+  const [compactHeader, setCompactHeader] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia(COMPACT_HEADER_MQ).matches
+  );
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const mobileNavRef = useRef(null);
 
   // Security context for tracking public page interactions
   const {
@@ -19,6 +28,35 @@ const Home = () => {
     enableAuditLogging: true,
     securityLevel: 'low'
   });
+
+  useEffect(() => {
+    const mq = window.matchMedia(COMPACT_HEADER_MQ);
+    const apply = () => {
+      setCompactHeader(mq.matches);
+      if (!mq.matches) setMobileNavOpen(false);
+    };
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onDocDown = (e) => {
+      if (mobileNavRef.current && !mobileNavRef.current.contains(e.target)) {
+        setMobileNavOpen(false);
+      }
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') setMobileNavOpen(false);
+    };
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [mobileNavOpen]);
 
   // Track page view on mount
   useEffect(() => {
@@ -88,6 +126,45 @@ const Home = () => {
     navigate('/modules');
   };
 
+  const closeMobileNav = () => setMobileNavOpen(false);
+
+  const onMobileModules = () => {
+    closeMobileNav();
+    void handleModulesClick();
+  };
+
+  const onMobileContact = () => {
+    closeMobileNav();
+    void handleContactClick();
+  };
+
+  const onMobileLogin = () => {
+    closeMobileNav();
+    handleLoginClick();
+  };
+
+  const resetNavButtonHover = (e) => {
+    e.target.style.background = 'none';
+    e.target.style.color = '#008080';
+    e.target.style.transform = 'translateY(0)';
+  };
+
+  const setNavButtonHover = (e) => {
+    e.target.style.background = '#008080';
+    e.target.style.color = '#fff';
+    e.target.style.transform = 'translateY(-1px)';
+  };
+
+  const resetLoginButtonHover = (e) => {
+    e.target.style.background = '#008080';
+    e.target.style.transform = 'translateY(0)';
+  };
+
+  const setLoginButtonHover = (e) => {
+    e.target.style.background = '#006666';
+    e.target.style.transform = 'translateY(-1px)';
+  };
+
   const styles = {
     // Header styles with better visibility
     header: {
@@ -155,6 +232,77 @@ const Home = () => {
       cursor: "pointer",
       transition: "all 0.3s ease",
       fontFamily: TavariStyles.typography.fontFamily
+    },
+
+    mobileNavWrap: {
+      position: "relative",
+      display: "flex",
+      alignItems: "center"
+    },
+
+    hamburgerButton: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      width: 44,
+      height: 44,
+      padding: 0,
+      background: "#fff",
+      border: "2px solid #008080",
+      borderRadius: 8,
+      color: "#008080",
+      cursor: "pointer",
+      transition: "all 0.2s ease"
+    },
+
+    mobileMenuPanel: {
+      position: "absolute",
+      top: "calc(100% + 8px)",
+      right: 0,
+      minWidth: 220,
+      padding: 12,
+      background: "#fff",
+      border: "2px solid #008080",
+      borderRadius: 8,
+      boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
+      display: "flex",
+      flexDirection: "column",
+      gap: 10,
+      alignItems: "stretch",
+      textAlign: "left",
+      zIndex: 20
+    },
+
+    mobileMenuButton: {
+      background: "none",
+      border: "2px solid #008080",
+      color: "#008080",
+      fontWeight: 700,
+      fontSize: 14,
+      cursor: "pointer",
+      padding: "10px 14px",
+      borderRadius: 8,
+      transition: "all 0.3s ease",
+      fontFamily: TavariStyles.typography.fontFamily,
+      width: "100%",
+      textAlign: "left",
+      display: "block"
+    },
+
+    mobileMenuLoginButton: {
+      background: "#008080",
+      color: "#fff",
+      fontWeight: 700,
+      fontSize: 13,
+      border: "2px solid #008080",
+      borderRadius: 8,
+      padding: "10px 14px",
+      cursor: "pointer",
+      transition: "all 0.3s ease",
+      fontFamily: TavariStyles.typography.fontFamily,
+      width: "100%",
+      textAlign: "left",
+      display: "block"
     }
   };
 
@@ -162,7 +310,7 @@ const Home = () => {
     <SecurityWrapper>
       <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", background: "#fff" }}>
         {/* ENHANCED HEADER */}
-        <header style={styles.header}>
+        <header style={{ ...styles.header, zIndex: compactHeader ? 100 : 2 }}>
           <div style={styles.headerContent}>
             {/* Logo */}
             <div style={styles.logo}>
@@ -172,68 +320,98 @@ const Home = () => {
                 style={styles.logoImage}
               />
             </div>
-            
-            {/* Enhanced Nav Buttons */}
-            <nav style={styles.nav}>
-              <button
-                onClick={handleModulesClick}
-                style={styles.navButton}
-                onMouseEnter={(e) => {
-                  e.target.style.background = "#008080";
-                  e.target.style.color = "#fff";
-                  e.target.style.transform = "translateY(-1px)";
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.background = "none";
-                  e.target.style.color = "#008080";
-                  e.target.style.transform = "translateY(0)";
-                }}
-              >
-                Modules
-              </button>
-              
-              <button
-                onClick={handleContactClick}
-                style={styles.navButton}
-                onMouseEnter={(e) => {
-                  e.target.style.background = "#008080";
-                  e.target.style.color = "#fff";
-                  e.target.style.transform = "translateY(-1px)";
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.background = "none";
-                  e.target.style.color = "#008080";
-                  e.target.style.transform = "translateY(0)";
-                }}
-              >
-                Contact
-              </button>
-              
-              <button
-                onClick={(e) => {
-                  console.log('[Home] Button onClick fired!');
-                  console.log('[Home] handleLoginClick type:', typeof handleLoginClick);
-                  if (typeof handleLoginClick === 'function') {
-                    handleLoginClick();
-                  } else {
-                    console.error('[Home] ERROR: handleLoginClick is not a function!', handleLoginClick);
-                    // Fallback: navigate directly
-                    navigate('/login');
-                  }
-                }}
-                style={styles.loginButton}
-                onMouseEnter={(e) => {
-                  e.target.style.background = "#006666";
-                  e.target.style.transform = "translateY(-1px)";
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.background = "#008080";
-                  e.target.style.transform = "translateY(0)";
-                }}
-              >
-                Login
-              </button>
-            </nav>
+
+            {compactHeader ? (
+              <div ref={mobileNavRef} style={styles.mobileNavWrap}>
+                <button
+                  type="button"
+                  style={styles.hamburgerButton}
+                  aria-expanded={mobileNavOpen}
+                  aria-controls="home-mobile-nav-menu"
+                  aria-label={mobileNavOpen ? 'Close menu' : 'Open menu'}
+                  onClick={() => setMobileNavOpen((o) => !o)}
+                >
+                  {mobileNavOpen ? <FiX size={22} /> : <FiMenu size={22} />}
+                </button>
+                {mobileNavOpen && (
+                  <div
+                    id="home-mobile-nav-menu"
+                    role="navigation"
+                    aria-label="Main menu"
+                    style={styles.mobileMenuPanel}
+                  >
+                    <button
+                      type="button"
+                      style={styles.mobileMenuButton}
+                      onClick={onMobileModules}
+                      onMouseEnter={setNavButtonHover}
+                      onMouseLeave={resetNavButtonHover}
+                    >
+                      Modules
+                    </button>
+                    <button
+                      type="button"
+                      style={styles.mobileMenuButton}
+                      onClick={onMobileContact}
+                      onMouseEnter={setNavButtonHover}
+                      onMouseLeave={resetNavButtonHover}
+                    >
+                      Contact
+                    </button>
+                    <button
+                      type="button"
+                      style={styles.mobileMenuLoginButton}
+                      onClick={onMobileLogin}
+                      onMouseEnter={setLoginButtonHover}
+                      onMouseLeave={resetLoginButtonHover}
+                    >
+                      Login
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <nav style={styles.nav} aria-label="Main">
+                <button
+                  type="button"
+                  onClick={handleModulesClick}
+                  style={styles.navButton}
+                  onMouseEnter={setNavButtonHover}
+                  onMouseLeave={resetNavButtonHover}
+                >
+                  Modules
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleContactClick}
+                  style={styles.navButton}
+                  onMouseEnter={setNavButtonHover}
+                  onMouseLeave={resetNavButtonHover}
+                >
+                  Contact
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    console.log('[Home] Button onClick fired!');
+                    console.log('[Home] handleLoginClick type:', typeof handleLoginClick);
+                    if (typeof handleLoginClick === 'function') {
+                      handleLoginClick();
+                    } else {
+                      console.error('[Home] ERROR: handleLoginClick is not a function!', handleLoginClick);
+                      navigate('/login');
+                    }
+                  }}
+                  style={styles.loginButton}
+                  onMouseEnter={setLoginButtonHover}
+                  onMouseLeave={resetLoginButtonHover}
+                >
+                  Login
+                </button>
+              </nav>
+            )}
           </div>
         </header>
 
@@ -560,7 +738,7 @@ const Home = () => {
               flex-wrap: wrap;
             }
             nav button {
-              font-size: 14px !important;
+              font-size: 11px !important;
               padding: 6px 12px !important;
             }
             main > div > div {

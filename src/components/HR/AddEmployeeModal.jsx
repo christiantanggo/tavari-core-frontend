@@ -8,9 +8,10 @@ import { SecurityWrapper } from '../../Security';
 import { useSecurityContext } from '../../Security';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
-import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
+import PositionSelectWithNew from './PositionSelectWithNew';
+import AddPositionModal from './AddPositionModal';
 
 const AddEmployeeModal = ({ 
   isOpen, 
@@ -45,7 +46,9 @@ const AddEmployeeModal = ({
     isManager,
     isOwner
   } = usePOSAuth({
-    requiredRoles: ['owner', 'manager'],
+    // Must match EmployeeScreen /dashboard/employees (owner, manager, admin) so admins with
+    // elevated privileges are not blocked after clicking Add Employee.
+    requiredRoles: ['owner', 'manager', 'admin'],
     requireBusiness: true,
     componentName: 'AddEmployeeModal'
   });
@@ -73,11 +76,12 @@ const AddEmployeeModal = ({
   const [errors, setErrors] = useState({});
   const [showPasswords, setShowPasswords] = useState(false);
   const [businessSettings, setBusinessSettings] = useState(null);
-  const [positions, setPositions] = useState([]);
   const [showNewPositionInput, setShowNewPositionInput] = useState(false);
   const [newPositionName, setNewPositionName] = useState('');
   const [roleOptions, setRoleOptions] = useState([]);
   const [selectedRole, setSelectedRole] = useState('employee');
+  const [showAddPositionModal, setShowAddPositionModal] = useState(false);
+  const [positionSelectRemountKey, setPositionSelectRemountKey] = useState(0);
 
   // Employment status options
   const employmentStatuses = [
@@ -116,7 +120,7 @@ const AddEmployeeModal = ({
     { value: 10, label: 'CC 10 - Maximum claim amount (minimum tax deduction)' }
   ];
 
-  // Load business payroll settings and positions
+  // Load business payroll settings and roles (positions come from PositionSelectWithNew / useBusinessPositions)
   useEffect(() => {
     const loadBusinessSettings = async () => {
       if (!businessId) return;
@@ -137,24 +141,6 @@ const AddEmployeeModal = ({
         }
       } catch (err) {
         console.error('Error loading business settings:', err);
-      }
-    };
-
-    const loadPositions = async () => {
-      if (!businessId) return;
-
-      try {
-        const { data, error } = await supabase
-          .from('positions')
-          .select('position_name, color')
-          .eq('business_id', businessId)
-          .eq('is_active', true)
-          .order('position_name');
-
-        if (error) throw error;
-        setPositions(data || []);
-      } catch (err) {
-        console.error('Error loading positions:', err);
       }
     };
 
@@ -182,7 +168,6 @@ const AddEmployeeModal = ({
 
     if (isOpen && businessId) {
       loadBusinessSettings();
-      loadPositions();
       loadRoles();
       resetForm();
     }
@@ -207,6 +192,7 @@ const AddEmployeeModal = ({
     });
     setSelectedRole('employee');
     setErrors({});
+    setShowAddPositionModal(false);
   };
 
   const handleInputChange = async (field, value) => {
@@ -332,188 +318,158 @@ const AddEmployeeModal = ({
     try {
       await recordAction('employee_creation_attempt', true);
 
-      // Check if email already exists in public.users
-      const { data: existingUser, error: checkError } = await supabase
+      const emailNorm = formData.email.toLowerCase().trim();
+
+      // Emails are globally unique in public.users — but a profile may exist without this business
+      // (orphan signup, removed roster row). Only block when already linked to THIS business.
+      const { data: profileByEmail, error: profileLookupErr } = await supabase
         .from('users')
         .select('id, email')
-        .eq('email', formData.email.toLowerCase().trim())
-        .single();
+        .eq('email', emailNorm)
+        .maybeSingle();
 
-      if (checkError && checkError.code !== 'PGRST116') {
-        throw checkError;
+      if (profileLookupErr) {
+        throw profileLookupErr;
       }
 
-      if (existingUser) {
-        setErrors({ email: 'An employee with this email address already exists' });
-        await recordAction('employee_creation_attempt', false);
+      if (profileByEmail) {
+        const { data: buForThisBusiness, error: buLookupErr } = await supabase
+          .from('business_users')
+          .select('id')
+          .eq('business_id', businessId)
+          .eq('user_id', profileByEmail.id)
+          .maybeSingle();
+
+        if (buLookupErr) {
+          throw buLookupErr;
+        }
+
+        if (buForThisBusiness) {
+          setErrors({ email: 'This person is already on your team for this business.' });
+          await recordAction('employee_creation_attempt', false);
+          setLoading(false);
+          return;
+        }
+
+        // Link existing global profile to this business (Edge Function + service role; no client signUp)
+        const hashedPinLink = await hashValue(String(formData.pin || '').trim());
+        const hashedPasswordLink = await hashValue(formData.password);
+        const { data: linkFn, error: linkFnErr } = await supabase.functions.invoke('create-employee-for-business', {
+          body: {
+            business_id: businessId,
+            role: selectedRole || 'employee',
+            profile: {
+              email: emailNorm,
+              first_name: formData.firstName.trim(),
+              last_name: formData.lastName.trim(),
+              full_name: `${formData.firstName.trim()} ${formData.lastName.trim()}`,
+              phone: formData.phone.trim() || '',
+              pin: hashedPinLink,
+              hashed_password: hashedPasswordLink,
+              position: formData.position.trim() || '',
+              department: formData.department || '',
+              hire_date: formData.hireDate || '',
+              wage: formData.wage ? String(formData.wage) : '',
+              claim_code: String(formData.claimCode),
+              employment_status: formData.employmentStatus,
+              status: 'active',
+              roles: ['employee'],
+            },
+          },
+        });
+
+        if (linkFnErr) {
+          throw linkFnErr;
+        }
+        if (!linkFn?.ok) {
+          setErrors({ email: linkFn?.error || 'Could not add this employee. Try again.' });
+          await recordAction('employee_creation_attempt', false);
+          setLoading(false);
+          return;
+        }
+
+        await logSecurityEvent('employee_linked_to_business', {
+          employee_id: profileByEmail.id,
+          employee_email: emailNorm,
+          claim_code: formData.claimCode,
+          wage: formData.wage ? parseFloat(formData.wage) : null,
+          business_id: businessId,
+          created_by: authUser.id,
+          timestamp: new Date().toISOString(),
+        }, 'medium');
+
+        await supabase.from('audit_logs').insert({
+          user_id: authUser.id,
+          event_type: 'employee_linked',
+          details: {
+            method: 'manager_linked_existing_profile',
+            employee_email: emailNorm,
+            employee_id: profileByEmail.id,
+            claim_code: formData.claimCode,
+            wage: formData.wage ? parseFloat(formData.wage) : null,
+            employment_status: formData.employmentStatus,
+            timestamp: new Date().toISOString(),
+          },
+        });
+
+        await recordAction('employee_creation_attempt', true);
+        onClose();
+        if (onEmployeeCreated) {
+          onEmployeeCreated(profileByEmail.id);
+        }
         setLoading(false);
         return;
       }
 
-      // 🔥 CRITICAL FIX: Set flag to prevent auth state clearing during employee creation
-      sessionStorage.setItem('_creating_employee', 'true');
-
-      // 🔥 CRITICAL FIX: Save current session BEFORE creating new user
-      const { data: { session: currentSession } } = await supabase.auth.getSession();
-      
-      if (!currentSession) {
-        sessionStorage.removeItem('_creating_employee');
+      const { data: { session: managerSession } } = await supabase.auth.getSession();
+      if (!managerSession?.access_token) {
         throw new Error('You must be logged in to create employees');
       }
 
-      const originalAccessToken = currentSession.access_token;
-      const originalRefreshToken = currentSession.refresh_token;
-      const originalUserEmail = currentSession.user.email;
+      const hashedPassword = await hashValue(formData.password);
+      const hashedPin = await hashValue(String(formData.pin || '').trim());
 
-      console.log('💾 Saved current session for user:', originalUserEmail);
-
-      // Try to create Supabase Auth user
-      let user = null;
-      const { data: authData, error: signupError } = await supabase.auth.signUp({
-        email: formData.email.toLowerCase().trim(),
-        password: formData.password,
+      const { data: createFn, error: createFnErr } = await supabase.functions.invoke('create-employee-for-business', {
+        body: {
+          business_id: businessId,
+          role: selectedRole || 'employee',
+          auth_password: formData.password,
+          profile: {
+            email: emailNorm,
+            first_name: formData.firstName.trim(),
+            last_name: formData.lastName.trim(),
+            full_name: `${formData.firstName.trim()} ${formData.lastName.trim()}`,
+            phone: formData.phone.trim() || '',
+            pin: hashedPin,
+            hashed_password: hashedPassword,
+            position: formData.position.trim() || '',
+            department: formData.department || '',
+            hire_date: formData.hireDate || '',
+            wage: formData.wage ? String(formData.wage) : '',
+            claim_code: String(formData.claimCode),
+            employment_status: formData.employmentStatus,
+            status: 'active',
+            roles: ['employee'],
+          },
+        },
       });
 
-      if (signupError) {
-        // If user already exists in Auth, show clear error
-        if (signupError.message?.includes('already registered') || signupError.message?.includes('User already registered')) {
-          sessionStorage.removeItem('_creating_employee');
-          setErrors({ email: 'This email address is already registered in the authentication system. Please use a different email address.' });
-          await recordAction('employee_creation_attempt', false);
-          setLoading(false);
-          return;
-        } else {
-          // Other signup error
-          sessionStorage.removeItem('_creating_employee');
-          setErrors({ email: signupError.message || 'Failed to create authentication account. Please try again.' });
-          await recordAction('employee_creation_attempt', false);
-          setLoading(false);
-          return;
-        }
+      if (createFnErr) {
+        throw createFnErr;
       }
-
-      // Signup successful
-      user = authData?.user;
-      if (!user) {
-        sessionStorage.removeItem('_creating_employee');
-        setErrors({ email: 'Authentication user creation failed. Please try again.' });
+      if (!createFn?.ok) {
+        const msg = createFn?.error || 'Could not create employee. Try again.';
+        if (/already|registered|duplicate|exists/i.test(String(msg))) {
+          setErrors({ email: 'This email is already registered. Use a different email or link the existing account.' });
+        } else {
+          setErrors({ email: msg });
+        }
         await recordAction('employee_creation_attempt', false);
         setLoading(false);
         return;
       }
-      
-      console.log('✅ Created auth user:', user.id);
 
-      // 🔥 CRITICAL FIX: Immediately restore original session synchronously
-      console.log('🔄 Restoring original session for:', originalUserEmail);
-      
-      // Use a small delay to ensure signUp completes, then restore immediately
-      await new Promise(resolve => setTimeout(resolve, 200));
-      
-      // Retry session restoration up to 3 times
-      let sessionRestored = false;
-      let lastError = null;
-      
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        const { error: sessionRestoreError } = await supabase.auth.setSession({
-          access_token: originalAccessToken,
-          refresh_token: originalRefreshToken
-        });
-
-        if (sessionRestoreError) {
-          console.warn(`⚠️ Session restoration attempt ${attempt} failed:`, sessionRestoreError);
-          lastError = sessionRestoreError;
-          // Wait a bit before retrying
-          if (attempt < 3) {
-            await new Promise(resolve => setTimeout(resolve, 300));
-          }
-        } else {
-          // Verify the session was actually restored
-          await new Promise(resolve => setTimeout(resolve, 100)); // Give it a moment to propagate
-          const { data: { session: restoredSession } } = await supabase.auth.getSession();
-          
-          if (restoredSession?.user?.email === originalUserEmail) {
-            console.log('✅ Session restored successfully on attempt', attempt);
-            sessionRestored = true;
-            break;
-          } else {
-            console.warn(`⚠️ Session restoration attempt ${attempt} - email mismatch`);
-            if (attempt < 3) {
-              await new Promise(resolve => setTimeout(resolve, 300));
-            }
-          }
-        }
-      }
-
-      if (!sessionRestored) {
-        console.error('❌ Failed to restore session after 3 attempts');
-        sessionStorage.removeItem('_creating_employee');
-        throw new Error('Session restoration failed. Please refresh the page.');
-      }
-      
-      // Keep flag active a bit longer to catch any delayed auth events
-      setTimeout(() => {
-        sessionStorage.removeItem('_creating_employee');
-        console.log('🧹 Cleared employee creation flag');
-      }, 3000);
-
-      // Hash password and PIN
-      const hashedPassword = await hashValue(formData.password);
-      const hashedPin = await hashValue(String(formData.pin || '').trim());
-
-      // Create users table record
-      const { error: insertError } = await supabase.from('users').insert({
-        id: user.id,
-        full_name: `${formData.firstName.trim()} ${formData.lastName.trim()}`,
-        first_name: formData.firstName.trim(),
-        last_name: formData.lastName.trim(),
-        email: formData.email.toLowerCase().trim(),
-        phone: formData.phone.trim() || null,
-        hashed_password: hashedPassword,
-        pin: hashedPin,
-        position: formData.position.trim() || null,
-        department: formData.department || null,
-        hire_date: formData.hireDate || null,
-        wage: formData.wage ? parseFloat(formData.wage) : null,
-        claim_code: parseInt(formData.claimCode),
-        employment_status: formData.employmentStatus,
-        status: 'active',
-        roles: ['employee']
-      });
-
-      if (insertError) {
-        throw insertError;
-      }
-
-      // Link to business
-      const { error: businessUserError } = await supabase.from('business_users').insert({
-        user_id: user.id,
-        business_id: businessId,
-        role: selectedRole || 'employee'
-      });
-
-      if (businessUserError) {
-        throw businessUserError;
-      }
-
-      // Create user_roles entry
-      const { error: userRoleError } = await supabase
-        .from('user_roles')
-        .upsert(
-          {
-            user_id: user.id,
-            business_id: businessId,
-            role: selectedRole || 'employee',
-            active: true,
-            custom_permissions: {}
-          },
-          { onConflict: 'user_id,business_id' }
-        );
-
-      if (userRoleError) {
-        console.warn('Failed to create user_roles entry (non-critical):', userRoleError);
-        // Don't throw - this is non-critical, business_users is the primary link
-      }
+      const user = { id: createFn.user_id };
 
       await logSecurityEvent('employee_created_with_claim_code', {
         employee_id: user.id,
@@ -550,8 +506,6 @@ const AddEmployeeModal = ({
       
     } catch (error) {
       console.error('❌ Error creating employee:', error);
-      // Ensure flag is cleared on error
-      sessionStorage.removeItem('_creating_employee');
       await recordAction('employee_creation_attempt', false);
       await logSecurityEvent('employee_creation_failed', {
         error_message: error.message,
@@ -560,8 +514,6 @@ const AddEmployeeModal = ({
       }, 'high');
       setErrors({ submit: 'Failed to create employee. Please try again.' });
     } finally {
-      // Final cleanup - ensure flag is always cleared
-      sessionStorage.removeItem('_creating_employee');
       setLoading(false);
     }
   };
@@ -792,106 +744,16 @@ const AddEmployeeModal = ({
 
             <div style={styles.fieldGrid}>
               <div style={styles.formGroup}>
-                <label style={styles.formLabel}>Position/Job Title</label>
-                {!showNewPositionInput ? (
-                  <>
-                    <select
-                      style={styles.formSelect}
-                      value={formData.position}
-                      onChange={(e) => {
-                        if (e.target.value === 'NEW_POSITION') {
-                          setShowNewPositionInput(true);
-                        } else {
-                          handleInputChange('position', e.target.value);
-                        }
-                      }}
-                    >
-                      <option value="">Select position</option>
-                      {positions.map(pos => (
-                        <option key={pos.position_name} value={pos.position_name}>
-                          {pos.position_name}
-                        </option>
-                      ))}
-                      <option value="NEW_POSITION">+ Add New Position</option>
-                    </select>
-                  </>
-                ) : (
-                  <>
-                    <input
-                      type="text"
-                      style={{ ...styles.formInput, width: '90%' }}
-                      value={newPositionName}
-                      onChange={(e) => setNewPositionName(e.target.value)}
-                      placeholder="Enter new position name"
-                      autoFocus
-                    />
-                    <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          if (newPositionName.trim()) {
-                            // Add to positions table
-                            try {
-                              const { error } = await supabase
-                                .from('positions')
-                                .insert({
-                                  business_id: businessId,
-                                  position_name: newPositionName.trim(),
-                                  color: '#4a90e2',
-                                  is_active: true
-                                });
-                              
-                              if (!error) {
-                                handleInputChange('position', newPositionName.trim());
-                                setShowNewPositionInput(false);
-                                setNewPositionName('');
-                                // Reload positions
-                                const { data } = await supabase
-                                  .from('positions')
-                                  .select('position_name, color')
-                                  .eq('business_id', businessId)
-                                  .eq('is_active', true)
-                                  .order('position_name');
-                                setPositions(data || []);
-                              }
-                            } catch (err) {
-                              console.error('Error adding position:', err);
-                            }
-                          }
-                        }}
-                        style={{
-                          padding: '6px 12px',
-                          backgroundColor: TavariStyles.colors.primary,
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '12px'
-                        }}
-                      >
-                        Add
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowNewPositionInput(false);
-                          setNewPositionName('');
-                        }}
-                        style={{
-                          padding: '6px 12px',
-                          backgroundColor: 'transparent',
-                          color: TavariStyles.colors.gray600,
-                          border: `1px solid ${TavariStyles.colors.gray300}`,
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '12px'
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </>
-                )}
+                <label style={styles.formLabel}>Position/Job Title (optional)</label>
+                <PositionSelectWithNew
+                  key={positionSelectRemountKey}
+                  businessId={businessId}
+                  value={formData.position}
+                  onChange={(v) => handleInputChange('position', v)}
+                  selectStyle={styles.formSelect}
+                  rowStyle={{ width: '100%' }}
+                  onRequestNewPosition={() => setShowAddPositionModal(true)}
+                />
               </div>
 
               <div style={styles.formGroup}>
@@ -1063,6 +925,16 @@ const AddEmployeeModal = ({
           </form>
         </div>
       </div>
+      <AddPositionModal
+        isOpen={showAddPositionModal}
+        businessId={businessId}
+        zIndex={1100}
+        onClose={() => setShowAddPositionModal(false)}
+        onCreated={(positionName) => {
+          void handleInputChange('position', positionName);
+          setPositionSelectRemountKey((k) => k + 1);
+        }}
+      />
     </SecurityWrapper>
   );
 };

@@ -9,6 +9,8 @@ import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
 import PermissionGate from '../../components/Auth/PermissionGate';
 import { TavariStyles } from '../../utils/TavariStyles';
+import { fetchPosSettingsForTerminal, savePosSettingsForTerminal, fetchPosBusinessSettings, pickDepositBusinessSettings } from '../../utils/posSettingsQuery';
+import TavariTabSystemComponent from '../../components/UI/TavariTabSystemComponent';
 
 // Tab components
 import GeneralTab from './POSSettingsComponents/GeneralTab';
@@ -19,6 +21,7 @@ import LoyaltyTab from './POSSettingsComponents/LoyaltyTab';
 import TabsTab from './POSSettingsComponents/TabsTab';
 import SecurityTab from './POSSettingsComponents/SecurityTab';
 import AlertsTab from './POSSettingsComponents/AlertsTab';
+import ModuleDeactivationPanel from '../../components/Modules/ModuleDeactivationPanel';
 
 const POSSettings = () => {
   const navigate = useNavigate();
@@ -116,7 +119,7 @@ const POSSettings = () => {
     require_manager_pin_for_variance: true,
     deposit_history_requires_manager: true,
     auto_delete_saved_carts_hours: 48,
-    receipt_auto_print: true,
+    receipt_auto_print: false,
     receipt_auto_email: false,
     receipt_show_business_info: true,
     receipt_show_tax_details: true,
@@ -131,7 +134,9 @@ const POSSettings = () => {
     alerts_enable_email_notifications: true,
     alerts_enable_push_notifications: true,
     alerts_cash_variance_alert: true,
-    alerts_failed_payment_alert: true
+    alerts_failed_payment_alert: true,
+    indian_status_gst_rate: 0.05,
+    indian_status_tax_label: 'GST (Indian Status)'
   });
   
   const [loading, setLoading] = useState(false);
@@ -191,32 +196,24 @@ const POSSettings = () => {
       }, 'low');
 
       let settingsData = null;
-      
-      if (currentTerminalId) {
-        const { data: terminalSettings, error: terminalError } = await supabase
-          .from('pos_settings')
-          .select('*')
-          .eq('business_id', auth.selectedBusinessId)
-          .eq('terminal_id', currentTerminalId)
-          .maybeSingle();
-          
-        if (!terminalError && terminalSettings) {
-          settingsData = terminalSettings;
-        }
-      }
-      
-      if (!settingsData) {
-        const { data: businessSettings, error: businessError } = await supabase
-          .from('pos_settings')
-          .select('*')
-          .eq('business_id', auth.selectedBusinessId)
-          .is('terminal_id', null)
-          .maybeSingle();
 
-        if (businessError && businessError.code && businessError.code !== 'PGRST116') {
-          throw businessError;
-        }
-        settingsData = businessSettings;
+      const { data: resolvedSettings, error: settingsError } = await fetchPosSettingsForTerminal(
+        auth.selectedBusinessId,
+        currentTerminalId
+      );
+
+      if (settingsError && settingsError.code && settingsError.code !== 'PGRST116') {
+        throw settingsError;
+      }
+
+      settingsData = resolvedSettings;
+
+      const { data: businessSettings } = await fetchPosBusinessSettings(auth.selectedBusinessId);
+      if (businessSettings) {
+        settingsData = {
+          ...(settingsData || {}),
+          ...pickDepositBusinessSettings(businessSettings),
+        };
       }
 
       if (settingsData) {
@@ -253,7 +250,7 @@ const POSSettings = () => {
           require_manager_pin_for_variance: settingsData.require_manager_pin_for_variance !== undefined ? settingsData.require_manager_pin_for_variance : true,
           deposit_history_requires_manager: settingsData.deposit_history_requires_manager !== undefined ? settingsData.deposit_history_requires_manager : true,
           auto_delete_saved_carts_hours: parseInt(settingsData.auto_delete_saved_carts_hours) || 48,
-          receipt_auto_print: settingsData.receipt_auto_print !== undefined ? settingsData.receipt_auto_print : true,
+          receipt_auto_print: settingsData.receipt_auto_print === true,
           receipt_auto_email: settingsData.receipt_auto_email || false,
           receipt_show_business_info: settingsData.receipt_show_business_info !== undefined ? settingsData.receipt_show_business_info : true,
           receipt_show_tax_details: settingsData.receipt_show_tax_details !== undefined ? settingsData.receipt_show_tax_details : true,
@@ -268,7 +265,12 @@ const POSSettings = () => {
           alerts_enable_email_notifications: settingsData.alerts_enable_email_notifications !== undefined ? settingsData.alerts_enable_email_notifications : true,
           alerts_enable_push_notifications: settingsData.alerts_enable_push_notifications !== undefined ? settingsData.alerts_enable_push_notifications : true,
           alerts_cash_variance_alert: settingsData.alerts_cash_variance_alert !== undefined ? settingsData.alerts_cash_variance_alert : true,
-          alerts_failed_payment_alert: settingsData.alerts_failed_payment_alert !== undefined ? settingsData.alerts_failed_payment_alert : true
+          alerts_failed_payment_alert: settingsData.alerts_failed_payment_alert !== undefined ? settingsData.alerts_failed_payment_alert : true,
+          indian_status_gst_rate: (() => {
+            const r = parseFloat(settingsData.indian_status_gst_rate);
+            return Number.isFinite(r) && r >= 0 ? r : 0.05;
+          })(),
+          indian_status_tax_label: (settingsData.indian_status_tax_label && String(settingsData.indian_status_tax_label).trim()) || 'GST (Indian Status)'
         });
       }
     } catch (err) {
@@ -318,7 +320,7 @@ const POSSettings = () => {
     }
 
     // Rate limiting
-    const rateLimitCheck = await checkRateLimit('save_pos_settings', 10, 60000);
+    const rateLimitCheck = await checkRateLimit('save_pos_settings', auth.authUser?.id);
     if (!rateLimitCheck.allowed) {
       setError('Too many save attempts. Please wait a moment.');
       return;
@@ -336,8 +338,6 @@ const POSSettings = () => {
       }, 'medium');
 
       const updatedSettings = {
-        business_id: auth.selectedBusinessId,
-        terminal_id: currentTerminalId || null,
         terminal_mode: settings.terminal_mode,
         pin_required: settings.pin_required,
         tip_enabled: settings.tip_enabled,
@@ -386,38 +386,27 @@ const POSSettings = () => {
         alerts_enable_push_notifications: settings.alerts_enable_push_notifications,
         alerts_cash_variance_alert: settings.alerts_cash_variance_alert,
         alerts_failed_payment_alert: settings.alerts_failed_payment_alert,
-        updated_at: new Date().toISOString()
+        indian_status_gst_rate: (() => {
+          const r = Number(settings.indian_status_gst_rate);
+          if (!Number.isFinite(r) || r < 0) return 0.05;
+          return Math.min(1, r);
+        })(),
+        indian_status_tax_label: (settings.indian_status_tax_label || 'GST (Indian Status)').trim() || 'GST (Indian Status)',
       };
 
-      const { data: existingSettings, error: checkError } = await supabase
-        .from('pos_settings')
-        .select('id')
-        .eq('business_id', auth.selectedBusinessId)
-        .filter('terminal_id', currentTerminalId ? 'eq' : 'is', currentTerminalId)
-        .maybeSingle();
+      const { data: savedSettings, error: saveError } = await savePosSettingsForTerminal(
+        auth.selectedBusinessId,
+        currentTerminalId || null,
+        updatedSettings
+      );
 
-      if (checkError && checkError.code && checkError.code !== 'PGRST116') {
-        throw checkError;
-      }
+      if (saveError) throw saveError;
 
-      let result;
-      if (existingSettings) {
-        result = await supabase
-          .from('pos_settings')
-          .update(updatedSettings)
-          .eq('business_id', auth.selectedBusinessId)
-          .filter('terminal_id', currentTerminalId ? 'eq' : 'is', currentTerminalId)
-          .select()
-          .single();
-      } else {
-        result = await supabase
-          .from('pos_settings')
-          .insert([updatedSettings])
-          .select()
-          .single();
-      }
-
-      if (result.error) throw result.error;
+      await savePosSettingsForTerminal(
+        auth.selectedBusinessId,
+        null,
+        pickDepositBusinessSettings(updatedSettings)
+      );
 
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -652,21 +641,16 @@ const POSSettings = () => {
           {saveSuccess && <div style={styles.successBanner}>Settings saved successfully!</div>}
 
           <div style={styles.tabsContainer}>
-            <div style={styles.tabsHeader}>
-              {tabs.map(tab => (
-                <button
-                  key={tab.id}
-                  style={{
-                    ...styles.tab,
-                    ...(activeTab === tab.id ? styles.activeTab : {})
-                  }}
-                  onClick={() => setActiveTab(tab.id)}
-                >
-                  <span style={styles.tabIcon}>{tab.icon}</span>
-                  <span>{tab.label}</span>
-                </button>
-              ))}
-            </div>
+            <TavariTabSystemComponent
+              tabs={tabs}
+              mode="state"
+              activeTab={activeTab}
+              onTabChange={setActiveTab}
+              ariaLabel="POS settings"
+              variant="module"
+              fullWidth={false}
+              containerStyle={{ marginBottom: 0 }}
+            />
 
             <div style={styles.tabsBody}>
               {loading || taxLoading || permissionsLoading ? (
@@ -698,6 +682,8 @@ const POSSettings = () => {
               </button>
             </div>
           </PermissionGate>
+
+          <ModuleDeactivationPanel moduleKey="pos" />
         </div>
       </POSAuthWrapper>
     </SecurityWrapper>

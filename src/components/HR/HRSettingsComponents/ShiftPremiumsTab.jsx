@@ -9,6 +9,38 @@ import POSAuthWrapper from '../../Auth/POSAuthWrapper';
 import TavariCheckbox from '../../UI/TavariCheckbox';
 import { TavariStyles } from '../../../utils/TavariStyles';
 
+function htmlTimeFromDb(value) {
+  if (value == null || value === '') return '';
+  const s = String(value);
+  return s.length >= 5 ? s.slice(0, 5) : s;
+}
+
+function toPgTime(htmlTime) {
+  if (htmlTime == null || htmlTime === '') return null;
+  const s = String(htmlTime).trim();
+  if (s.length === 5) return `${s}:00`;
+  return s;
+}
+
+const DEFAULT_NEW_PREMIUM = {
+  name: '',
+  type: 'hourly_rate',
+  rate: '',
+  rate_type: 'fixed_amount',
+  applies_to: 'specific_hours',
+  requires_certificate: false,
+  required_certificate_id: null,
+  description: '',
+  is_active: true,
+  time_application_mode: 'none',
+  daily_window_start: '',
+  daily_window_end: '',
+  public_hours_buffer_before_minutes: 60,
+  public_hours_buffer_after_minutes: 60,
+  stacking_behavior: 'additive',
+  exclusive_cluster_key: '',
+};
+
 const ShiftPremiumsTab = ({
   settings,
   onSettingsChange,
@@ -20,17 +52,7 @@ const ShiftPremiumsTab = ({
 }) => {
   const [premiums, setPremiums] = useState([]);
   const [certificates, setCertificates] = useState([]);
-  const [newPremium, setNewPremium] = useState({
-    name: '',
-    type: 'hourly_rate',
-    rate: '',
-    rate_type: 'fixed_amount',
-    applies_to: 'specific_hours', // Default to manual entry (specific hours)
-    requires_certificate: false,
-    required_certificate_id: null,
-    description: '',
-    is_active: true
-  });
+  const [newPremium, setNewPremium] = useState(() => ({ ...DEFAULT_NEW_PREMIUM }));
   const [editingPremium, setEditingPremium] = useState(null);
   const [showNewPremiumForm, setShowNewPremiumForm] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -103,10 +125,30 @@ const ShiftPremiumsTab = ({
         return;
       }
 
+      if (newPremium.time_application_mode === 'daily_window') {
+        if (!newPremium.daily_window_start?.trim() || !newPremium.daily_window_end?.trim()) {
+          alert('Daily time window requires both a start time and an end time.');
+          return;
+        }
+      }
+
+      if (newPremium.stacking_behavior === 'exclusive_cluster') {
+        const key = String(newPremium.exclusive_cluster_key || '').trim();
+        if (!key) {
+          alert('Exclusive cluster premiums need a cluster name (e.g. time_based_premiums).');
+          return;
+        }
+      }
+
       await logSecurityEvent('premium_creation', {
         premium_name: newPremium.name,
         business_id: selectedBusinessId
       }, 'medium');
+
+      const clusterKey =
+        newPremium.stacking_behavior === 'exclusive_cluster'
+          ? String(newPremium.exclusive_cluster_key || '').trim()
+          : null;
 
       const premiumData = {
         name: newPremium.name.trim(),
@@ -115,15 +157,37 @@ const ShiftPremiumsTab = ({
         rate: parseFloat(newPremium.rate),
         rate_type: newPremium.rate_type,
         applies_to: newPremium.applies_to,
-        // Set these to null for manual entry system
-        start_time: null,
-        end_time: null,
-        days_of_week: null,
         requires_certificate: newPremium.requires_certificate,
         required_certificate_id: newPremium.required_certificate_id || null,
         is_active: newPremium.is_active,
         business_id: selectedBusinessId,
-        created_by: authUser.id
+        time_application_mode: newPremium.time_application_mode || 'none',
+        daily_window_start:
+          newPremium.time_application_mode === 'daily_window'
+            ? toPgTime(newPremium.daily_window_start)
+            : null,
+        daily_window_end:
+          newPremium.time_application_mode === 'daily_window'
+            ? toPgTime(newPremium.daily_window_end)
+            : null,
+        public_hours_buffer_before_minutes:
+          newPremium.time_application_mode === 'public_hours_inside_buffer' ||
+          newPremium.time_application_mode === 'public_hours_outside_buffer'
+            ? Math.min(
+                24 * 60,
+                Math.max(0, parseInt(newPremium.public_hours_buffer_before_minutes, 10) || 0)
+              )
+            : 60,
+        public_hours_buffer_after_minutes:
+          newPremium.time_application_mode === 'public_hours_inside_buffer' ||
+          newPremium.time_application_mode === 'public_hours_outside_buffer'
+            ? Math.min(
+                24 * 60,
+                Math.max(0, parseInt(newPremium.public_hours_buffer_after_minutes, 10) || 0)
+              )
+            : 60,
+        stacking_behavior: newPremium.stacking_behavior || 'additive',
+        exclusive_cluster_key: clusterKey,
       };
 
       let result;
@@ -134,9 +198,9 @@ const ShiftPremiumsTab = ({
           .eq('id', editingPremium.id)
           .eq('business_id', selectedBusinessId);
       } else {
-        result = await supabase
-          .from('hr_shift_premiums')
-          .insert([premiumData]);
+        result = await supabase.from('hr_shift_premiums').insert([
+          { ...premiumData, created_by: authUser.id },
+        ]);
       }
 
       if (result.error) {
@@ -171,7 +235,16 @@ const ShiftPremiumsTab = ({
       applies_to: premium.applies_to || 'specific_hours',
       requires_certificate: premium.requires_certificate,
       required_certificate_id: premium.required_certificate_id,
-      is_active: premium.is_active
+      is_active: premium.is_active,
+      time_application_mode: premium.time_application_mode || 'none',
+      daily_window_start: htmlTimeFromDb(premium.daily_window_start),
+      daily_window_end: htmlTimeFromDb(premium.daily_window_end),
+      public_hours_buffer_before_minutes:
+        premium.public_hours_buffer_before_minutes ?? 60,
+      public_hours_buffer_after_minutes:
+        premium.public_hours_buffer_after_minutes ?? 60,
+      stacking_behavior: premium.stacking_behavior || 'additive',
+      exclusive_cluster_key: premium.exclusive_cluster_key || '',
     });
     setEditingPremium(premium);
     setShowNewPremiumForm(true);
@@ -180,17 +253,7 @@ const ShiftPremiumsTab = ({
   const handleCloseModal = () => {
     setShowNewPremiumForm(false);
     setEditingPremium(null);
-    setNewPremium({
-      name: '',
-      type: 'hourly_rate',
-      rate: '',
-      rate_type: 'fixed_amount',
-      applies_to: 'specific_hours',
-      requires_certificate: false,
-      required_certificate_id: null,
-      description: '',
-      is_active: true
-    });
+    setNewPremium({ ...DEFAULT_NEW_PREMIUM });
   };
 
   const handleDeletePremium = async (premiumId) => {
@@ -258,6 +321,41 @@ const ShiftPremiumsTab = ({
       default:
         return 'Selected Hours';
     }
+  };
+
+  const summarizeTimeRules = (premium) => {
+    const mode = premium.time_application_mode || 'none';
+    if (mode === 'daily_window') {
+      const a = htmlTimeFromDb(premium.daily_window_start) || '?';
+      const b = htmlTimeFromDb(premium.daily_window_end) || '?';
+      let crossesMidnight = false;
+      if (a !== '?' && b !== '?' && /^(\d{1,2}):(\d{2})$/.test(a) && /^(\d{1,2}):(\d{2})$/.test(b)) {
+        const pa = a.split(':').map(Number);
+        const pb = b.split(':').map(Number);
+        const ma = pa[0] * 60 + pa[1];
+        const mb = pb[0] * 60 + pb[1];
+        crossesMidnight = ma > mb;
+      }
+      return `Clock time ${a}–${b}${crossesMidnight ? ' (overnight)' : ''}`;
+    }
+    if (mode === 'public_hours_inside_buffer') {
+      const bef = premium.public_hours_buffer_before_minutes ?? 60;
+      const aft = premium.public_hours_buffer_after_minutes ?? 60;
+      return `Inside operating hours + ${bef}m before / ${aft}m after`;
+    }
+    if (mode === 'public_hours_outside_buffer') {
+      const bef = premium.public_hours_buffer_before_minutes ?? 60;
+      const aft = premium.public_hours_buffer_after_minutes ?? 60;
+      return `Outside operating hours (buffers ${bef}m / ${aft}m)`;
+    }
+    return null;
+  };
+
+  const summarizeStacking = (premium) => {
+    if (premium.stacking_behavior === 'exclusive_cluster' && premium.exclusive_cluster_key) {
+      return `Exclusive: “${premium.exclusive_cluster_key}”`;
+    }
+    return 'Stacks with other premiums';
   };
 
   const styles = {
@@ -516,7 +614,8 @@ const ShiftPremiumsTab = ({
             <strong>Shift Premium Application Types</strong><br />
             <strong>Apply to All Hours:</strong> Premium automatically applies to all hours the employee worked (no manual entry needed)<br />
             <strong>Apply to Selected Hours:</strong> Manager enters specific number of hours for this premium during payroll entry<br />
-            This system gives you full control over how each premium is calculated and applied.
+            <strong>Time-based rules</strong> below define when a premium applies by clock time (e.g. after-hours window, or only while open to the public using Settings → operating hours).<br />
+            <strong>Stacking:</strong> “Additive” premiums (typical for certifications) stack together. Premiums in the same <em>exclusive cluster</em> do not stack with each other but still stack with additive premiums.
           </div>
 
           {/* Existing Premiums */}
@@ -586,6 +685,10 @@ const ShiftPremiumsTab = ({
 
                   <div style={styles.premiumDetails}>
                     <div><strong>Application:</strong> {getPremiumApplicationDescription(premium.applies_to)}</div>
+                    {summarizeTimeRules(premium) && (
+                      <div><strong>Time rule:</strong> {summarizeTimeRules(premium)}</div>
+                    )}
+                    <div><strong>Stacking:</strong> {summarizeStacking(premium)}</div>
                     {premium.requires_certificate && premium.hr_certificates && (
                       <div><strong>Certificate:</strong> {premium.hr_certificates.name}</div>
                     )}
@@ -736,6 +839,171 @@ const ShiftPremiumsTab = ({
                         )}
                       </div>
                     </div>
+                  </div>
+
+                  {/* Time-of-day rules (payroll / scheduling use businesses.operating_hours for public-hours modes) */}
+                  <div style={{ marginTop: TavariStyles.spacing.lg }}>
+                    <h4 style={{ ...styles.sectionTitle, fontSize: TavariStyles.typography.fontSize.lg, marginBottom: TavariStyles.spacing.sm }}>
+                      Time-based application
+                    </h4>
+                    <p style={{ ...styles.helpText, marginBottom: TavariStyles.spacing.md }}>
+                      Optional. Leave as “No clock-time filter” unless this premium should only apply during certain times.
+                      Public-hours modes use <strong>Settings → Operating hours</strong> for this business.
+                    </p>
+                    <div style={styles.inputGroup}>
+                      <label style={styles.label}>When does this premium apply by clock time?</label>
+                      <select
+                        value={newPremium.time_application_mode}
+                        onChange={(e) =>
+                          setNewPremium((prev) => ({
+                            ...prev,
+                            time_application_mode: e.target.value,
+                          }))
+                        }
+                        style={styles.select}
+                        disabled={saving}
+                      >
+                        <option value="none">No clock-time filter</option>
+                        <option value="daily_window">Daily start / end time (e.g. after-hours cleaner)</option>
+                        <option value="public_hours_inside_buffer">
+                          While open to the public — operating hours plus buffer before/after
+                        </option>
+                        <option value="public_hours_outside_buffer">
+                          Outside public-facing hours (inverse of operating hours ± buffer)
+                        </option>
+                      </select>
+                    </div>
+
+                    {newPremium.time_application_mode === 'daily_window' && (
+                      <div style={{ ...styles.grid, marginTop: TavariStyles.spacing.md }}>
+                        <div style={styles.inputGroup}>
+                          <label style={styles.label}>Window start (local time)</label>
+                          <input
+                            type="time"
+                            value={newPremium.daily_window_start}
+                            onChange={(e) =>
+                              setNewPremium((prev) => ({
+                                ...prev,
+                                daily_window_start: e.target.value,
+                              }))
+                            }
+                            style={styles.input}
+                            disabled={saving}
+                          />
+                          <span style={styles.helpText}>
+                            If start is later than end, the window crosses midnight (e.g. 22:00–06:00).
+                          </span>
+                        </div>
+                        <div style={styles.inputGroup}>
+                          <label style={styles.label}>Window end (local time)</label>
+                          <input
+                            type="time"
+                            value={newPremium.daily_window_end}
+                            onChange={(e) =>
+                              setNewPremium((prev) => ({
+                                ...prev,
+                                daily_window_end: e.target.value,
+                              }))
+                            }
+                            style={styles.input}
+                            disabled={saving}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {(newPremium.time_application_mode === 'public_hours_inside_buffer' ||
+                      newPremium.time_application_mode === 'public_hours_outside_buffer') && (
+                      <div style={{ ...styles.grid, marginTop: TavariStyles.spacing.md }}>
+                        <div style={styles.inputGroup}>
+                          <label style={styles.label}>Buffer before opening (minutes)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={1440}
+                            value={newPremium.public_hours_buffer_before_minutes}
+                            onChange={(e) =>
+                              setNewPremium((prev) => ({
+                                ...prev,
+                                public_hours_buffer_before_minutes: e.target.value,
+                              }))
+                            }
+                            style={styles.input}
+                            disabled={saving}
+                          />
+                          <span style={styles.helpText}>Premium starts this many minutes before the first customer-facing open.</span>
+                        </div>
+                        <div style={styles.inputGroup}>
+                          <label style={styles.label}>Buffer after closing (minutes)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={1440}
+                            value={newPremium.public_hours_buffer_after_minutes}
+                            onChange={(e) =>
+                              setNewPremium((prev) => ({
+                                ...prev,
+                                public_hours_buffer_after_minutes: e.target.value,
+                              }))
+                            }
+                            style={styles.input}
+                            disabled={saving}
+                          />
+                          <span style={styles.helpText}>Premium ends this many minutes after the last public close.</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Stacking */}
+                  <div style={{ marginTop: TavariStyles.spacing.lg }}>
+                    <h4 style={{ ...styles.sectionTitle, fontSize: TavariStyles.typography.fontSize.lg, marginBottom: TavariStyles.spacing.sm }}>
+                      Stacking with other premiums
+                    </h4>
+                    <div style={styles.inputGroup}>
+                      <label style={styles.label}>Stacking behavior</label>
+                      <select
+                        value={newPremium.stacking_behavior}
+                        onChange={(e) =>
+                          setNewPremium((prev) => ({
+                            ...prev,
+                            stacking_behavior: e.target.value,
+                            exclusive_cluster_key:
+                              e.target.value === 'exclusive_cluster' ? prev.exclusive_cluster_key : '',
+                          }))
+                        }
+                        style={styles.select}
+                        disabled={saving}
+                      >
+                        <option value="additive">
+                          Additive — stacks with other premiums (use for First Aid, Food Safety, etc.)
+                        </option>
+                        <option value="exclusive_cluster">
+                          Exclusive cluster — does not stack with other premiums in the same cluster name
+                        </option>
+                      </select>
+                    </div>
+                    {newPremium.stacking_behavior === 'exclusive_cluster' && (
+                      <div style={{ ...styles.inputGroup, marginTop: TavariStyles.spacing.md }}>
+                        <label style={styles.label}>Cluster name</label>
+                        <input
+                          type="text"
+                          value={newPremium.exclusive_cluster_key}
+                          onChange={(e) =>
+                            setNewPremium((prev) => ({
+                              ...prev,
+                              exclusive_cluster_key: e.target.value,
+                            }))
+                          }
+                          style={styles.input}
+                          placeholder="e.g. time_based_premiums"
+                          disabled={saving}
+                        />
+                        <span style={styles.helpText}>
+                          Put shift-lead and after-hours in the same cluster so only one applies at a time; leave certification premiums as additive so they still stack.
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Certificate Requirement */}

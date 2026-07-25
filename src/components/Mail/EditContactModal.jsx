@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { FiX, FiUser, FiMail, FiPhone, FiTag, FiSave, FiUserCheck, FiUserX, FiTrash2 } from 'react-icons/fi';
+import { logConsentAction, syncResubscribeState } from '../../helpers/Mail/subscriptionSync';
 
 const EditContactModal = ({ isOpen, onClose, onContactUpdated, onContactDeleted, contactId, businessId }) => {
   const [contact, setContact] = useState(null);
@@ -118,6 +119,25 @@ const EditContactModal = ({ isOpen, onClose, onContactUpdated, onContactDeleted,
           return;
         }
         throw error;
+      }
+
+      if (formData.subscribed !== contact.subscribed) {
+        if (formData.subscribed) {
+          await syncResubscribeState({
+            businessId,
+            contactId,
+            emailAddress: updates.email,
+            source: 'edit_contact_modal'
+          });
+        } else {
+          await logConsentAction({
+            businessId,
+            contactId,
+            emailAddress: updates.email,
+            action: 'unsubscribe',
+            source: 'edit_contact_modal'
+          });
+        }
       }
 
       // Log audit event

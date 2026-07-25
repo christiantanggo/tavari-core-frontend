@@ -4,11 +4,13 @@ import { supabase } from '../../supabaseClient';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { useAuditLog } from '../../hooks/useAuditLog';
 import { TavariStyles } from '../../utils/TavariStyles';
+import { generateDrawerOpenReceiptHTML, printReceipt } from '../../helpers/ReceiptBuilder';
+import { resolveCurrentPosAttribution } from '../../utils/posSaleAttribution';
 import bcrypt from 'bcryptjs';
 
 const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onDrawerClosed, visible = false, onClose }) => {
   const auth = usePOSAuth({
-    requiredRoles: ['cashier', 'manager', 'owner'],
+    requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'POSDrawerComponent'
   });
@@ -23,7 +25,8 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
     drawer_manager_pin_required: false,
     drawer_open_reasons: ['No Sale', 'Change Request', 'Till Check', 'Manager Request', 'Refund', 'Other'],
     max_drawer_variance: 5.00,
-    require_manager_pin_for_variance: true
+    require_manager_pin_for_variance: true,
+    default_float_amount: 200.00
   });
   const [drawerHistory, setDrawerHistory] = useState([]);
   const [currentDrawerSession, setCurrentDrawerSession] = useState(null);
@@ -77,7 +80,7 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
     try {
       const { data, error } = await supabase
         .from('pos_settings')
-        .select('drawer_manager_pin_required, drawer_open_reasons, max_drawer_variance, require_manager_pin_for_variance')
+        .select('*')
         .eq('business_id', businessId)
         .maybeSingle();
 
@@ -87,10 +90,13 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
 
       if (data) {
         setPosSettings({
-          drawer_manager_pin_required: data.drawer_manager_pin_required || false,
-          drawer_open_reasons: data.drawer_open_reasons || ['No Sale', 'Change Request', 'Till Check', 'Manager Request', 'Refund', 'Other'],
-          max_drawer_variance: data.max_drawer_variance || 5.00,
-          require_manager_pin_for_variance: data.require_manager_pin_for_variance || true
+          drawer_manager_pin_required: data.drawer_manager_pin_required ?? false,
+          drawer_open_reasons: Array.isArray(data.drawer_open_reasons) && data.drawer_open_reasons.length > 0
+            ? data.drawer_open_reasons
+            : ['No Sale', 'Change Request', 'Till Check', 'Manager Request', 'Refund', 'Other'],
+          max_drawer_variance: Number(data.max_drawer_variance ?? 5.00),
+          require_manager_pin_for_variance: data.require_manager_pin_for_variance ?? true,
+          default_float_amount: Number(data.default_float_amount ?? 200.00)
         });
       }
     } catch (err) {
@@ -167,7 +173,11 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
       if (error) throw error;
 
       // Calculate expected cash = starting float + cash sales
-      const startingFloat = drawerSession.starting_amount || 0;
+      const startingFloat = Number(
+        drawerSession.starting_cash ??
+        drawerSession.starting_amount ??
+        0
+      );
       const cashSales = cashTransactions?.reduce((sum, payment) => sum + Number(payment.amount), 0) || 0;
       
       setExpectedCash(startingFloat + cashSales);
@@ -278,9 +288,43 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
     }
 
     setLoading(true);
+    let slipPrinted = false;
     try {
       const terminalId = currentTerminalId || generateTerminalId();
       const now = new Date().toISOString();
+      const trimmedReason = reason.trim();
+      const trimmedOpenNotes = openNotes.trim();
+      const startingFloat = Number(posSettings.default_float_amount ?? 200.00);
+      const attribution = resolveCurrentPosAttribution({
+        authUser: auth.authUser,
+        activePOSUser: auth.activePOSUser,
+        businessId
+      });
+      const drawerOpenedById = attribution.operatorUserId || auth.authUser?.id;
+
+      try {
+        const drawerPayload = {
+          opened_at: now,
+          terminal_id: terminalId,
+          reason: trimmedReason,
+          notes: trimmedOpenNotes || null,
+          login_user_id: attribution.loginUserId,
+          login_user_name: attribution.loginUserName,
+          operator_user_id: attribution.operatorUserId,
+          operator_user_name: attribution.operatorUserName,
+          opened_by: drawerOpenedById,
+          opened_by_name: attribution.operatorUserName,
+          manager_approved_by_name: managerInfo?.full_name || managerInfo?.email || null
+        };
+        const drawerSlipHTML = generateDrawerOpenReceiptHTML(drawerPayload, auth.businessData || {});
+
+        slipPrinted = await printReceipt(drawerSlipHTML, {
+          drawerData: drawerPayload,
+          businessSettings: auth.businessData || {},
+        });
+      } catch (printErr) {
+        console.error('Error printing drawer open slip:', printErr);
+      }
 
       // Create drawer session record
       const { data: drawerSession, error: drawerError } = await supabase
@@ -289,10 +333,12 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
           business_id: businessId,
           terminal_id: terminalId,
           opened_at: now,
-          opened_by: auth.authUser.id,
-          starting_amount: 200.00, // Default float - could be configurable
-          open_reason: reason.trim(),
-          open_notes: openNotes.trim() || null,
+          opened_by: drawerOpenedById,
+          starting_cash: startingFloat,
+          open_reason: trimmedReason,
+          open_notes: trimmedOpenNotes || null,
+          notes: trimmedOpenNotes || null,
+          status: 'open',
           manager_approval_required: posSettings.drawer_manager_pin_required,
           manager_approved_by: managerInfo?.id || null
         })
@@ -305,12 +351,17 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
       await logPOS('cash_drawer_opened', {
         drawer_id: drawerSession.id,
         terminal_id: terminalId,
-        reason: reason.trim(),
-        notes: openNotes.trim() || null,
-        opened_by: auth.authUser.id,
-        opened_by_name: auth.authUser.email,
+        reason: trimmedReason,
+        notes: trimmedOpenNotes || null,
+        opened_by: drawerOpenedById,
+        opened_by_name: attribution.operatorUserName,
+        operator_user_id: attribution.operatorUserId,
+        operator_user_name: attribution.operatorUserName,
+        login_user_id: attribution.loginUserId,
+        login_user_name: attribution.loginUserName,
         opened_at: now,
-        starting_amount: 200.00,
+        starting_cash: startingFloat,
+        drawer_open_slip_printed: slipPrinted,
         manager_approval_required: posSettings.drawer_manager_pin_required,
         manager_approved_by: managerInfo?.id || null,
         manager_approved_by_name: managerInfo?.full_name || managerInfo?.email || null
@@ -324,19 +375,35 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
       if (onDrawerOpened) {
         onDrawerOpened({
           id: drawerSession.id,
-          reason: reason.trim(),
-          opened_by: auth.authUser.id,
+          reason: trimmedReason,
+          opened_by: drawerOpenedById,
+          opened_by_name: attribution.operatorUserName,
+          operator_user_id: attribution.operatorUserId,
+          operator_user_name: attribution.operatorUserName,
+          login_user_id: attribution.loginUserId,
+          login_user_name: attribution.loginUserName,
           opened_at: now,
-          starting_amount: 200.00
+          starting_amount: startingFloat,
+          starting_cash: startingFloat,
+          slip_printed: slipPrinted
         });
       }
 
-      showToast('Drawer opened successfully', 'success');
+      showToast(
+        slipPrinted
+          ? 'Drawer opened successfully and till slip printed'
+          : 'Drawer opened successfully',
+        'success'
+      );
       loadDrawerHistory();
 
     } catch (err) {
       console.error('Error opening drawer:', err);
-      showToast('Error opening drawer: ' + err.message, 'error');
+      if (slipPrinted) {
+        showToast(`Till slip printed, but drawer activity was not saved: ${err.message}`, 'info');
+      } else {
+        showToast('Error opening drawer: ' + err.message, 'error');
+      }
     } finally {
       setLoading(false);
     }
@@ -381,11 +448,13 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
         .update({
           closed_at: now,
           closed_by: auth.authUser.id,
-          ending_amount: countedCash,
-          expected_amount: expectedCash,
+          actual_cash: countedCash,
+          expected_cash: expectedCash,
           variance: variance,
           cash_breakdown: cashCounts,
           close_notes: closeNotes.trim() || null,
+          notes: closeNotes.trim() || currentDrawerSession?.notes || null,
+          status: 'closed',
           manager_override_required: !!managerApproval,
           manager_override_by: managerApproval?.manager?.id || null,
           requires_recount: requireRecount
@@ -422,7 +491,9 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
         onDrawerClosed({
           id: currentDrawerSession.id,
           expected_amount: expectedCash,
+          expected_cash: expectedCash,
           actual_amount: countedCash,
+          actual_cash: countedCash,
           variance: variance,
           closed_by: auth.authUser.id,
           closed_at: now
@@ -678,7 +749,7 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
                           </div>
                           <div style={styles.historyDetails}>
                             <div style={styles.historyRow}>
-                              <span><strong>Reason:</strong> {entry.open_reason || 'Unknown'}</span>
+                              <span><strong>Reason:</strong> {entry.open_reason || entry.notes || 'Unknown'}</span>
                             </div>
                             {entry.variance && (
                               <div style={styles.historyRow}>
@@ -698,7 +769,7 @@ const POSDrawerComponent = ({ businessId, currentTerminalId, onDrawerOpened, onD
                 <div style={styles.closeHeader}>
                   <h4>Current Drawer Session</h4>
                   <p>Opened: {currentDrawerSession ? new Date(currentDrawerSession.opened_at).toLocaleString() : 'Unknown'}</p>
-                  <p>Starting Amount: {formatCurrency(currentDrawerSession?.starting_amount || 0)}</p>
+                  <p>Starting Amount: {formatCurrency(currentDrawerSession?.starting_cash ?? currentDrawerSession?.starting_amount ?? 0)}</p>
                 </div>
 
                 {/* Expected vs Counted Summary */}

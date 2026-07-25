@@ -120,6 +120,18 @@ const Register = () => {
       }
     }
 
+    // Enable Voice Agent module if they signed up from Tavari Voice splash page
+    if (signupSource === 'tavari-voice') {
+      try {
+        AppBuilderModuleService.setBusinessId(businessId);
+        await AppBuilderModuleService.enableModule('voice_agent');
+        console.log('✅ Voice Agent module enabled for new business from Tavari Voice signup');
+      } catch (error) {
+        console.error('⚠️ Failed to enable voice_agent module during registration:', error);
+        // Don't fail registration if module enablement fails
+      }
+    }
+
     // CREATE DEFAULT KITCHEN STATION FOR NEW BUSINESS
     await supabase.from('pos_stations').insert({
       business_id: businessId,
@@ -162,8 +174,16 @@ const Register = () => {
       },
     });
 
-    toast.success('Registration successful! Please log in.');
-    navigate('/login');
+    // Redirect based on signup source
+    if (signupSource === 'tavari-voice') {
+      // For voice module signups, redirect directly to voice dashboard
+      toast.success('Registration successful! Redirecting to your voice agent dashboard...');
+      navigate('/tavari-voice/dashboard');
+    } else {
+      // For regular signups, redirect to login
+      toast.success('Registration successful! Please log in.');
+      navigate('/login');
+    }
     setIsLoading(false);
   };
 

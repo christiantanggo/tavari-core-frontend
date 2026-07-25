@@ -8,6 +8,7 @@ import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import { getCanadianStatHolidaysForPeriod } from '../../../utils/canadianStatHolidays';
 
 const HolidayPayCalculator = ({
   employee,
@@ -17,9 +18,10 @@ const HolidayPayCalculator = ({
   settings,
   formatAmount,
   missedShiftBefore,
-  missedShiftAfter
+  missedShiftAfter,
+  initialHolidayDate = ''
 }) => {
-  const [selectedHolidayDate, setSelectedHolidayDate] = useState('');
+  const [selectedHolidayDate, setSelectedHolidayDate] = useState(initialHolidayDate || '');
   const [holidayName, setHolidayName] = useState('');
   const [holidayPayAmount, setHolidayPayAmount] = useState(0);
   const [isEligible, setIsEligible] = useState(true);
@@ -54,50 +56,14 @@ const HolidayPayCalculator = ({
 
   const { formatTaxAmount } = useTaxCalculations(selectedBusinessId || authBusinessId);
 
-  const CANADIAN_HOLIDAYS = {
-    federal: [
-      { name: 'New Year\'s Day', date: '2025-01-01' },
-      { name: 'Good Friday', date: '2025-04-18' },
-      { name: 'Easter Monday', date: '2025-04-21' },
-      { name: 'Victoria Day', date: '2025-05-19' },
-      { name: 'Canada Day', date: '2025-07-01' },
-      { name: 'Labour Day', date: '2025-09-01' },
-      { name: 'Thanksgiving Day', date: '2025-10-13' },
-      { name: 'Remembrance Day', date: '2025-11-11' },
-      { name: 'Christmas Day', date: '2025-12-25' },
-      { name: 'Boxing Day', date: '2025-12-26' }
-    ],
-    ontario: [
-      { name: 'New Year\'s Day', date: '2025-01-01' },
-      { name: 'Family Day', date: '2025-02-17' },
-      { name: 'Good Friday', date: '2025-04-18' },
-      { name: 'Victoria Day', date: '2025-05-19' },
-      { name: 'Canada Day', date: '2025-07-01' },
-      { name: 'Civic Holiday', date: '2025-08-04' },
-      { name: 'Labour Day', date: '2025-09-01' },
-      { name: 'Thanksgiving Day', date: '2025-10-13' },
-      { name: 'Christmas Day', date: '2025-12-25' },
-      { name: 'Boxing Day', date: '2025-12-26' }
-    ],
-    bc: [
-      { name: 'New Year\'s Day', date: '2025-01-01' },
-      { name: 'Family Day', date: '2025-02-17' },
-      { name: 'Good Friday', date: '2025-04-18' },
-      { name: 'Victoria Day', date: '2025-05-19' },
-      { name: 'Canada Day', date: '2025-07-01' },
-      { name: 'BC Day', date: '2025-08-04' },
-      { name: 'Labour Day', date: '2025-09-01' },
-      { name: 'Thanksgiving Day', date: '2025-10-13' },
-      { name: 'Remembrance Day', date: '2025-11-11' },
-      { name: 'Christmas Day', date: '2025-12-25' }
-    ]
-  };
-
   const getJurisdictionHolidays = useCallback(() => {
     const jurisdiction = settings?.tax_jurisdiction || 'ON';
-    const jurisdictionKey = jurisdiction.toLowerCase();
-    return CANADIAN_HOLIDAYS[jurisdictionKey] || CANADIAN_HOLIDAYS.ontario;
-  }, [settings?.tax_jurisdiction]);
+    return getCanadianStatHolidaysForPeriod({
+      jurisdiction,
+      periodStart: payPeriod?.start,
+      periodEnd: payPeriod?.end
+    });
+  }, [settings?.tax_jurisdiction, payPeriod?.start, payPeriod?.end]);
 
   // ✅ SIMPLIFIED: Just grab the most recent X periods based on pay frequency - NO DATE MATH
   const loadPayrollHistory = useCallback(async () => {
@@ -144,7 +110,8 @@ const HolidayPayCalculator = ({
       });
 
       // ✅ Query 1: Get ALL regular entries BEFORE holiday, sorted by most recent
-      console.log('🔎 Query 1: Searching for regular finalized payroll entries...');
+      // Include both 'finalized' and 'edited' status runs (edited runs are finalized runs that were modified)
+      console.log('🔎 Query 1: Searching for regular finalized/edited payroll entries...');
       const { data: regularEntries, error: regularError } = await supabase
         .from('hrpayroll_entries')
         .select(`
@@ -159,7 +126,7 @@ const HolidayPayCalculator = ({
         `)
         .eq('user_id', employee.id)
         .eq('hrpayroll_runs.business_id', selectedBusinessId)
-        .eq('hrpayroll_runs.status', 'finalized')
+        .in('hrpayroll_runs.status', ['finalized', 'edited']) // Include both finalized and edited runs
         .lt('hrpayroll_runs.pay_period_end', holidayDate.toISOString().split('T')[0]) // Periods ending BEFORE holiday
         .not('payroll_run_id', 'is', null)
         .order('hrpayroll_runs(pay_period_end)', { ascending: false }); // Most recent first
@@ -193,22 +160,44 @@ const HolidayPayCalculator = ({
       
       if (payFrequency === 'weekly') {
         // For weekly: get the 4 weeks immediately before the holiday
+        // Pay weeks are Sunday-Saturday, so period end dates should be Saturdays
+        // Find the most recent Saturday before (or on) the holiday
+        const holidayDateObj = new Date(holidayDate);
+        const holidayDayOfWeek = holidayDateObj.getDay(); // 0=Sunday, 6=Saturday
+        const daysToLastSaturday = holidayDayOfWeek === 6 ? 0 : holidayDayOfWeek + 1; // Days to go back to get to Saturday
+        const lastSaturdayBeforeHoliday = new Date(holidayDateObj);
+        lastSaturdayBeforeHoliday.setDate(holidayDateObj.getDate() - daysToLastSaturday);
+        lastSaturdayBeforeHoliday.setHours(12, 0, 0, 0); // Set to noon to avoid timezone issues
+        
         for (let i = 1; i <= 4; i++) {
-          const periodEnd = new Date(holidayDate);
-          periodEnd.setDate(periodEnd.getDate() - (i * 7)); // Go back i weeks
+          const periodEnd = new Date(lastSaturdayBeforeHoliday);
+          periodEnd.setDate(lastSaturdayBeforeHoliday.getDate() - ((i - 1) * 7)); // Go back (i-1) * 7 days from last Saturday
+          const periodStart = new Date(periodEnd);
+          periodStart.setDate(periodEnd.getDate() - 6); // 6 days before (Sunday to Saturday = 7 days, start is Sunday)
           calculatedPeriods.push({
             period_end: periodEnd.toISOString().split('T')[0],
-            period_start: new Date(periodEnd.getTime() - (6 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0] // 6 days before end
+            period_start: periodStart.toISOString().split('T')[0]
           });
         }
       } else if (payFrequency === 'bi_weekly') {
         // For bi-weekly: get the 2 bi-weekly periods immediately before the holiday
+        // Pay weeks are Sunday-Saturday, so period end dates should be Saturdays
+        // Find the most recent Saturday before (or on) the holiday
+        const holidayDateObj = new Date(holidayDate);
+        const holidayDayOfWeek = holidayDateObj.getDay(); // 0=Sunday, 6=Saturday
+        const daysToLastSaturday = holidayDayOfWeek === 6 ? 0 : holidayDayOfWeek + 1; // Days to go back to get to Saturday
+        const lastSaturdayBeforeHoliday = new Date(holidayDateObj);
+        lastSaturdayBeforeHoliday.setDate(holidayDateObj.getDate() - daysToLastSaturday);
+        lastSaturdayBeforeHoliday.setHours(12, 0, 0, 0); // Set to noon to avoid timezone issues
+        
         for (let i = 1; i <= 2; i++) {
-          const periodEnd = new Date(holidayDate);
-          periodEnd.setDate(periodEnd.getDate() - (i * 14)); // Go back i bi-weekly periods (14 days each)
+          const periodEnd = new Date(lastSaturdayBeforeHoliday);
+          periodEnd.setDate(lastSaturdayBeforeHoliday.getDate() - ((i - 1) * 14)); // Go back (i-1) * 14 days from last Saturday
+          const periodStart = new Date(periodEnd);
+          periodStart.setDate(periodEnd.getDate() - 13); // 13 days before (Sunday to Saturday = 14 days, start is Sunday)
           calculatedPeriods.push({
             period_end: periodEnd.toISOString().split('T')[0],
-            period_start: new Date(periodEnd.getTime() - (13 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0] // 13 days before end
+            period_start: periodStart.toISOString().split('T')[0]
           });
         }
       } else {
@@ -235,26 +224,69 @@ const HolidayPayCalculator = ({
         gross_pay: parseFloat(e.gross_pay || 0).toFixed(2)
       })) || []);
       
-      // ✅ Now find payroll entries for these specific periods (or create $0 entries for missing periods)
+      // ✅ IMPROVED: ALWAYS use actual payroll periods when available
+      // This is more reliable than calculating theoretical dates and trying to match them
+      // For bi-weekly: we need 2 periods, so take the 2 most recent payroll entries
+      // For weekly: we need 4 periods, so take the 4 most recent payroll entries
+      const allAvailableEntries = [...(regularEntries || []), ...(migrationEntries || [])]
+        .sort((a, b) => {
+          const dateA = new Date(a.hrpayroll_runs?.pay_period_end || a.period_end_date);
+          const dateB = new Date(b.hrpayroll_runs?.pay_period_end || b.period_end_date);
+          return dateB - dateA; // Descending (newest first)
+        });
+      
+      if (allAvailableEntries.length > 0) {
+        const periodsNeeded = payFrequency === 'weekly' ? 4 : 
+                             payFrequency === 'bi_weekly' ? 2 :
+                             payFrequency === 'semi_monthly' ? 2 :
+                             payFrequency === 'monthly' ? 1 : 2;
+        
+        const actualPeriods = allAvailableEntries.slice(0, periodsNeeded);
+        console.log(`📊 Using actual payroll periods (${payFrequency}) - taking ${periodsNeeded} most recent entries`);
+        console.log(`✅ Found ${actualPeriods.length} actual payroll entries:`, actualPeriods.map(e => ({
+          period_end: e.hrpayroll_runs?.pay_period_end || e.period_end_date,
+          gross_pay: parseFloat(e.gross_pay || 0).toFixed(2),
+          employee: e.user_id
+        })));
+        setPayrollHistory(actualPeriods);
+        return;
+      }
+      
+      console.warn('⚠️ No payroll entries found, will use calculated periods with $0 fallback');
+      
+      // ✅ Fallback: If no regular entries found, try to match calculated periods
+      // This handles cases where payroll might be in migration entries or dates don't align
       const allEntries = [];
+      const usedEntryIds = new Set(); // Track which entries we've already used
       
       for (const calculatedPeriod of calculatedPeriods) {
-        // Look for existing payroll entry for this period (exact match or within 7 days)
+        // Look for existing payroll entry for this period (exact match or within 14 days for bi-weekly)
+        // Increased tolerance to 14 days to handle cases where payroll dates don't perfectly align
+        const toleranceDays = payFrequency === 'bi_weekly' ? 14 : 7;
         const existingEntry = [...(regularEntries || []), ...(migrationEntries || [])]
           .find(entry => {
+            // Skip if we've already used this entry
+            const entryId = entry.id || entry.payroll_run_id;
+            if (usedEntryIds.has(entryId)) return false;
+            
             const entryPeriodEnd = entry.hrpayroll_runs?.pay_period_end || entry.period_end_date;
+            if (!entryPeriodEnd) return false;
+            
             const calculatedEnd = new Date(calculatedPeriod.period_end);
             const entryEnd = new Date(entryPeriodEnd);
             
-            // Exact match or within 7 days (to handle slight date variations)
+            // Match if within tolerance days
             const daysDiff = Math.abs((calculatedEnd - entryEnd) / (1000 * 60 * 60 * 24));
-            return daysDiff <= 7;
+            return daysDiff <= toleranceDays;
           });
         
         if (existingEntry) {
           // Employee worked this period - use actual data
+          const entryId = existingEntry.id || existingEntry.payroll_run_id;
+          usedEntryIds.add(entryId);
           allEntries.push(existingEntry);
-          console.log(`✅ Found payroll for period ending ${calculatedPeriod.period_end}: $${parseFloat(existingEntry.gross_pay || 0).toFixed(2)}`);
+          const entryPeriodEnd = existingEntry.hrpayroll_runs?.pay_period_end || existingEntry.period_end_date;
+          console.log(`✅ Found payroll for period ending ${entryPeriodEnd} (calculated: ${calculatedPeriod.period_end}): $${parseFloat(existingEntry.gross_pay || 0).toFixed(2)}`);
         } else {
           // Employee didn't work this period - create $0 entry
           const zeroEntry = {
@@ -268,7 +300,8 @@ const HolidayPayCalculator = ({
             is_zero_period: true // Flag to identify this as a zero period
           };
           allEntries.push(zeroEntry);
-          console.log(`⚠️ No payroll found for period ending ${calculatedPeriod.period_end} - using $0`);
+          console.log(`⚠️ No payroll found for period ending ${calculatedPeriod.period_end} (within ${toleranceDays} days) - using $0`);
+          console.log(`   Searched in ${(regularEntries || []).length} regular entries and ${(migrationEntries || []).length} migration entries`);
         }
       }
       
@@ -348,26 +381,18 @@ const HolidayPayCalculator = ({
 
     const jurisdiction = settings?.tax_jurisdiction || 'ON';
     const wage = parseFloat(employee.wage || 0);
-    const employmentStartDate = employee.hire_date ? new Date(employee.hire_date) : null;
     const holidayDate = new Date(selectedHolidayDate);
-
-    const daysEmployed = employmentStartDate ? 
-      Math.floor((holidayDate - employmentStartDate) / (1000 * 60 * 60 * 24)) : 0;
 
     console.log('👤 Employee info:', {
       wage: wage,
-      hire_date: employee.hire_date,
-      days_employed: daysEmployed,
       jurisdiction: jurisdiction
     });
 
-    if (daysEmployed < 30) {
-      console.log('❌ DISQUALIFIED: Less than 30 days employed');
-      setIsEligible(false);
-      setEligibilityReason(`Employee must be employed for at least 30 days. Currently: ${daysEmployed} days.`);
-      setHolidayPayAmount(0);
-      return;
-    }
+    // ✅ ONTARIO ESA: All employees are eligible for holiday pay regardless of employment period
+    // The ONLY eligibility requirement is the "last and first" rule:
+    // - Employee must work their last scheduled shift before the holiday
+    // - Employee must work their first scheduled shift after the holiday
+    // (This is already checked above via missedShiftBefore and missedShiftAfter)
 
     let holidayPay = 0;
     let calculationMethod = '';
@@ -378,24 +403,102 @@ const HolidayPayCalculator = ({
     if (jurisdiction === 'ON' || jurisdiction === 'federal') {
       if (payrollHistory.length > 0) {
         console.log('✅ Using actual payroll data (Ontario/Federal 1/20th method)');
-        const totalWages = payrollHistory.reduce((sum, entry) => {
-          const gross = parseFloat(entry.gross_pay || 0);
+        
+        // ✅ ONTARIO ESA: Holiday pay = (Regular wages + Vacation pay) from 4 work weeks ÷ 20
+        // Regular wages = regular pay + lieu time paid out (excludes overtime, stat worked, shift premiums)
+        const totalRegularWages = payrollHistory.reduce((sum, entry) => {
+          let regularPay = 0;
+          let lieuPayOut = 0;
+          const vacationPay = parseFloat(entry.vacation_pay || 0);
           const periodEnd = entry.hrpayroll_runs?.pay_period_end || entry.period_end_date;
-          console.log(`  Period ending ${periodEnd}: $${gross.toFixed(2)}`);
-          return sum + gross;
+          
+          // Try to get regular pay from wage_breakdown (most accurate)
+          try {
+            if (entry.wage_breakdown) {
+              const wageBreakdown = typeof entry.wage_breakdown === 'string' ? 
+                JSON.parse(entry.wage_breakdown) : entry.wage_breakdown;
+              
+              if (Array.isArray(wageBreakdown)) {
+                // Sum regular_pay (or pay) from all periods
+                // ✅ INCLUDE lieu payments (lieu time paid out counts as regular wages)
+                wageBreakdown.forEach(period => {
+                  if (period.is_lieu_payment) {
+                    // Lieu time paid out during lookback period MUST be included as regular wages
+                    lieuPayOut += parseFloat(period.lieu_pay || 0);
+                  } else {
+                    regularPay += parseFloat(period.regular_pay || period.pay || 0);
+                  }
+                });
+              }
+            }
+          } catch (e) {
+            console.warn('Error parsing wage_breakdown for entry:', e);
+          }
+          
+          // Fallback: Calculate from regular_hours * wage if wage_breakdown doesn't exist
+          if (regularPay === 0 && entry.regular_hours) {
+            const regularHours = parseFloat(entry.regular_hours || 0);
+            const entryWage = parseFloat(entry.wage || employee.wage || wage || 0);
+            regularPay = regularHours * entryWage;
+          }
+          
+          // ✅ Also include lieu_hours paid out in fallback calculation
+          if (entry.lieu_hours && entry.lieu_hours > 0) {
+            const lieuHours = parseFloat(entry.lieu_hours || 0);
+            const entryWage = parseFloat(entry.wage || employee.wage || wage || 0);
+            lieuPayOut += lieuHours * entryWage;
+          }
+          
+          const totalRegularWages = regularPay + lieuPayOut;
+          const regularWagesPlusVacation = totalRegularWages + vacationPay;
+          console.log(`  Period ending ${periodEnd}: Regular: $${regularPay.toFixed(2)}, Lieu Paid: $${lieuPayOut.toFixed(2)}, Vacation: $${vacationPay.toFixed(2)}, Total: $${regularWagesPlusVacation.toFixed(2)}`);
+          return sum + regularWagesPlusVacation;
         }, 0);
 
-        holidayPay = totalWages / 20;
-        calculationMethod = jurisdiction === 'ON' ? 'Ontario ESA: 1/20th of wages from 4 work weeks' : 'Canada Labour Code: 1/20th of wages from 4 work weeks';
+        holidayPay = totalRegularWages / 20;
+        calculationMethod = jurisdiction === 'ON' ? 'Ontario ESA: 1/20th of (regular wages + lieu time paid out + vacation pay) from 4 work weeks' : 'Canada Labour Code: 1/20th of (regular wages + lieu time paid out + vacation pay) from 4 work weeks';
         details = {
-          totalWages: totalWages.toFixed(2),
+          totalRegularWages: totalRegularWages.toFixed(2),
           payrollEntries: payrollHistory.length,
-          calculation: `$${totalWages.toFixed(2)} ÷ 20 = $${holidayPay.toFixed(2)}`,
-          entries: payrollHistory.map(e => ({
-            date: e.hrpayroll_runs?.pay_period_end || e.period_end_date,
-            amount: parseFloat(e.gross_pay || 0).toFixed(2),
-            isZeroPeriod: e.is_zero_period || false
-          }))
+          calculation: `$${totalRegularWages.toFixed(2)} ÷ 20 = $${holidayPay.toFixed(2)}`,
+          entries: payrollHistory.map(e => {
+            let regularPay = 0;
+            let lieuPayOut = 0;
+            try {
+              if (e.wage_breakdown) {
+                const wageBreakdown = typeof e.wage_breakdown === 'string' ? 
+                  JSON.parse(e.wage_breakdown) : e.wage_breakdown;
+                if (Array.isArray(wageBreakdown)) {
+                  wageBreakdown.forEach(period => {
+                    if (period.is_lieu_payment) {
+                      lieuPayOut += parseFloat(period.lieu_pay || 0);
+                    } else {
+                      regularPay += parseFloat(period.regular_pay || period.pay || 0);
+                    }
+                  });
+                }
+              }
+            } catch (err) {
+              // Fallback calculation
+              const regularHours = parseFloat(e.regular_hours || 0);
+              const entryWage = parseFloat(e.wage || employee.wage || wage || 0);
+              regularPay = regularHours * entryWage;
+              // Include lieu hours paid out in fallback
+              if (e.lieu_hours && e.lieu_hours > 0) {
+                lieuPayOut = parseFloat(e.lieu_hours || 0) * entryWage;
+              }
+            }
+            const vacationPay = parseFloat(e.vacation_pay || 0);
+            const totalRegularWages = regularPay + lieuPayOut;
+            return {
+              date: e.hrpayroll_runs?.pay_period_end || e.period_end_date,
+              regularWages: regularPay.toFixed(2),
+              lieuPaidOut: lieuPayOut.toFixed(2),
+              vacationPay: vacationPay.toFixed(2),
+              total: (totalRegularWages + vacationPay).toFixed(2),
+              isZeroPeriod: e.is_zero_period || false
+            };
+          })
         };
         console.log('💵 Calculation result:', details.calculation);
       } else {
@@ -465,14 +568,13 @@ const HolidayPayCalculator = ({
     console.log('Details:', details);
 
     setIsEligible(true);
-    setEligibilityReason(`Eligible: ${daysEmployed} days employed (minimum 30 required)`);
+    setEligibilityReason('Eligible: All employees are entitled to holiday pay under Ontario ESA (subject to last/first shift rule)');
     setHolidayPayAmount(holidayPay);
     setCalculationDetails({
       method: calculationMethod,
       jurisdiction,
       holidayDate: selectedHolidayDate,
       employeeName: `${employee.first_name} ${employee.last_name}`,
-      daysEmployed,
       ...details
     });
 
@@ -533,6 +635,11 @@ const HolidayPayCalculator = ({
     setSelectedHolidayDate(holiday.date);
     setHolidayName(holiday.name);
   };
+
+  useEffect(() => {
+    if (!initialHolidayDate || initialHolidayDate === selectedHolidayDate) return;
+    handleHolidayDateChange(initialHolidayDate);
+  }, [initialHolidayDate]);
 
   useEffect(() => {
     console.log('🔄 Effect triggered - loading payroll history');
@@ -800,31 +907,74 @@ const HolidayPayCalculator = ({
                     <thead>
                       <tr>
                         <th style={styles.tableHeader}>Period End Date</th>
-                        <th style={styles.tableHeader}>Gross Pay</th>
+                        <th style={{...styles.tableHeader, textAlign: 'right'}}>Regular Wages</th>
+                        <th style={{...styles.tableHeader, textAlign: 'right'}}>Lieu Paid Out</th>
+                        <th style={{...styles.tableHeader, textAlign: 'right'}}>Vacation Pay</th>
+                        <th style={{...styles.tableHeader, textAlign: 'right'}}>Weekly Total</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {calculationDetails.entries.map((entry, idx) => (
-                        <tr key={idx}>
-                          <td style={styles.tableCell}>
-                            {entry.date}
-                            {entry.isZeroPeriod && (
-                              <span style={{color: '#666', fontSize: '0.9em', marginLeft: '8px'}}>
-                                (No work)
-                              </span>
-                            )}
-                          </td>
-                          <td style={{
-                            ...styles.tableCell,
-                            color: entry.isZeroPeriod ? '#999' : 'inherit'
-                          }}>
-                            ${entry.amount}
-                          </td>
-                        </tr>
-                      ))}
-                      <tr style={{fontWeight: 'bold'}}>
+                      {calculationDetails.entries.map((entry, idx) => {
+                        const regularWages = parseFloat(entry.regularWages || 0);
+                        const lieuPaidOut = parseFloat(entry.lieuPaidOut || 0);
+                        const vacationPay = parseFloat(entry.vacationPay || 0);
+                        const weeklyTotal = regularWages + lieuPaidOut + vacationPay;
+                        return (
+                          <tr key={idx}>
+                            <td style={styles.tableCell}>
+                              {entry.date}
+                              {entry.isZeroPeriod && (
+                                <span style={{color: '#666', fontSize: '0.9em', marginLeft: '8px'}}>
+                                  (No work)
+                                </span>
+                              )}
+                            </td>
+                            <td style={{
+                              ...styles.tableCell,
+                              color: entry.isZeroPeriod ? '#999' : 'inherit',
+                              textAlign: 'right'
+                            }}>
+                              ${regularWages.toFixed(2)}
+                            </td>
+                            <td style={{
+                              ...styles.tableCell,
+                              color: entry.isZeroPeriod ? '#999' : 'inherit',
+                              textAlign: 'right'
+                            }}>
+                              {lieuPaidOut > 0 ? `$${lieuPaidOut.toFixed(2)}` : '-'}
+                            </td>
+                            <td style={{
+                              ...styles.tableCell,
+                              color: entry.isZeroPeriod ? '#999' : 'inherit',
+                              textAlign: 'right'
+                            }}>
+                              ${vacationPay.toFixed(2)}
+                            </td>
+                            <td style={{
+                              ...styles.tableCell,
+                              color: entry.isZeroPeriod ? '#999' : 'inherit',
+                              fontWeight: 'bold',
+                              textAlign: 'right'
+                            }}>
+                              ${weeklyTotal.toFixed(2)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      <tr style={{fontWeight: 'bold', borderTop: '2px solid #333'}}>
                         <td style={{...styles.tableCell, fontWeight: 'bold'}}>Total</td>
-                        <td style={{...styles.tableCell, fontWeight: 'bold'}}>${calculationDetails.totalWages}</td>
+                        <td style={{...styles.tableCell, fontWeight: 'bold', textAlign: 'right'}}>
+                          ${calculationDetails.entries.reduce((sum, e) => sum + parseFloat(e.regularWages || 0), 0).toFixed(2)}
+                        </td>
+                        <td style={{...styles.tableCell, fontWeight: 'bold', textAlign: 'right'}}>
+                          ${calculationDetails.entries.reduce((sum, e) => sum + parseFloat(e.lieuPaidOut || 0), 0).toFixed(2)}
+                        </td>
+                        <td style={{...styles.tableCell, fontWeight: 'bold', textAlign: 'right'}}>
+                          ${calculationDetails.entries.reduce((sum, e) => sum + parseFloat(e.vacationPay || 0), 0).toFixed(2)}
+                        </td>
+                        <td style={{...styles.tableCell, fontWeight: 'bold', textAlign: 'right'}}>
+                          ${calculationDetails.totalRegularWages}
+                        </td>
                       </tr>
                     </tbody>
                   </table>

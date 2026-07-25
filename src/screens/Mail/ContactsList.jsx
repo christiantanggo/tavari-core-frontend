@@ -7,6 +7,10 @@ import EmailPauseBanner, { blockEmailSendIfPaused } from '../../components/Email
 import AddContactModal from '../../components/Mail/AddContactModal';
 import CSVImportModal from '../../components/Mail/CSVImportModal';
 import EditContactModal from '../../components/Mail/EditContactModal';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MailModuleTabs } from '../../components/Mail/MailModuleNavigation';
+import TavariCheckbox from '../../components/UI/TavariCheckbox';
+import { logConsentAction } from '../../helpers/Mail/subscriptionSync';
 import { styles } from './ContactsList.styles';
 import { 
   FiUsers, FiPlus, FiUpload, FiSearch, FiFilter, FiEdit3, FiTrash2, 
@@ -15,6 +19,8 @@ import {
   FiTrendingUp, FiEye, FiMousePointer, FiClock, FiShield, FiHeart,
   FiHome, FiStar, FiSettings, FiMapPin, FiGlobe, FiCalendar, FiInfo
 } from 'react-icons/fi';
+
+const DEFAULT_RECENT_CONTACT_LIMIT = 25;
 
 const ContactsList = () => {
   const navigate = useNavigate();
@@ -33,7 +39,7 @@ const ContactsList = () => {
   const [sortOrder, setSortOrder] = useState('desc');
   const [selectedContacts, setSelectedContacts] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10000);
+  const [pageSize, setPageSize] = useState(DEFAULT_RECENT_CONTACT_LIMIT);
   const [totalContacts, setTotalContacts] = useState(0);
   const [stats, setStats] = useState({ 
     total: 0, 
@@ -53,8 +59,11 @@ const ContactsList = () => {
   const [mergeCandidates, setMergeCandidates] = useState([]);
   const [segments, setSegments] = useState([]); // Available segments
   const [showEngagementDetails, setShowEngagementDetails] = useState(false);
+  const [datasetMode, setDatasetMode] = useState('recent');
 
-  const businessId = business?.id;
+  const businessId = localStorage.getItem('currentBusinessId') || business?.id;
+  const hasActiveSearch = searchTerm.trim().length > 0;
+  const fullDatasetLoaded = datasetMode === 'search';
 
   const loadContactSummary = useCallback(async () => {
     if (!businessId) return;
@@ -95,8 +104,8 @@ const ContactsList = () => {
     }
   }, [businessId]);
 
-  // Load all contacts with enhanced data
-  const loadAllContacts = useCallback(async () => {
+  // Load recent contacts by default, then expand to the full dataset when searching
+  const loadAllContacts = useCallback(async ({ fullDataset = false } = {}) => {
     if (!businessId) {
       console.log('No business selected yet');
       return;
@@ -104,14 +113,39 @@ const ContactsList = () => {
     
     try {
       setLoading(true);
-      console.log('Loading enhanced contacts for business:', businessId);
+      setDatasetMode(fullDataset ? 'search' : 'recent');
+      console.log('Loading enhanced contacts for business:', businessId, 'full dataset:', fullDataset);
       
       const batchSize = 1000;
       let offset = 0;
-      let more = true;
       const aggregated = [];
+      if (fullDataset) {
+        let more = true;
+        while (more) {
+          const { data, error } = await supabase
+            .from('mail_contacts')
+            .select(`
+              *,
+              household:mail_households(id, household_name, primary_contact_id),
+              segments:mail_contact_segment_memberships(
+                segment:mail_contact_segments(id, name, color)
+              )
+            `)
+            .eq('business_id', businessId)
+            .order(sortField, { ascending: sortOrder === 'asc' })
+            .range(offset, offset + batchSize - 1);
 
-      while (more) {
+          if (error) throw error;
+
+          aggregated.push(...(data || []));
+
+          if (!data || data.length < batchSize) {
+            more = false;
+          } else {
+            offset += batchSize;
+          }
+        }
+      } else {
         const { data, error } = await supabase
           .from('mail_contacts')
           .select(`
@@ -123,17 +157,11 @@ const ContactsList = () => {
           `)
           .eq('business_id', businessId)
           .order(sortField, { ascending: sortOrder === 'asc' })
-          .range(offset, offset + batchSize - 1);
+          .range(0, DEFAULT_RECENT_CONTACT_LIMIT - 1);
 
         if (error) throw error;
 
         aggregated.push(...(data || []));
-
-        if (!data || data.length < batchSize) {
-          more = false;
-        } else {
-          offset += batchSize;
-        }
       }
 
       const processedContacts = aggregated.map(contact => ({
@@ -156,7 +184,6 @@ const ContactsList = () => {
       const uniqueContacts = Array.from(uniqueContactsMap.values());
 
       const totalCount = uniqueContacts.length;
-      const subscribedCount = uniqueContacts.filter(c => c.subscribed).length;
       const highEngagementCount = uniqueContacts.filter(c => c.engagement_level === 'high').length;
       const withoutConsentCount = uniqueContacts.filter(c => getConsentStatus(c) === 'missing').length;
       const householdCount = uniqueContacts.filter(c => c.household_id).length;
@@ -203,15 +230,13 @@ const ContactsList = () => {
 
       setAllContacts(uniqueContacts);
       setTotalContacts(totalCount);
-      setStats({
-        total: totalCount,
-        subscribed: subscribedCount,
-        unsubscribed: totalCount - subscribedCount,
-        highEngagement: highEngagementCount,
-        withoutConsent: withoutConsentCount,
-        householdMembers: householdCount
-      });
-      setDuplicates(duplicateGroups);
+      setStats(prev => ({
+        ...prev,
+        highEngagement: fullDataset ? highEngagementCount : prev.highEngagement,
+        withoutConsent: fullDataset ? withoutConsentCount : prev.withoutConsent,
+        householdMembers: fullDataset ? householdCount : prev.householdMembers
+      }));
+      setDuplicates(fullDataset ? duplicateGroups : []);
       setContactsLoaded(true);
     } catch (error) {
       console.error('Error loading contacts:', error);
@@ -331,7 +356,7 @@ const ContactsList = () => {
   }, [filteredContacts, paginatedContacts, contactsLoaded]);
 
   useEffect(() => {
-    if (!contactsLoaded) return;
+    if (!contactsLoaded || !fullDatasetLoaded) return;
 
     const total = allContacts.length;
     const subscribed = allContacts.filter(c => c.subscribed).length;
@@ -339,15 +364,16 @@ const ContactsList = () => {
     const withoutConsent = allContacts.filter(c => !c.consent_method || !c.consent_timestamp).length;
     const householdMembers = allContacts.filter(c => c.household_id).length;
 
-    setStats({
+    setStats(prev => ({
+      ...prev,
       total,
       subscribed,
       unsubscribed: total - subscribed,
       highEngagement,
       withoutConsent,
       householdMembers
-    });
-  }, [allContacts, contactsLoaded]);
+    }));
+  }, [allContacts, contactsLoaded, fullDatasetLoaded]);
 
   // Load data when business changes
   useEffect(() => {
@@ -356,6 +382,16 @@ const ContactsList = () => {
       loadSegments();
     }
   }, [businessId, loadContactSummary, loadSegments]);
+
+  useEffect(() => {
+    if (!businessId) return;
+
+    const timeoutId = setTimeout(() => {
+      loadAllContacts({ fullDataset: hasActiveSearch });
+    }, hasActiveSearch ? 300 : 0);
+
+    return () => clearTimeout(timeoutId);
+  }, [businessId, hasActiveSearch, loadAllContacts]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -505,18 +541,36 @@ const ContactsList = () => {
         
         if (error) throw error;
 
+        const affectedContacts = allContacts.filter(
+          (contact) => selectedContacts.includes(contact.id) && contact.email
+        );
+
+        if (subscribed && affectedContacts.length > 0) {
+          const unsubscribeEmails = affectedContacts.map((contact) =>
+            String(contact.email).trim().toLowerCase()
+          );
+
+          const { error: unsubscribeDeleteError } = await supabase
+            .from('mail_unsubscribes')
+            .delete()
+            .eq('business_id', businessId)
+            .in('email', unsubscribeEmails);
+
+          if (unsubscribeDeleteError) throw unsubscribeDeleteError;
+        }
+
         // Log consent actions for each contact
         for (const contactId of selectedContacts) {
           const contact = allContacts.find(c => c.id === contactId);
           if (contact) {
-            await supabase.rpc('log_consent_action', {
-              p_business_id: businessId,
-              p_contact_id: contactId,
-              p_email_address: contact.email,
-              p_action: subscribed ? 'resubscribe' : 'unsubscribe',
-              p_consent_source: 'bulk_action'
+            await logConsentAction({
+              businessId,
+              contactId,
+              emailAddress: contact.email,
+              action: subscribed ? 'resubscribe' : 'unsubscribe',
+              source: 'bulk_action'
             });
-          }
+          } 
         }
       }
 
@@ -840,6 +894,9 @@ const ContactsList = () => {
       {/* Email Pause Banner */}
       <EmailPauseBanner />
 
+      <MailModuleHeader />
+      <MailModuleTabs />
+
       {loading && (
         <div style={styles.loadingOverlay}>
           <div style={styles.loadingOverlayCard}>
@@ -849,50 +906,41 @@ const ContactsList = () => {
         </div>
       )}
 
-      {/* Header */}
-      <div style={styles.header}>
-        <div style={styles.headerLeft}>
-          <h1 style={styles.title}>Enhanced Contact Management</h1>
-          <p style={styles.subtitle}>
-            {totalContacts.toLocaleString()} total contacts with engagement tracking and CASL compliance
-          </p>
-        </div>
-        <div style={styles.headerActions}>
-          <button 
-            style={contactsLoaded ? styles.secondaryButton : styles.primaryButton}
-            onClick={loadAllContacts}
-            disabled={loading}
-          >
-            {contactsLoaded ? (
-              <FiRefreshCw style={styles.buttonIcon} />
-            ) : (
-              <FiUsers style={styles.buttonIcon} />
-            )}
-            {loading ? (contactsLoaded ? 'Refreshing...' : 'Loading...') : (contactsLoaded ? 'Refresh Contacts' : 'Load Contact List')}
-          </button>
-          <button 
-            style={styles.secondaryButton}
-            onClick={() => setCsvImportModal(true)}
-          >
-            <FiUpload style={styles.buttonIcon} />
-            Import CSV
-          </button>
-          <button 
-            style={styles.secondaryButton}
-            onClick={handleExportSelected}
-            disabled={!contactsLoaded || loading}
-          >
-            <FiDownload style={styles.buttonIcon} />
-            Export Enhanced
-          </button>
-          <button 
-            style={styles.primaryButton}
-            onClick={() => setAddContactModal(true)}
-          >
-            <FiPlus style={styles.buttonIcon} />
-            Add Contact
-          </button>
-        </div>
+      <div style={styles.headerActionsStandalone}>
+        <button 
+          style={styles.secondaryButton}
+          onClick={() => loadAllContacts({ fullDataset: hasActiveSearch })}
+          disabled={loading}
+        >
+          {loading ? (
+            <FiRefreshCw style={styles.buttonIcon} />
+          ) : (
+            <FiUsers style={styles.buttonIcon} />
+          )}
+          {loading ? 'Refreshing...' : (hasActiveSearch ? 'Refresh Search Results' : 'Refresh Recent Contacts')}
+        </button>
+        <button 
+          style={styles.secondaryButton}
+          onClick={() => setCsvImportModal(true)}
+        >
+          <FiUpload style={styles.buttonIcon} />
+          Import CSV
+        </button>
+        <button 
+          style={styles.secondaryButton}
+          onClick={handleExportSelected}
+          disabled={!contactsLoaded || loading}
+        >
+          <FiDownload style={styles.buttonIcon} />
+          Export Enhanced
+        </button>
+        <button 
+          style={styles.primaryButton}
+          onClick={() => setAddContactModal(true)}
+        >
+          <FiPlus style={styles.buttonIcon} />
+          Add Contact
+        </button>
       </div>
 
       {/* Enhanced Stats Cards */}
@@ -914,39 +962,39 @@ const ContactsList = () => {
         <div style={styles.statCard}>
           <FiTrendingUp style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{contactsLoaded ? stats.highEngagement.toLocaleString() : '—'}</div>
+            <div style={styles.statNumber}>{fullDatasetLoaded ? stats.highEngagement.toLocaleString() : '—'}</div>
             <div style={styles.statLabel}>High Engagement</div>
           </div>
         </div>
         <div style={styles.statCard}>
           <FiShield style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{contactsLoaded ? stats.withoutConsent.toLocaleString() : '—'}</div>
+            <div style={styles.statNumber}>{fullDatasetLoaded ? stats.withoutConsent.toLocaleString() : '—'}</div>
             <div style={styles.statLabel}>Missing Consent</div>
           </div>
         </div>
         <div style={styles.statCard}>
           <FiHome style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{contactsLoaded ? stats.householdMembers.toLocaleString() : '—'}</div>
+            <div style={styles.statNumber}>{fullDatasetLoaded ? stats.householdMembers.toLocaleString() : '—'}</div>
             <div style={styles.statLabel}>Household Members</div>
           </div>
         </div>
         <div style={styles.statCard}>
           <FiAlertTriangle style={styles.statIcon} />
           <div>
-            <div style={styles.statNumber}>{contactsLoaded ? duplicates.length : '—'}</div>
+            <div style={styles.statNumber}>{fullDatasetLoaded ? duplicates.length : '—'}</div>
             <div style={styles.statLabel}>Duplicate Groups</div>
           </div>
         </div>
       </div>
 
-      {!contactsLoaded && (
+      {!fullDatasetLoaded && (
         <div style={styles.loadNotice}>
           <FiInfo style={styles.loadNoticeIcon} />
           <div>
-            <strong>The full contact list is not loaded.</strong>
-            <div>Use the “Load Contact List” button above to fetch detailed contact records before running exports, cleanup, or duplicate checks.</div>
+            <strong>Showing the most recent 25 contacts for faster loading.</strong>
+            <div>Start typing in the contact search box to load the full contact list, then run deeper cleanup or duplicate checks.</div>
           </div>
         </div>
       )}
@@ -956,11 +1004,11 @@ const ContactsList = () => {
         <button 
           style={{
             ...styles.toolButton,
-            opacity: (!contactsLoaded || loading) ? 0.5 : 1,
-            cursor: (!contactsLoaded || loading) ? 'not-allowed' : 'pointer'
+            opacity: (!fullDatasetLoaded || loading) ? 0.5 : 1,
+            cursor: (!fullDatasetLoaded || loading) ? 'not-allowed' : 'pointer'
           }}
           onClick={handleDataCleanup}
-          disabled={!contactsLoaded || loading}
+          disabled={!fullDatasetLoaded || loading}
         >
           <FiRefreshCw style={styles.buttonIcon} />
           Enhanced Cleanup
@@ -968,11 +1016,11 @@ const ContactsList = () => {
         <button 
           style={{
             ...styles.toolButton,
-            opacity: (!contactsLoaded || loading) ? 0.5 : 1,
-            cursor: (!contactsLoaded || loading) ? 'not-allowed' : 'pointer'
+            opacity: (!fullDatasetLoaded || loading) ? 0.5 : 1,
+            cursor: (!fullDatasetLoaded || loading) ? 'not-allowed' : 'pointer'
           }}
           onClick={() => setShowDuplicates(!showDuplicates)}
-          disabled={!contactsLoaded || loading}
+          disabled={!fullDatasetLoaded || loading}
         >
           <FiGitMerge style={styles.buttonIcon} />
           {showDuplicates ? 'Hide' : 'Show'} Duplicates
@@ -980,11 +1028,11 @@ const ContactsList = () => {
         <button 
           style={{
             ...styles.toolButton,
-            opacity: (!contactsLoaded || loading) ? 0.5 : 1,
-            cursor: (!contactsLoaded || loading) ? 'not-allowed' : 'pointer'
+            opacity: (!fullDatasetLoaded || loading) ? 0.5 : 1,
+            cursor: (!fullDatasetLoaded || loading) ? 'not-allowed' : 'pointer'
           }}
           onClick={() => findDuplicates()}
-          disabled={!contactsLoaded || loading}
+          disabled={!fullDatasetLoaded || loading}
         >
           <FiSearch style={styles.buttonIcon} />
           Find Duplicates
@@ -1175,11 +1223,13 @@ const ContactsList = () => {
                 <div key={contact.id} style={styles.mobileCard}>
                   {/* Mobile Card Header */}
                   <div style={styles.mobileCardHeader}>
-                    <input
-                      type="checkbox"
+                    <TavariCheckbox
                       checked={selectedContacts.includes(contact.id)}
                       onChange={() => handleSelectContact(contact.id)}
-                      style={styles.mobileCheckbox}
+                      size="md"
+                      id={`mobile-contact-select-${contact.id}`}
+                      aria-label={`Select ${contact.first_name} ${contact.last_name}`}
+                      style={{ minWidth: '20px', justifyContent: 'center' }}
                     />
                     <div style={styles.mobileContactInfo}>
                       <div style={styles.mobileContactName}>
@@ -1330,10 +1380,13 @@ const ContactsList = () => {
                 <thead>
                   <tr style={styles.tableHeader}>
                     <th style={styles.checkboxColumn}>
-                      <input
-                        type="checkbox"
+                      <TavariCheckbox
                         checked={selectedContacts.length === contacts.length && contacts.length > 0}
                         onChange={handleSelectAll}
+                        size="md"
+                        id="select-all-contacts"
+                        aria-label="Select all visible contacts"
+                        style={{ minWidth: '20px', justifyContent: 'center' }}
                       />
                     </th>
                     <th style={styles.tableHeaderCell} onClick={() => handleSort('email')}>
@@ -1362,10 +1415,13 @@ const ContactsList = () => {
                   {contacts.map(contact => (
                     <tr key={contact.id} style={styles.tableRow}>
                       <td style={styles.checkboxColumn}>
-                        <input
-                          type="checkbox"
+                        <TavariCheckbox
                           checked={selectedContacts.includes(contact.id)}
                           onChange={() => handleSelectContact(contact.id)}
+                          size="md"
+                          id={`contact-select-${contact.id}`}
+                          aria-label={`Select ${contact.first_name} ${contact.last_name}`}
+                          style={{ minWidth: '20px', justifyContent: 'center' }}
                         />
                       </td>
                       
@@ -1614,6 +1670,7 @@ const ContactsList = () => {
         onImportComplete={(count) => {
           loadAllContacts();
           alert(`Successfully imported ${count} contacts with enhanced tracking!`);
+          setCsvImportModal(false);
         }}
         businessId={businessId}
       />

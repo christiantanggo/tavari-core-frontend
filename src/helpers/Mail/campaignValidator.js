@@ -258,7 +258,20 @@ export const validateTechnicalRequirements = (campaign) => {
   const warnings = [];
   
   // Check for dynamic field usage
-  const dynamicFields = ['{FirstName}', '{LastName}', '{Email}', '{BusinessName}'];
+  const dynamicFields = [
+    '{FirstName}',
+    '{{FirstName}}',
+    '{{First Name}}',
+    '{LastName}',
+    '{{LastName}}',
+    '{{Last Name}}',
+    '{Email}',
+    '{{Email}}',
+    '{{Email Address}}',
+    '{BusinessName}',
+    '{{BusinessName}}',
+    '{{Business Name}}'
+  ];
   const contentString = JSON.stringify(campaign.content_blocks || []);
   
   let usesDynamicFields = false;
@@ -269,7 +282,7 @@ export const validateTechnicalRequirements = (campaign) => {
   });
   
   if (!usesDynamicFields) {
-    warnings.push('Consider using dynamic fields like {FirstName} to personalize your emails');
+    warnings.push('Consider using merge fields like {{First Name}} to personalize your emails');
   }
   
   // Check for mobile responsiveness indicators
@@ -309,7 +322,14 @@ export const calculateCampaignScore = (campaign, errors, warnings) => {
   const contentString = JSON.stringify(campaign.content_blocks || []);
   
   // Personalization bonus
-  if (contentString.includes('{FirstName}') || contentString.includes('{LastName}')) {
+  if (
+    contentString.includes('{FirstName}') ||
+    contentString.includes('{{FirstName}}') ||
+    contentString.includes('{{First Name}}') ||
+    contentString.includes('{LastName}') ||
+    contentString.includes('{{LastName}}') ||
+    contentString.includes('{{Last Name}}')
+  ) {
     score += 10;
   }
   

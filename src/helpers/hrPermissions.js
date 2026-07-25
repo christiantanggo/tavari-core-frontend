@@ -160,8 +160,8 @@ export const getHRMenuItems = (userRole) => {
     },
     {
       id: 'settings',
-      title: 'HR Settings',
-      path: '/dashboard/hr/settings',
+      title: 'HR configuration',
+      path: '/dashboard/hr/employee-management',
       requiredPermission: 'VIEW_HR_SETTINGS'
     }
   ];

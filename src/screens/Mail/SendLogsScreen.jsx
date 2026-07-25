@@ -6,11 +6,60 @@ import { useBusiness } from '../../contexts/BusinessContext';
 import { usePermissions } from '../../hooks/usePermissions';
 import PermissionGate from '../../components/Auth/PermissionGate';
 import EmailPauseBanner from '../../components/EmailPauseBanner';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MAIL_USAGE_TABS, MailModuleSubTabs, MailUsageTabs } from '../../components/Mail/MailModuleNavigation';
+import { formatDateTimeForBusiness, getBusinessRangeStartIso, getBusinessTimezone } from '../../utils/businessDateFormat';
 import toast from 'react-hot-toast';
 import {
   FiSearch, FiFilter, FiDownload, FiRefreshCw, FiAlertTriangle, 
   FiCheckCircle, FiClock, FiX, FiMail, FiEye, FiCalendar, FiFileText, FiLock
 } from 'react-icons/fi';
+
+const ISO_DATETIME_WITHOUT_TZ_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+
+const getLogTimestamp = (log) => {
+  const value = log?.sent_at || log?.created_at || '';
+  if (!value) return 0;
+
+  const normalizedValue =
+    typeof value === 'string' && ISO_DATETIME_WITHOUT_TZ_REGEX.test(value)
+      ? `${value}Z`
+      : value;
+
+  const timestamp = new Date(normalizedValue).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+};
+
+const mergeLogRows = (existingLog, nextLog) => {
+  const existingTime = getLogTimestamp(existingLog);
+  const nextTime = getLogTimestamp(nextLog);
+  const latestLog = nextTime >= existingTime ? nextLog : existingLog;
+  const previousLog = latestLog === nextLog ? existingLog : nextLog;
+
+  return {
+    ...previousLog,
+    ...latestLog,
+    campaign: latestLog.campaign || previousLog.campaign,
+    contact: latestLog.contact || previousLog.contact,
+    retry_count: latestLog.retry_count ?? previousLog.retry_count ?? 0,
+    error_message: latestLog.error_message ?? previousLog.error_message ?? null
+  };
+};
+
+const preferLatestLogEvents = (rows = []) => {
+  const groupedLogs = new Map();
+
+  rows.forEach((row) => {
+    const key =
+      row.ses_message_id ||
+      `${row.campaign_id || 'no-campaign'}:${row.contact_id || row.email_address}`;
+
+    const existing = groupedLogs.get(key);
+    groupedLogs.set(key, existing ? mergeLogRows(existing, row) : row);
+  });
+
+  return Array.from(groupedLogs.values()).sort((a, b) => getLogTimestamp(b) - getLogTimestamp(a));
+};
 
 const SendLogsScreen = () => {
   const navigate = useNavigate();
@@ -41,6 +90,7 @@ const SendLogsScreen = () => {
   const [totalLogs, setTotalLogs] = useState(0);
   const [selectedLog, setSelectedLog] = useState(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [businessTimezone, setBusinessTimezone] = useState(getBusinessTimezone(business));
   const [stats, setStats] = useState({
     total: 0,
     sent: 0,
@@ -49,10 +99,19 @@ const SendLogsScreen = () => {
     bounced: 0
   });
 
-  const businessId = business?.id;
+  const businessId =
+    localStorage.getItem('currentBusinessId') ||
+    business?.id ||
+    localStorage.getItem('businessId');
+  const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const displayTimezone =
+    businessTimezone && businessTimezone !== 'UTC'
+      ? businessTimezone
+      : (localTimezone || businessTimezone);
 
   // Permission checks based on permissionRegistry.js
   const canViewLogs = hasAnyPermission([
+    'mail.logs.view',
     'mail.campaigns.view',
     'reports.export'
   ]) || hasElevatedPrivileges();
@@ -60,6 +119,18 @@ const SendLogsScreen = () => {
   const canViewCampaigns = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
   const canExportData = hasPermission('reports.export') || hasElevatedPrivileges();
   const canViewDetails = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
+  const usageTabs = MAIL_USAGE_TABS.filter((tab) => (
+    !tab.requiresElevated || hasElevatedPrivileges()
+  ));
+  const handleUsageTabChange = (tabId) => {
+    if (tabId === 'overview' || tabId === 'history' || tabId === 'settings') {
+      navigate('/dashboard/mail/billing');
+      return;
+    }
+    if (tabId === 'compliance') {
+      navigate('/dashboard/mail/compliance');
+    }
+  };
 
   // Check permissions on mount
   useEffect(() => {
@@ -68,6 +139,29 @@ const SendLogsScreen = () => {
       navigate('/dashboard/mail/dashboard');
     }
   }, [permissionsLoading, canViewLogs, navigate]);
+
+  useEffect(() => {
+    const loadBusinessTimezone = async () => {
+      if (!businessId) return;
+
+      try {
+        const { data, error } = await supabase
+          .from('businesses')
+          .select('timezone')
+          .eq('id', businessId)
+          .maybeSingle();
+
+        if (error) throw error;
+
+        setBusinessTimezone(getBusinessTimezone(data || business));
+      } catch (error) {
+        console.error('Error loading business timezone:', error);
+        setBusinessTimezone(getBusinessTimezone(business));
+      }
+    };
+
+    loadBusinessTimezone();
+  }, [businessId, business]);
 
   // Load campaigns for filter dropdown
   const loadCampaigns = useCallback(async () => {
@@ -111,14 +205,10 @@ const SendLogsScreen = () => {
         .from('mail_campaign_sends')
         .select(`
           *,
-          campaign:mail_campaigns(id, name, subject_line),
-          contact:mail_contacts(id, first_name, last_name, email)
-        `);
-
-      // Add business filter through campaign
-      query = query.in('campaign_id', 
-        campaigns.length > 0 ? campaigns.map(c => c.id) : ['']
-      );
+          campaign:mail_campaigns!inner(id, name, subject_line, business_id),
+          contact:mail_contacts(id, business_id, first_name, last_name, email)
+        `)
+        .eq('campaign.business_id', businessId);
 
       // Apply status filter
       if (filters.status !== 'all') {
@@ -132,25 +222,24 @@ const SendLogsScreen = () => {
 
       // Apply date range filter
       if (filters.dateRange !== 'all') {
-        const now = new Date();
         let startDate;
         
         switch (filters.dateRange) {
           case '1d':
-            startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            startDate = getBusinessRangeStartIso(0, displayTimezone);
             break;
           case '7d':
-            startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+            startDate = getBusinessRangeStartIso(6, displayTimezone);
             break;
           case '30d':
-            startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+            startDate = getBusinessRangeStartIso(29, displayTimezone);
             break;
           default:
             startDate = null;
         }
         
         if (startDate) {
-          query = query.gte('created_at', startDate.toISOString());
+          query = query.gte('sent_at', startDate);
         }
       }
 
@@ -164,17 +253,14 @@ const SendLogsScreen = () => {
         query = query.ilike('email_address', `%${searchTerm.trim()}%`);
       }
 
-      // Get total count for pagination
-      const countQuery = await query;
-      setTotalLogs(countQuery.data?.length || 0);
-
-      // Apply pagination and ordering
-      const { data, error } = await query
-        .order('created_at', { ascending: false })
-        .range((currentPage - 1) * pageSize, currentPage * pageSize - 1);
+      const { data, error } = await query.order('sent_at', { ascending: false });
 
       if (error) throw error;
-      setLogs(data || []);
+      const latestLogs = preferLatestLogEvents(data || []);
+      setTotalLogs(latestLogs.length);
+      setLogs(
+        latestLogs.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+      );
 
       // Load stats
       await loadStats();
@@ -184,7 +270,7 @@ const SendLogsScreen = () => {
     } finally {
       setLoading(false);
     }
-  }, [businessId, campaigns, filters, searchTerm, currentPage, pageSize, canViewLogs]);
+  }, [businessId, campaigns, filters, searchTerm, currentPage, pageSize, canViewLogs, displayTimezone]);
 
   // Load summary statistics
   const loadStats = useCallback(async () => {
@@ -193,17 +279,29 @@ const SendLogsScreen = () => {
     try {
       const { data, error } = await supabase
         .from('mail_campaign_sends')
-        .select('status')
-        .in('campaign_id', campaigns.map(c => c.id));
+        .select(`
+          status,
+          ses_message_id,
+          sent_at,
+          created_at,
+          campaign_id,
+          contact_id,
+          email_address,
+          error_message,
+          campaign:mail_campaigns!inner(business_id)
+        `)
+        .eq('campaign.business_id', businessId);
 
       if (error) throw error;
 
+      const latestLogs = preferLatestLogEvents(data || []);
+
       const stats = {
-        total: data?.length || 0,
-        sent: data?.filter(l => l.status === 'sent').length || 0,
-        failed: data?.filter(l => l.status === 'failed').length || 0,
-        pending: data?.filter(l => l.status === 'pending').length || 0,
-        bounced: data?.filter(l => l.status === 'bounced').length || 0
+        total: latestLogs.length || 0,
+        sent: latestLogs.filter(l => l.status === 'sent').length || 0,
+        failed: latestLogs.filter(l => l.status === 'failed').length || 0,
+        pending: latestLogs.filter(l => l.status === 'pending').length || 0,
+        bounced: latestLogs.filter(l => l.status === 'bounced').length || 0
       };
 
       setStats(stats);
@@ -220,10 +318,10 @@ const SendLogsScreen = () => {
   }, [businessId, permissionsLoading, loadCampaigns]);
 
   useEffect(() => {
-    if (campaigns.length > 0 && !permissionsLoading) {
+    if (businessId && !permissionsLoading) {
       loadSendLogs();
     }
-  }, [campaigns, permissionsLoading, loadSendLogs]);
+  }, [businessId, campaigns, permissionsLoading, loadSendLogs]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -253,9 +351,9 @@ const SendLogsScreen = () => {
       logs.forEach(log => {
         csvRows.push([
           log.email_address || '',
-          log.campaign?.name || '',
+          log.campaign?.name || 'Standalone Send',
           log.status || '',
-          log.sent_at ? new Date(log.sent_at).toLocaleString() : '',
+          log.sent_at ? formatDateTimeForBusiness(log.sent_at, displayTimezone) : '',
           log.error_message || '',
           log.retry_count || 0,
           log.ses_message_id || '',
@@ -321,7 +419,7 @@ const SendLogsScreen = () => {
 
   const formatDate = (dateString) => {
     if (!dateString) return 'Not sent';
-    return new Date(dateString).toLocaleString();
+    return formatDateTimeForBusiness(dateString, displayTimezone);
   };
 
   const totalPages = Math.ceil(totalLogs / pageSize);
@@ -330,6 +428,20 @@ const SendLogsScreen = () => {
   if (permissionsLoading) {
     return (
       <div style={styles.container}>
+        <EmailPauseBanner 
+          customMessage="Email sending is paused. Send logs show historical data only."
+        />
+        <MailModuleHeader />
+        <MailUsageTabs tabs={usageTabs} activeTab="monitor-logs" onTabChange={handleUsageTabChange} />
+        <MailModuleSubTabs
+          ariaLabel="Monitor and logs navigation"
+          activeTab="logs"
+          onTabChange={(tabId) => navigate(tabId === 'performance' ? '/dashboard/mail/performance' : '/dashboard/mail/logs')}
+          tabs={[
+            { id: 'performance', label: 'Performance Monitor' },
+            { id: 'logs', label: 'Send Logs' }
+          ]}
+        />
         <div style={styles.loading}>
           <FiRefreshCw style={{...styles.loadingIcon, animation: 'spin 1s linear infinite'}} />
           <div>Loading permissions...</div>
@@ -342,6 +454,20 @@ const SendLogsScreen = () => {
   if (!canViewLogs) {
     return (
       <div style={styles.container}>
+        <EmailPauseBanner 
+          customMessage="Email sending is paused. Send logs show historical data only."
+        />
+        <MailModuleHeader />
+        <MailUsageTabs tabs={usageTabs} activeTab="monitor-logs" onTabChange={handleUsageTabChange} />
+        <MailModuleSubTabs
+          ariaLabel="Monitor and logs navigation"
+          activeTab="logs"
+          onTabChange={(tabId) => navigate(tabId === 'performance' ? '/dashboard/mail/performance' : '/dashboard/mail/logs')}
+          tabs={[
+            { id: 'performance', label: 'Performance Monitor' },
+            { id: 'logs', label: 'Send Logs' }
+          ]}
+        />
         <div style={styles.accessDenied}>
           <FiLock style={styles.accessDeniedIcon} />
           <h2 style={styles.accessDeniedTitle}>Access Denied</h2>
@@ -355,7 +481,7 @@ const SendLogsScreen = () => {
             style={styles.backButton}
             onClick={() => navigate('/dashboard/mail/dashboard')}
           >
-            Back to Mail Dashboard
+            Back to Mail Module
           </button>
         </div>
       </div>
@@ -369,11 +495,24 @@ const SendLogsScreen = () => {
         customMessage="Email sending is paused. Send logs show historical data only."
       />
 
+      <MailModuleHeader />
+      <MailUsageTabs tabs={usageTabs} activeTab="monitor-logs" onTabChange={handleUsageTabChange} />
+      <MailModuleSubTabs
+        ariaLabel="Monitor and logs navigation"
+        activeTab="logs"
+        onTabChange={(tabId) => navigate(tabId === 'performance' ? '/dashboard/mail/performance' : '/dashboard/mail/logs')}
+        tabs={[
+          { id: 'performance', label: 'Performance Monitor' },
+          { id: 'logs', label: 'Send Logs' }
+        ]}
+      />
+
       {/* Header */}
       <div style={styles.header}>
         <div style={styles.headerLeft}>
           <h1 style={styles.title}>Send Logs</h1>
           <p style={styles.subtitle}>Complete history of email sending activity</p>
+          <p style={styles.timezoneHint}>Times shown in {displayTimezone}</p>
         </div>
         <div style={styles.headerActions}>
           <button style={styles.secondaryButton} onClick={loadSendLogs}>
@@ -549,7 +688,7 @@ const SendLogsScreen = () => {
                     </td>
                     <td style={styles.campaignColumn}>
                       <div style={styles.campaignName}>
-                        {log.campaign?.name || 'Unknown Campaign'}
+                        {log.campaign?.name || 'Standalone Send'}
                       </div>
                     </td>
                     <td style={styles.dateColumn}>
@@ -664,11 +803,11 @@ const SendLogsScreen = () => {
                 </div>
                 <div style={styles.detailItem}>
                   <span style={styles.detailLabel}>Campaign:</span>
-                  <span style={styles.detailValue}>{selectedLog.campaign?.name}</span>
+                  <span style={styles.detailValue}>{selectedLog.campaign?.name || 'Standalone Send'}</span>
                 </div>
                 <div style={styles.detailItem}>
                   <span style={styles.detailLabel}>Subject:</span>
-                  <span style={styles.detailValue}>{selectedLog.campaign?.subject_line}</span>
+                  <span style={styles.detailValue}>{selectedLog.campaign?.subject_line || 'Standalone SES simulator test'}</span>
                 </div>
                 <div style={styles.detailItem}>
                   <span style={styles.detailLabel}>Sent At:</span>
@@ -735,6 +874,11 @@ const styles = {
     color: '#666',
     margin: 0,
   },
+  timezoneHint: {
+    fontSize: '14px',
+    color: '#888',
+    margin: '6px 0 0',
+  },
   headerActions: {
     display: 'flex',
     gap: '12px',
@@ -755,7 +899,7 @@ const styles = {
     transition: 'all 0.3s ease',
   },
   buttonIcon: {
-    fontSize: '14px',
+    fontSize: '24px',
   },
   disabledButton: {
     opacity: 0.5,
@@ -784,12 +928,12 @@ const styles = {
     color: 'teal',
   },
   statNumber: {
-    fontSize: '24px',
+    fontSize: '14px',
     fontWeight: 'bold',
     color: '#333',
   },
   statLabel: {
-    fontSize: '14px',
+    fontSize: '16px',
     color: '#666',
     marginTop: '4px',
   },
@@ -810,7 +954,7 @@ const styles = {
     top: '50%',
     transform: 'translateY(-50%)',
     color: '#666',
-    fontSize: '16px',
+    fontSize: '14px',
   },
   searchInput: {
     width: '100%',
@@ -833,7 +977,7 @@ const styles = {
   },
   messageIdInput: {
     padding: '8px 12px',
-    fontSize: '14px',
+    fontSize: '48px',
     border: '2px solid #ddd',
     borderRadius: '6px',
     minWidth: '200px',
@@ -847,7 +991,7 @@ const styles = {
     color: '#666',
   },
   loadingIcon: {
-    fontSize: '48px',
+    fontSize: '64px',
     marginBottom: '20px',
     color: 'teal',
   },
@@ -864,18 +1008,18 @@ const styles = {
     marginTop: '40px',
   },
   accessDeniedIcon: {
-    fontSize: '64px',
+    fontSize: '24px',
     color: '#f44336',
     marginBottom: '20px',
   },
   accessDeniedTitle: {
-    fontSize: '24px',
+    fontSize: '16px',
     fontWeight: 'bold',
     color: '#333',
     marginBottom: '10px',
   },
   accessDeniedText: {
-    fontSize: '16px',
+    fontSize: '14px',
     color: '#666',
     marginBottom: '8px',
   },
@@ -890,7 +1034,7 @@ const styles = {
     border: 'none',
     borderRadius: '8px',
     padding: '12px 24px',
-    fontSize: '14px',
+    fontSize: '48px',
     fontWeight: 'bold',
     cursor: 'pointer',
   },
@@ -904,12 +1048,12 @@ const styles = {
     color: '#666',
   },
   emptyIcon: {
-    fontSize: '48px',
+    fontSize: '20px',
     marginBottom: '20px',
     color: '#ccc',
   },
   emptyTitle: {
-    fontSize: '20px',
+    fontSize: '14px',
     fontWeight: 'bold',
     marginBottom: '10px',
   },
@@ -961,12 +1105,12 @@ const styles = {
     gap: '4px',
   },
   emailAddress: {
-    fontSize: '14px',
+    fontSize: '12px',
     fontWeight: 'bold',
     color: '#333',
   },
   contactName: {
-    fontSize: '12px',
+    fontSize: '14px',
     color: '#666',
   },
   campaignColumn: {
@@ -978,7 +1122,7 @@ const styles = {
   },
   dateColumn: {
     padding: '15px',
-    fontSize: '14px',
+    fontSize: '12px',
     color: '#666',
   },
   retryColumn: {
@@ -989,7 +1133,7 @@ const styles = {
     color: '#856404',
     padding: '2px 8px',
     borderRadius: '12px',
-    fontSize: '12px',
+    fontSize: '16px',
     fontWeight: 'bold',
   },
   actionsColumn: {
@@ -1001,7 +1145,7 @@ const styles = {
     border: 'none',
     color: 'teal',
     cursor: 'pointer',
-    fontSize: '16px',
+    fontSize: '14px',
     padding: '5px',
   },
   disabledActionButton: {
@@ -1045,7 +1189,7 @@ const styles = {
   },
   pageSizeSelect: {
     padding: '6px 10px',
-    fontSize: '14px',
+    fontSize: '18px',
     border: '2px solid #ddd',
     borderRadius: '6px',
     backgroundColor: 'white',
@@ -1086,7 +1230,7 @@ const styles = {
   closeButton: {
     backgroundColor: 'transparent',
     border: 'none',
-    fontSize: '18px',
+    fontSize: '12px',
     cursor: 'pointer',
     color: '#666',
     padding: '5px',
@@ -1105,13 +1249,13 @@ const styles = {
     gap: '4px',
   },
   detailLabel: {
-    fontSize: '12px',
+    fontSize: '14px',
     fontWeight: 'bold',
     color: '#666',
     textTransform: 'uppercase',
   },
   detailValue: {
-    fontSize: '14px',
+    fontSize: '11px',
     color: '#333',
     wordBreak: 'break-all',
   },

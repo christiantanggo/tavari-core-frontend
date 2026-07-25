@@ -3,14 +3,11 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../../../supabaseClient';
 import { TavariStyles } from '../../../utils/TavariStyles';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
+import RegisterStationsSettings from './RegisterStationsSettings';
+import { applyRegisterStationToDevice } from '../../../services/posRegisterStationsService';
 
-const GeneralTab = ({ settings, handleInputChange, businessId, currentTerminalId, onTerminalChange }) => {
+const GeneralTab = ({ settings, handleInputChange, businessId, currentTerminalId, onTerminalChange, canEdit }) => {
   const [availableTerminals, setAvailableTerminals] = useState([]);
-  const [isCreatingTerminal, setIsCreatingTerminal] = useState(false);
-  const [newTerminalData, setNewTerminalData] = useState({
-    terminal_name: '',
-    location_description: ''
-  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -63,57 +60,6 @@ const GeneralTab = ({ settings, handleInputChange, businessId, currentTerminalId
     return deviceId;
   };
 
-  const generateTerminalId = (terminalName) => {
-    const cleanName = terminalName.trim().toUpperCase().replace(/[^A-Z0-9]/g, '_');
-    const timestamp = Date.now().toString(36).toUpperCase();
-    return `${cleanName}_${timestamp}`.substring(0, 20);
-  };
-
-  const handleCreateTerminal = async () => {
-    if (!newTerminalData.terminal_name.trim()) {
-      setError('Terminal name is required');
-      return;
-    }
-
-    try {
-      setError(null);
-      
-      const terminalId = generateTerminalId(newTerminalData.terminal_name);
-
-      const terminalRecord = {
-        business_id: businessId,
-        terminal_name: newTerminalData.terminal_name.trim(),
-        terminal_id: terminalId,
-        location_description: newTerminalData.location_description.trim() || null,
-        is_active: true
-      };
-
-      const { data: newTerminal, error: createError } = await supabase
-        .from('pos_terminals')
-        .insert([terminalRecord])
-        .select()
-        .single();
-
-      if (createError) throw createError;
-
-      setAvailableTerminals(prev => [...prev, newTerminal]);
-      onTerminalChange(newTerminal.terminal_id);
-      
-      localStorage.setItem('tavari_terminal_id', newTerminal.terminal_id);
-      localStorage.setItem('tavari_terminal_name', newTerminal.terminal_name);
-
-      setIsCreatingTerminal(false);
-      setNewTerminalData({
-        terminal_name: '',
-        location_description: ''
-      });
-
-    } catch (err) {
-      console.error('Error creating terminal:', err);
-      setError(`Failed to create terminal: ${err.message}`);
-    }
-  };
-
   const handleTerminalSelect = async (terminalId) => {
     if (terminalId === 'business') {
       onTerminalChange(null);
@@ -124,10 +70,17 @@ const GeneralTab = ({ settings, handleInputChange, businessId, currentTerminalId
       onTerminalChange(terminalId);
       
       if (terminal) {
-        localStorage.setItem('tavari_terminal_id', terminal.terminal_id);
-        localStorage.setItem('tavari_terminal_name', terminal.terminal_name);
+        applyRegisterStationToDevice(terminal);
       }
     }
+  };
+
+  const handleStationSelected = (terminalId, station) => {
+    onTerminalChange(terminalId);
+    if (station) {
+      applyRegisterStationToDevice(station);
+    }
+    loadAvailableTerminals();
   };
 
   const getCurrentTerminal = () => {
@@ -175,6 +128,12 @@ const GeneralTab = ({ settings, handleInputChange, businessId, currentTerminalId
                 📍 {getCurrentTerminal().location_description}
               </div>
             )}
+            <div style={styles.terminalMeta}>
+              Float: ${Number(getCurrentTerminal().float_amount || settings.default_float_amount || 200).toFixed(2)}
+              {getCurrentTerminal().helcim_device_code
+                ? ` · Helcim: ${getCurrentTerminal().helcim_device_code}`
+                : ' · Helcim: not configured'}
+            </div>
             <div style={styles.terminalMeta}>
               Created: {new Date(getCurrentTerminal().created_at).toLocaleDateString()}
             </div>
@@ -238,7 +197,7 @@ const GeneralTab = ({ settings, handleInputChange, businessId, currentTerminalId
             placeholder="200.00"
           />
           <div style={styles.settingDescription}>
-            Amount of cash that should remain in the drawer at the start of each day.
+            Amount of cash that should remain in the drawer at the start of each day. Used as the default when adding new register stations.
           </div>
         </div>
 
@@ -283,72 +242,14 @@ const GeneralTab = ({ settings, handleInputChange, businessId, currentTerminalId
         </div>
       </div>
 
-      {/* Create Terminal Button */}
-      {!isCreatingTerminal && (
-        <div style={styles.section}>
-          <button
-            style={styles.createTerminalButton}
-            onClick={() => setIsCreatingTerminal(true)}
-          >
-            + Create New Terminal
-          </button>
-        </div>
-      )}
-
-      {/* Create Terminal Form */}
-      {isCreatingTerminal && (
-        <div style={styles.section}>
-          <div style={styles.createTerminalForm}>
-            <h4 style={styles.formTitle}>Create New Terminal</h4>
-            
-            <div style={styles.formField}>
-              <label style={styles.label}>Terminal Name *</label>
-              <input
-                type="text"
-                placeholder="e.g., Main Register, Kitchen Terminal"
-                value={newTerminalData.terminal_name}
-                onChange={(e) => setNewTerminalData(prev => ({
-                  ...prev,
-                  terminal_name: e.target.value
-                }))}
-                style={styles.input}
-                maxLength={50}
-              />
-            </div>
-
-            <div style={styles.formField}>
-              <label style={styles.label}>Location Description</label>
-              <input
-                type="text"
-                placeholder="e.g., Front Counter, Kitchen Area"
-                value={newTerminalData.location_description}
-                onChange={(e) => setNewTerminalData(prev => ({
-                  ...prev,
-                  location_description: e.target.value
-                }))}
-                style={styles.input}
-                maxLength={100}
-              />
-            </div>
-
-            <div style={styles.formActions}>
-              <button
-                style={styles.saveTerminalButton}
-                onClick={handleCreateTerminal}
-                disabled={!newTerminalData.terminal_name.trim()}
-              >
-                Create Terminal
-              </button>
-              <button
-                style={styles.cancelButton}
-                onClick={() => setIsCreatingTerminal(false)}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <RegisterStationsSettings
+        businessId={businessId}
+        defaultFloatAmount={Number(settings.default_float_amount) || 200}
+        canEdit={canEdit}
+        currentTerminalId={currentTerminalId}
+        onStationSelected={handleStationSelected}
+        onStationsChanged={setAvailableTerminals}
+      />
     </div>
   );
 };
@@ -501,3 +402,4 @@ const styles = {
 };
 
 export default GeneralTab;
+

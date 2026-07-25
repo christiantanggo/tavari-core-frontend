@@ -1,79 +1,53 @@
-// screens/HR/HRDashboard.jsx - WITH PERMISSION SYSTEM
+// screens/HR/HRDashboard.jsx - HR overview (stats + shortcuts to the three HR areas)
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../supabaseClient';
 import { useNavigate } from 'react-router-dom';
 import { usePermissions } from '../../hooks/usePermissions';
-import PermissionGate from '../../components/Auth/PermissionGate';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
+import TavariModuleHeader from '../../components/UI/TavariModuleHeader';
 import toast from 'react-hot-toast';
+import { X } from 'lucide-react';
 
 const HRDashboard = () => {
   const navigate = useNavigate();
 
-  // Security context
-  const {
-    recordAction,
-    logSecurityEvent
-  } = useSecurityContext({
+  const { recordAction, logSecurityEvent } = useSecurityContext({
     componentName: 'HRDashboard',
     sensitiveComponent: false,
     enableRateLimiting: false,
     enableAuditLogging: true,
-    securityLevel: 'low'
+    securityLevel: 'low',
   });
 
-  // Authentication
-  const {
-    selectedBusinessId,
-    authUser,
-    userRole,
-    businessData,
-    authLoading,
-    authError,
-    isManager,
-    isOwner
-  } = usePOSAuth({
+  const { selectedBusinessId, authLoading, authError } = usePOSAuth({
     requiredRoles: ['owner', 'manager', 'admin', 'hr_admin'],
     requireBusiness: true,
-    componentName: 'HRDashboard'
+    componentName: 'HRDashboard',
   });
 
-  // Permission system
-  const { 
-    hasPermission, 
-    hasAnyPermission,
-    hasElevatedPrivileges,
-    loading: permissionsLoading 
-  } = usePermissions();
+  const { hasAnyPermission, hasElevatedPrivileges, loading: permissionsLoading } = usePermissions();
 
-  // Component state
   const [loading, setLoading] = useState(true);
   const [dashboardStats, setDashboardStats] = useState(null);
-  const [error, setError] = useState(null);
+  const [error] = useState(null);
+  const [modalOpen, setModalOpen] = useState(null);
+  const [employeeLists, setEmployeeLists] = useState({
+    total: [],
+    onProbation: [],
+    newHires: [],
+  });
 
-  // Permission checks
-  const canViewHRDashboard = hasAnyPermission([
-    'hr.dashboard.view',
-    'hr.employees.view'
-  ]) || hasElevatedPrivileges();
+  const canViewHRDashboard =
+    hasAnyPermission(['hr.dashboard.view', 'hr.employees.view']) || hasElevatedPrivileges();
 
-  const canAccessEmployees = hasAnyPermission(['hr.employees.view', 'hr.employees.view_all']) || hasElevatedPrivileges();
-  const canAccessOnboarding = hasPermission('hr.onboarding.view') || hasElevatedPrivileges();
-  const canAccessContracts = hasPermission('hr.contracts.view') || hasElevatedPrivileges();
-  const canAccessPolicies = hasPermission('hr.policies.view') || hasElevatedPrivileges();
-  const canAccessWriteups = hasPermission('hr.writeups.view') || hasElevatedPrivileges();
-  const canAccessDocuments = hasPermission('hr.documents.view') || hasElevatedPrivileges();
-  const canAccessSettings = hasPermission('hr.settings.manage') || isOwner();
-
-  // Check permissions on mount
   useEffect(() => {
     if (!permissionsLoading && !canViewHRDashboard) {
       toast.error('You do not have permission to access the HR Dashboard');
       navigate('/dashboard/home');
     }
-  }, [permissionsLoading, canViewHRDashboard]);
+  }, [permissionsLoading, canViewHRDashboard, navigate]);
 
   useEffect(() => {
     if (selectedBusinessId && !authLoading && !permissionsLoading && canViewHRDashboard) {
@@ -84,34 +58,35 @@ const HRDashboard = () => {
   const loadDashboardStats = async () => {
     try {
       setLoading(true);
+      await logSecurityEvent('hr_dashboard_access', { action: 'view_hr_dashboard', business_id: selectedBusinessId }, 'low');
 
-      await logSecurityEvent('hr_dashboard_access', {
-        action: 'view_hr_dashboard',
-        business_id: selectedBusinessId
-      }, 'low');
-
-      // Calculate stats directly from users table
-      const { data: employees, error } = await supabase
+      const { data: employees, error: empErr } = await supabase
         .from('users')
-        .select(`
+        .select(
+          `
           id,
+          first_name,
+          last_name,
+          email,
+          employee_number,
           employment_status,
           status,
           hire_date,
           start_date,
           business_users!inner(business_id)
-        `)
+        `
+        )
         .eq('business_users.business_id', selectedBusinessId);
 
-      if (error) {
-        console.error('Error loading employees for stats:', error);
+      if (empErr) {
+        console.error('Error loading employees for stats:', empErr);
         setDashboardStats({
           total_employees: 0,
           employees_on_probation: 0,
           pending_onboarding: 0,
           overdue_policies: 0,
           expiring_contracts: 0,
-          expiring_documents: 0
+          expiring_documents: 0,
         });
         return;
       }
@@ -120,77 +95,81 @@ const HRDashboard = () => {
       const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
       const ninetyDaysAgo = new Date(now - 90 * 24 * 60 * 60 * 1000);
 
-      // Calculate statistics
-      const totalEmployees = employees.filter(emp => {
+      const activeEmployees = employees.filter((emp) => {
         const status = emp.employment_status || emp.status || 'active';
         return status === 'active';
-      }).length;
+      });
 
-      const employeesOnProbation = employees.filter(emp => {
+      const employeesOnProbationList = employees.filter((emp) => {
         const status = emp.employment_status || emp.status || 'active';
         const hireDate = emp.hire_date || emp.start_date;
         if (status !== 'active' || !hireDate) return false;
         const hire = new Date(hireDate);
         return hire > ninetyDaysAgo;
-      }).length;
+      });
 
-      const pendingOnboarding = employees.filter(emp => {
+      const newHiresList = employees.filter((emp) => {
         const status = emp.employment_status || emp.status || 'active';
         const hireDate = emp.hire_date || emp.start_date;
         if (status !== 'active' || !hireDate) return false;
         const hire = new Date(hireDate);
         return hire > thirtyDaysAgo;
-      }).length;
+      });
+
+      setEmployeeLists({
+        total: activeEmployees,
+        onProbation: employeesOnProbationList,
+        newHires: newHiresList,
+      });
 
       setDashboardStats({
-        total_employees: totalEmployees,
-        employees_on_probation: employeesOnProbation,
-        pending_onboarding: pendingOnboarding,
+        total_employees: activeEmployees.length,
+        employees_on_probation: employeesOnProbationList.length,
+        pending_onboarding: newHiresList.length,
         overdue_policies: 0,
         expiring_contracts: 0,
-        expiring_documents: 0
+        expiring_documents: 0,
       });
 
       recordAction('view_dashboard_stats', selectedBusinessId);
-
-    } catch (error) {
-      console.error('Error calculating dashboard stats:', error);
+    } catch (e) {
+      console.error('Error calculating dashboard stats:', e);
       setDashboardStats({
         total_employees: 0,
         employees_on_probation: 0,
         pending_onboarding: 0,
         overdue_policies: 0,
         expiring_contracts: 0,
-        expiring_documents: 0
+        expiring_documents: 0,
       });
-
-      await logSecurityEvent('dashboard_stats_load_failed', {
-        error_message: error.message,
-        business_id: selectedBusinessId
-      }, 'medium');
+      await logSecurityEvent('dashboard_stats_load_failed', { error_message: e.message, business_id: selectedBusinessId }, 'medium');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleNavigation = (path) => {
-    recordAction('navigate_from_dashboard', path);
-    navigate(path);
+  const handleBackToDashboard = () => navigate('/dashboard/home');
+
+  const handleStatCardClick = (cardType) => {
+    if (['total', 'probation', 'newHires'].includes(cardType)) {
+      setModalOpen(cardType);
+    } else if (cardType === 'policies') {
+      navigate('/dashboard/hr/training?tab=policies');
+    } else if (cardType === 'contracts') {
+      navigate('/dashboard/hr/employee-management?tab=contracts');
+    } else if (cardType === 'documents') {
+      navigate('/dashboard/hr/employee-management?tab=certificates');
+    } else {
+      toast.info('Feature coming soon');
+    }
   };
 
-  const handleBackToDashboard = () => {
-    navigate('/dashboard/home');
-  };
-
-  // Loading states
   if (permissionsLoading || authLoading || loading) {
     return (
       <div style={styles.loadingContainer}>
         <div style={{ textAlign: 'center' }}>
-          <div style={styles.spinner}></div>
-          <p style={styles.loadingText}>
-            Loading HR Dashboard...
-          </p>
+          <div style={styles.spinner} />
+          <p style={styles.loadingText}>Loading HR overview…</p>
         </div>
       </div>
     );
@@ -200,19 +179,10 @@ const HRDashboard = () => {
     return (
       <div style={styles.errorContainer}>
         <div style={styles.errorContent}>
-          <h2 style={styles.errorTitle}>
-            Access Denied
-          </h2>
-          <p style={styles.errorText}>
-            You do not have permission to access the HR Dashboard.
-          </p>
-          <button 
-            onClick={handleBackToDashboard}
-            style={styles.backButton}
-            onMouseOver={(e) => e.target.style.backgroundColor = '#0F766E'}
-            onMouseOut={(e) => e.target.style.backgroundColor = '#14B8A6'}
-          >
-            Return to Dashboard
+          <h2 style={styles.errorTitle}>Access Denied</h2>
+          <p style={styles.errorText}>You do not have permission to access the HR module.</p>
+          <button type="button" onClick={handleBackToDashboard} style={styles.backButton}>
+            Return to home
           </button>
         </div>
       </div>
@@ -223,19 +193,10 @@ const HRDashboard = () => {
     return (
       <div style={styles.errorContainer}>
         <div style={styles.errorContent}>
-          <h2 style={styles.errorTitle}>
-            Access Denied
-          </h2>
-          <p style={styles.errorText}>
-            {authError || error}
-          </p>
-          <button 
-            onClick={handleBackToDashboard}
-            style={styles.backButton}
-            onMouseOver={(e) => e.target.style.backgroundColor = '#0F766E'}
-            onMouseOut={(e) => e.target.style.backgroundColor = '#14B8A6'}
-          >
-            Return to Dashboard
+          <h2 style={styles.errorTitle}>Error</h2>
+          <p style={styles.errorText}>{authError || error}</p>
+          <button type="button" onClick={handleBackToDashboard} style={styles.backButton}>
+            Return to home
           </button>
         </div>
       </div>
@@ -243,310 +204,160 @@ const HRDashboard = () => {
   }
 
   return (
-    <POSAuthWrapper
-      requiredRoles={['owner', 'manager', 'admin', 'hr_admin']}
-      requireBusiness={true}
-      componentName="HRDashboard"
-    >
+    <POSAuthWrapper requiredRoles={['owner', 'manager', 'admin', 'hr_admin']} requireBusiness componentName="HRDashboard">
       <SecurityWrapper>
         <div style={styles.container}>
-          {/* Add keyframes for spinner animation */}
           <style>
             {`
-              @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-              }
+            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
             `}
           </style>
 
-          {/* Header */}
-          <div style={styles.header}>
-            <h1 style={styles.mainTitle}>
-              HR & Compliance Dashboard
-            </h1>
-            <p style={styles.subtitle}>
-              {businessData?.business_name || 'Business'} • {userRole}
-            </p>
+          <TavariModuleHeader
+            title="Tavari HR"
+            description="Open Employee Management, Training, or HR Communications from the left navigation, or use the shortcuts below."
+            actionLabel="Employee Management"
+            onAction={() => navigate('/dashboard/hr/employee-management')}
+          />
+
+          <div style={styles.hubRow}>
+            <div
+              style={styles.hubCard}
+              onClick={() => navigate('/dashboard/hr/employee-management')}
+              onKeyDown={(e) => e.key === 'Enter' && navigate('/dashboard/hr/employee-management')}
+              role="button"
+              tabIndex={0}
+            >
+              <h3 style={styles.hubTitle}>Employee Management</h3>
+              <p style={styles.hubDesc}>Employees, contracts, documents, discipline, and policy configuration for roles and benefits.</p>
+            </div>
+            <div
+              style={styles.hubCard}
+              onClick={() => navigate('/dashboard/hr/training')}
+              onKeyDown={(e) => e.key === 'Enter' && navigate('/dashboard/hr/training')}
+              role="button"
+              tabIndex={0}
+            >
+              <h3 style={styles.hubTitle}>Training</h3>
+              <p style={styles.hubDesc}>Onboarding, milestones, orientation, policies, and training.</p>
+            </div>
+            <div
+              style={styles.hubCard}
+              onClick={() => navigate('/dashboard/hr/communications')}
+              onKeyDown={(e) => e.key === 'Enter' && navigate('/dashboard/hr/communications')}
+              role="button"
+              tabIndex={0}
+            >
+              <h3 style={styles.hubTitle}>HR Communications</h3>
+              <p style={styles.hubDesc}>Acknowledgements, incidents, staff updates, and communication settings.</p>
+            </div>
           </div>
 
-          {/* Stats Grid */}
           {dashboardStats && (
             <div style={styles.statsGrid}>
-              <div style={styles.statCard}>
-                <h3 style={styles.statTitle}>
-                  Total Employees
-                </h3>
-                <p style={{ ...styles.statValue, color: '#14B8A6' }}>
-                  {dashboardStats.total_employees}
-                </p>
+              <div
+                style={{ ...styles.statCard, ...styles.clickableCard }}
+                onClick={() => handleStatCardClick('total')}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 6px 0 rgba(0, 0, 0, 0.15)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 1px 3px 0 rgba(0, 0, 0, 0.1)';
+                }}
+              >
+                <h3 style={styles.statTitle}>Total Employees</h3>
+                <p style={{ ...styles.statValue, color: '#14B8A6' }}>{dashboardStats.total_employees}</p>
               </div>
-              
-              <div style={styles.statCard}>
-                <h3 style={styles.statTitle}>
-                  On Probation
-                </h3>
-                <p style={{ ...styles.statValue, color: '#f59e0b' }}>
-                  {dashboardStats.employees_on_probation}
-                </p>
+              <div
+                style={{ ...styles.statCard, ...styles.clickableCard }}
+                onClick={() => handleStatCardClick('probation')}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 6px 0 rgba(0, 0, 0, 0.15)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 1px 3px 0 rgba(0, 0, 0, 0.1)';
+                }}
+              >
+                <h3 style={styles.statTitle}>On Probation</h3>
+                <p style={{ ...styles.statValue, color: '#f59e0b' }}>{dashboardStats.employees_on_probation}</p>
               </div>
-              
-              <div style={styles.statCard}>
-                <h3 style={styles.statTitle}>
-                  New Hires (30 days)
-                </h3>
-                <p style={{ ...styles.statValue, color: '#3b82f6' }}>
-                  {dashboardStats.pending_onboarding}
-                </p>
+              <div
+                style={{ ...styles.statCard, ...styles.clickableCard }}
+                onClick={() => handleStatCardClick('newHires')}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 6px 0 rgba(0, 0, 0, 0.15)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 1px 3px 0 rgba(0, 0, 0, 0.1)';
+                }}
+              >
+                <h3 style={styles.statTitle}>New Hires (30 days)</h3>
+                <p style={{ ...styles.statValue, color: '#3b82f6' }}>{dashboardStats.pending_onboarding}</p>
               </div>
-              
-              <div style={styles.statCard}>
-                <h3 style={styles.statTitle}>
-                  Policy Items
-                </h3>
-                <p style={{ ...styles.statValue, color: '#ef4444' }}>
-                  {dashboardStats.overdue_policies}
-                </p>
+              <div
+                style={{ ...styles.statCard, ...styles.clickableCard }}
+                onClick={() => handleStatCardClick('policies')}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 6px 0 rgba(0, 0, 0, 0.15)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 1px 3px 0 rgba(0, 0, 0, 0.1)';
+                }}
+              >
+                <h3 style={styles.statTitle}>Policy Items</h3>
+                <p style={{ ...styles.statValue, color: '#ef4444' }}>{dashboardStats.overdue_policies}</p>
               </div>
-              
-              <div style={styles.statCard}>
-                <h3 style={styles.statTitle}>
-                  Contract Items
-                </h3>
-                <p style={{ ...styles.statValue, color: '#eab308' }}>
-                  {dashboardStats.expiring_contracts}
-                </p>
+              <div
+                style={{ ...styles.statCard, ...styles.clickableCard }}
+                onClick={() => handleStatCardClick('contracts')}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 6px 0 rgba(0, 0, 0, 0.15)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 1px 3px 0 rgba(0, 0, 0, 0.1)';
+                }}
+              >
+                <h3 style={styles.statTitle}>Contract Items</h3>
+                <p style={{ ...styles.statValue, color: '#eab308' }}>{dashboardStats.expiring_contracts}</p>
               </div>
-              
-              <div style={styles.statCard}>
-                <h3 style={styles.statTitle}>
-                  Document Items
-                </h3>
-                <p style={{ ...styles.statValue, color: '#8b5cf6' }}>
-                  {dashboardStats.expiring_documents}
-                </p>
+              <div
+                style={{ ...styles.statCard, ...styles.clickableCard }}
+                onClick={() => handleStatCardClick('documents')}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                  e.currentTarget.style.boxShadow = '0 4px 6px 0 rgba(0, 0, 0, 0.15)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 1px 3px 0 rgba(0, 0, 0, 0.1)';
+                }}
+              >
+                <h3 style={styles.statTitle}>Document Items</h3>
+                <p style={{ ...styles.statValue, color: '#8b5cf6' }}>{dashboardStats.expiring_documents}</p>
               </div>
             </div>
           )}
 
-          {/* Quick Actions - Permission Gated */}
-          <div style={styles.actionsGrid}>
-            <PermissionGate permissions={['hr.employees.view']} fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/employees')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  Employee Profiles
-                </h4>
-                <p style={styles.actionDescription}>
-                  Manage employee information
-                </p>
-              </button>
-            </PermissionGate>
-            
-            <PermissionGate permissions={['hr.onboarding.view']} fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/onboarding')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  Onboarding Center
-                </h4>
-                <p style={styles.actionDescription}>
-                  Track new hire progress
-                </p>
-              </button>
-            </PermissionGate>
-
-            <PermissionGate permissions={['hr.onboarding.view']} fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/milestones')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  Milestone Tracking
-                </h4>
-                <p style={styles.actionDescription}>
-                  Track onboarding milestones and celebrate achievements
-                </p>
-              </button>
-            </PermissionGate>
-
-            <PermissionGate permissions={['hr.onboarding.view']} fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/orientation')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  Orientation Calendar
-                </h4>
-                <p style={styles.actionDescription}>
-                  Schedule and track orientations
-                </p>
-              </button>
-            </PermissionGate>
-            
-            <PermissionGate permissions={['hr.contracts.view']} fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/contracts')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  Contracts
-                </h4>
-                <p style={styles.actionDescription}>
-                  Manage employment contracts
-                </p>
-              </button>
-            </PermissionGate>
-            
-            <PermissionGate permissions={['hr.policies.view']} fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/policies')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  Policy Center
-                </h4>
-                <p style={styles.actionDescription}>
-                  Policies & acknowledgments
-                </p>
-              </button>
-            </PermissionGate>
-
-            <PermissionGate permissions={['hr.writeups.view']} fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/writeups')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  Disciplinary Actions
-                </h4>
-                <p style={styles.actionDescription}>
-                  Manage writeups & warnings
-                </p>
-              </button>
-            </PermissionGate>
-
-            <PermissionGate permissions={['hr.documents.view']} fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/document-expiry')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  Document Expiry Tracker
-                </h4>
-                <p style={styles.actionDescription}>
-                  Monitor certifications and wage premiums
-                </p>
-              </button>
-            </PermissionGate>
-
-            <PermissionGate permissions={['hr.settings.manage']} requireOwner fallback={null}>
-              <button 
-                onClick={() => handleNavigation('/dashboard/hr/settings')}
-                style={styles.actionButton}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f0fdfa';
-                  e.currentTarget.style.transform = 'translateY(-2px)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px 0 rgba(20, 184, 166, 0.15)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.backgroundColor = 'white';
-                  e.currentTarget.style.transform = 'translateY(0px)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-              >
-                <h4 style={styles.actionTitle}>
-                  HR Settings
-                </h4>
-                <p style={styles.actionDescription}>
-                  Configure HR preferences
-                </p>
-              </button>
-            </PermissionGate>
-          </div>
+          {modalOpen && (
+            <EmployeeListModal
+              isOpen={!!modalOpen}
+              onClose={() => setModalOpen(null)}
+              title={
+                modalOpen === 'total' ? 'Total Employees' : modalOpen === 'probation' ? 'Employees On Probation' : 'New Hires (30 days)'
+              }
+              employees={modalOpen === 'total' ? employeeLists.total : modalOpen === 'probation' ? employeeLists.onProbation : employeeLists.newHires}
+            />
+          )}
         </div>
       </SecurityWrapper>
     </POSAuthWrapper>
@@ -557,11 +368,50 @@ const styles = {
   container: {
     minHeight: '100vh',
     backgroundColor: '#f9fafb',
-    paddingTop: '60px',
+    paddingTop: '80px',
     paddingLeft: '20px',
     paddingRight: '20px',
-    paddingBottom: '20px'
+    paddingBottom: '20px',
   },
+  hubRow: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+    gap: '12px',
+    marginBottom: '20px',
+  },
+  hubCard: {
+    backgroundColor: 'white',
+    borderRadius: '12px',
+    padding: '20px',
+    border: '1px solid #e5e7eb',
+    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
+    cursor: 'pointer',
+    transition: 'box-shadow 0.2s ease, transform 0.2s ease',
+  },
+  hubTitle: {
+    fontSize: '16px',
+    fontWeight: '600',
+    color: '#0f766e',
+    margin: '0 0 8px 0',
+  },
+  hubDesc: { fontSize: '24px', color: '#6b7280', margin: 0, lineHeight: 1.4 },
+  statsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(6, minmax(0, 1fr))',
+    gap: '12px',
+    marginBottom: '20px',
+    overflowX: 'auto',
+  },
+  statCard: {
+    backgroundColor: 'white',
+    padding: '16px',
+    borderRadius: '8px',
+    border: '1px solid #e5e7eb',
+    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
+  },
+  clickableCard: { cursor: 'pointer', transition: 'all 0.2s ease' },
+  statTitle: { fontSize: '16px', fontWeight: '600', color: '#111827', margin: '0 0 6px 0' },
+  statValue: { fontSize: '16px', fontWeight: 'bold', margin: 0 },
   loadingContainer: {
     display: 'flex',
     alignItems: 'center',
@@ -569,9 +419,6 @@ const styles = {
     minHeight: '100vh',
     backgroundColor: '#f9fafb',
     paddingTop: '60px',
-    paddingLeft: '20px',
-    paddingRight: '20px',
-    paddingBottom: '20px'
   },
   spinner: {
     width: '32px',
@@ -580,14 +427,9 @@ const styles = {
     borderTop: '3px solid transparent',
     borderRadius: '50%',
     animation: 'spin 1s linear infinite',
-    margin: '0 auto 8px auto'
+    margin: '0 auto 8px auto',
   },
-  loadingText: {
-    margin: 0,
-    color: '#6b7280',
-    fontSize: '16px',
-    fontWeight: '500'
-  },
+  loadingText: { margin: 0, color: '#6b7280', fontSize: '32px' },
   errorContainer: {
     display: 'flex',
     alignItems: 'center',
@@ -595,108 +437,129 @@ const styles = {
     minHeight: '100vh',
     backgroundColor: '#f9fafb',
     paddingTop: '60px',
-    paddingLeft: '20px',
-    paddingRight: '20px',
-    paddingBottom: '20px'
   },
-  errorContent: {
-    textAlign: 'center',
-    maxWidth: '400px'
-  },
-  errorTitle: {
-    fontSize: '24px',
-    fontWeight: '600',
-    color: '#111827',
-    margin: '0 0 8px 0'
-  },
-  errorText: {
-    color: '#6b7280',
-    marginBottom: '20px',
-    fontSize: '16px',
-    lineHeight: '1.5',
-    margin: '0 0 20px 0'
-  },
+  errorContent: { textAlign: 'center', maxWidth: '400px' },
+  errorTitle: { fontSize: '16px', fontWeight: '600', color: '#111827', margin: '0 0 8px 0' },
+  errorText: { color: '#6b7280', fontSize: '18px' },
   backButton: {
     padding: '12px 24px',
     backgroundColor: '#14B8A6',
     color: 'white',
     border: 'none',
     borderRadius: '8px',
-    fontSize: '16px',
-    fontWeight: '600',
-    cursor: 'pointer',
-    transition: 'background-color 0.2s ease',
-    outline: 'none'
-  },
-  header: {
-    marginBottom: '30px'
-  },
-  mainTitle: {
-    fontSize: '32px',
-    fontWeight: 'bold',
-    color: '#111827',
-    margin: '0 0 8px 0'
-  },
-  subtitle: {
-    color: '#6b7280',
-    fontSize: '16px',
-    margin: 0
-  },
-  statsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-    gap: '20px',
-    marginBottom: '40px'
-  },
-  statCard: {
-    backgroundColor: 'white',
-    padding: '24px',
-    borderRadius: '12px',
-    border: '1px solid #e5e7eb',
-    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
-  },
-  statTitle: {
-    fontSize: '18px',
-    fontWeight: '600',
-    color: '#111827',
-    margin: '0 0 8px 0'
-  },
-  statValue: {
     fontSize: '28px',
-    fontWeight: 'bold',
-    margin: 0
-  },
-  actionsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-    gap: '20px'
-  },
-  actionButton: {
-    backgroundColor: 'white',
-    border: '2px solid #14B8A6',
-    padding: '24px',
-    borderRadius: '12px',
+    fontWeight: '600',
     cursor: 'pointer',
-    transition: 'all 0.2s ease',
-    textAlign: 'left',
-    outline: 'none',
-    minHeight: '120px',
+  },
+};
+
+const EmployeeListModal = ({ isOpen, onClose, title, employees = [] }) => {
+  if (!isOpen) return null;
+  return (
+    <div style={modalStyles.overlay} onClick={onClose} role="presentation">
+      <div style={modalStyles.modal} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+        <div style={modalStyles.header}>
+          <h2 style={modalStyles.title}>{title}</h2>
+          <button type="button" style={modalStyles.closeButton} onClick={onClose} aria-label="Close">
+            <X size={20} />
+          </button>
+        </div>
+        <div style={modalStyles.content}>
+          {employees.length === 0 ? (
+            <div style={modalStyles.emptyState}>
+              <p>No employees found</p>
+            </div>
+          ) : (
+            <div style={modalStyles.employeeList}>
+              {employees.map((employee) => (
+                <div key={employee.id} style={modalStyles.employeeItem}>
+                  <div style={modalStyles.employeeInfo}>
+                    <div style={modalStyles.employeeName}>
+                      {employee.first_name || ''} {employee.last_name || ''}
+                      {employee.employee_number && ` (#${employee.employee_number})`}
+                    </div>
+                    {employee.email && <div style={modalStyles.employeeEmail}>{employee.email}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={modalStyles.footer}>
+          <button type="button" style={modalStyles.closeButtonFooter} onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const modalStyles = {
+  overlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+  modal: {
+    backgroundColor: 'white',
+    borderRadius: '12px',
+    width: '90%',
+    maxWidth: '600px',
+    maxHeight: '80vh',
     display: 'flex',
     flexDirection: 'column',
-    justifyContent: 'center'
+    boxShadow: '0 10px 25px rgba(0, 0, 0, 0.2)',
   },
-  actionTitle: {
-    fontWeight: '600',
-    color: '#374151',
-    margin: '0 0 8px 0',
-    fontSize: '18px'
+  header: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '24px',
+    borderBottom: '1px solid #e5e7eb',
   },
-  actionDescription: {
-    fontSize: '14px',
+  title: { fontSize: '18px', fontWeight: 'bold', color: '#111827', margin: 0 },
+  closeButton: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '4px',
+    borderRadius: '4px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     color: '#6b7280',
-    margin: 0,
-    lineHeight: '1.4'
-  }
+  },
+  content: { padding: '24px', overflowY: 'auto', flex: 1 },
+  emptyState: { textAlign: 'center', padding: '40px', color: '#6b7280' },
+  employeeList: { display: 'flex', flexDirection: 'column', gap: '8px' },
+  employeeItem: {
+    padding: '16px',
+    backgroundColor: '#f9fafb',
+    borderRadius: '8px',
+    border: '1px solid #e5e7eb',
+  },
+  employeeInfo: { display: 'flex', flexDirection: 'column', gap: '4px' },
+  employeeName: { fontSize: '14px', fontWeight: '600', color: '#111827' },
+  employeeEmail: { fontSize: '11px', color: '#6b7280' },
+  footer: { padding: '16px 24px', borderTop: '1px solid #e5e7eb', display: 'flex', justifyContent: 'flex-end' },
+  closeButtonFooter: {
+    padding: '10px 24px',
+    backgroundColor: '#14B8A6',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
 };
 
 export default HRDashboard;

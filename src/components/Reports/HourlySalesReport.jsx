@@ -5,6 +5,15 @@ import { usePOSAuth } from '../../hooks/usePOSAuth';
 import TavariCheckbox from '../UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
 import { logAction } from '../../helpers/posAudit';
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis
+} from 'recharts';
 
 const HourlySalesReport = ({ 
   data, 
@@ -185,6 +194,15 @@ const HourlySalesReport = ({
   };
 
   const formatCurrency = (amount) => `$${(amount || 0).toFixed(2)}`;
+
+  const chartData = hourlyData.map((hour) => ({
+    ...hour,
+    shortHour:
+      hour.hour === 0 ? '12A' :
+      hour.hour < 12 ? `${hour.hour}A` :
+      hour.hour === 12 ? '12P' :
+      `${hour.hour - 12}P`
+  }));
 
   const getPeakHours = () => {
     if (hourlyData.length === 0) return [];
@@ -410,45 +428,80 @@ This report shows sales activity broken down by hour of day for business plannin
       flexWrap: 'wrap'
     },
     
-    hourlyGrid: {
-      display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-      gap: TavariStyles.spacing.sm,
+    chartSection: {
       marginBottom: TavariStyles.spacing.lg,
       width: '100%'
     },
-    
-    hourCard: {
+
+    chartContainer: {
+      width: '100%',
+      height: 360,
       padding: TavariStyles.spacing.md,
       borderRadius: TavariStyles.borderRadius.md,
       border: `1px solid ${TavariStyles.colors.gray200}`,
-      transition: TavariStyles.transitions.normal,
-      minHeight: '100px',
-      display: 'flex',
-      flexDirection: 'column',
-      justifyContent: 'center'
+      backgroundColor: TavariStyles.colors.gray50
+    },
+
+    chartLegend: {
+      marginTop: TavariStyles.spacing.sm,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray600,
+      textAlign: 'center'
+    },
+
+    chartTooltip: {
+      backgroundColor: TavariStyles.colors.white,
+      border: `1px solid ${TavariStyles.colors.gray200}`,
+      borderRadius: TavariStyles.borderRadius.md,
+      boxShadow: TavariStyles.shadows.md,
+      padding: TavariStyles.spacing.sm,
+      minWidth: '180px'
+    },
+
+    tooltipTitle: {
+      fontSize: TavariStyles.typography.fontSize.sm,
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray900,
+      marginBottom: TavariStyles.spacing.xs
+    },
+
+    tooltipRow: {
+      fontSize: TavariStyles.typography.fontSize.xs,
+      color: TavariStyles.colors.gray700,
+      marginBottom: 4
+    },
+
+    chartNotes: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+      gap: TavariStyles.spacing.sm,
+      marginTop: TavariStyles.spacing.md,
+      width: '100%'
     },
     
-    hourHeader: {
+    chartNoteCard: {
+      padding: TavariStyles.spacing.md,
+      borderRadius: TavariStyles.borderRadius.md,
+      border: `1px solid ${TavariStyles.colors.gray200}`,
+      backgroundColor: TavariStyles.colors.white
+    },
+    
+    chartNoteTitle: {
       fontSize: TavariStyles.typography.fontSize.sm,
       fontWeight: TavariStyles.typography.fontWeight.bold,
       color: TavariStyles.colors.gray700,
-      marginBottom: TavariStyles.spacing.xs,
-      textAlign: 'center'
-    },
-    
-    hourSales: {
-      fontSize: TavariStyles.typography.fontSize.lg,
-      fontWeight: TavariStyles.typography.fontWeight.bold,
-      color: TavariStyles.colors.primary,
-      textAlign: 'center',
       marginBottom: TavariStyles.spacing.xs
     },
     
-    hourDetails: {
+    chartNoteValue: {
+      fontSize: TavariStyles.typography.fontSize.md,
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.primary
+    },
+    
+    chartNoteDetail: {
       fontSize: TavariStyles.typography.fontSize.xs,
       color: TavariStyles.colors.gray600,
-      textAlign: 'center',
       lineHeight: TavariStyles.typography.lineHeight.tight
     },
     
@@ -543,6 +596,33 @@ This report shows sales activity broken down by hour of day for business plannin
   const peakHours = getPeakHours();
   const hoursWithSales = hourlyData.filter(h => h.sales > 0).length;
 
+  const CustomTooltip = ({ active, payload, label }) => {
+    if (!active || !payload || !payload.length) {
+      return null;
+    }
+
+    const point = payload[0]?.payload;
+    if (!point) return null;
+
+    return (
+      <div style={styles.chartTooltip}>
+        <div style={styles.tooltipTitle}>{label}</div>
+        <div style={styles.tooltipRow}>Sales: {formatCurrency(point.netSales)}</div>
+        {showTransactionCount && (
+          <div style={styles.tooltipRow}>Transactions: {point.transactionCount}</div>
+        )}
+        {showAverageTransaction && point.transactionCount > 0 && (
+          <div style={styles.tooltipRow}>Avg Transaction: {formatCurrency(point.averageTransaction)}</div>
+        )}
+        {point.refunds > 0 && (
+          <div style={{ ...styles.tooltipRow, color: TavariStyles.colors.danger }}>
+            Refunds: {formatCurrency(point.refunds)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div style={styles.container}>
       <div style={styles.header}>
@@ -604,32 +684,63 @@ This report shows sales activity broken down by hour of day for business plannin
         </div>
       ) : (
         <>
-          <div style={styles.hourlyGrid}>
-            {hourlyData.map((hour, index) => (
-              <div 
-                key={index} 
-                style={{
-                  ...styles.hourCard,
-                  backgroundColor: getHourColor(hour.hour, hour.netSales)
-                }}
-              >
-                <div style={styles.hourHeader}>{hour.displayHour}</div>
-                <div style={styles.hourSales}>{formatCurrency(hour.netSales)}</div>
-                <div style={styles.hourDetails}>
-                  {showTransactionCount && (
-                    <div>{hour.transactionCount} transactions</div>
-                  )}
-                  {showAverageTransaction && hour.transactionCount > 0 && (
-                    <div>Avg: {formatCurrency(hour.averageTransaction)}</div>
-                  )}
-                  {hour.refunds > 0 && (
-                    <div style={{ color: TavariStyles.colors.danger }}>
-                      Refunds: {formatCurrency(hour.refunds)}
-                    </div>
-                  )}
+          <div style={styles.chartSection}>
+            <div style={styles.chartContainer}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 12, right: 20, left: 8, bottom: 12 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={TavariStyles.colors.gray200} />
+                  <XAxis
+                    dataKey="shortHour"
+                    interval={0}
+                    tick={{ fontSize: 10, fill: TavariStyles.colors.gray600 }}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: TavariStyles.colors.gray600 }}
+                    tickFormatter={(value) => `$${Number(value || 0).toFixed(0)}`}
+                  />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Line
+                    type="monotone"
+                    dataKey="netSales"
+                    name="Sales"
+                    stroke={TavariStyles.colors.primary}
+                    strokeWidth={3}
+                    dot={{ r: 4, strokeWidth: 2, fill: TavariStyles.colors.white }}
+                    activeDot={{ r: 6, strokeWidth: 2 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={styles.chartLegend}>
+              24-hour sales trend. Hover over any point to see the sales amount for that hour.
+            </div>
+            <div style={styles.chartNotes}>
+              <div style={styles.chartNoteCard}>
+                <div style={styles.chartNoteTitle}>Peak Hour</div>
+                <div style={styles.chartNoteValue}>
+                  {peakHours.length > 0 ? formatHour(peakHours[0]) : 'None'}
+                </div>
+                <div style={styles.chartNoteDetail}>
+                  Highest-performing hour based on net sales.
                 </div>
               </div>
-            ))}
+              <div style={styles.chartNoteCard}>
+                <div style={styles.chartNoteTitle}>Hours With Sales</div>
+                <div style={styles.chartNoteValue}>{hoursWithSales} / 24</div>
+                <div style={styles.chartNoteDetail}>
+                  Hours that recorded at least one sale during the selected period.
+                </div>
+              </div>
+              <div style={styles.chartNoteCard}>
+                <div style={styles.chartNoteTitle}>Hourly Average</div>
+                <div style={styles.chartNoteValue}>
+                  {formatCurrency(hoursWithSales > 0 ? totalNet / hoursWithSales : 0)}
+                </div>
+                <div style={styles.chartNoteDetail}>
+                  Average net sales across the hours that had activity.
+                </div>
+              </div>
+            </div>
           </div>
 
           <div style={styles.summarySection}>

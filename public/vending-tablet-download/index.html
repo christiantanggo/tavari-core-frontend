@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#667eea" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <title>Tavari Vending — Tablet app</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 16px;
+      color: #f1f5f9;
+      background: linear-gradient(160deg, #0f172a 0%, #1e293b 45%, #334155 100%);
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+    .card {
+      width: 100%;
+      max-width: 520px;
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 20px;
+      padding: 2rem 1.75rem;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    }
+    .icon {
+      width: 72px;
+      height: 72px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      margin-bottom: 1.25rem;
+    }
+    h1 { margin: 0 0 0.75rem; font-size: 1.65rem; font-weight: 800; }
+    .lead { margin: 0 0 1rem; line-height: 1.55; color: #cbd5e1; }
+    .version {
+      display: inline-block;
+      margin-bottom: 1.25rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 999px;
+      background: rgba(102, 126, 234, 0.2);
+      color: #a5b4fc;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    a.dl {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.6rem;
+      width: 100%;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      font-size: 1.1rem;
+      font-weight: 700;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #667eea, #5a67d8);
+      color: #fff !important;
+      text-decoration: none;
+      box-shadow: 0 8px 24px rgba(102, 126, 234, 0.35);
+    }
+    a.dl:active { transform: scale(0.98); }
+    ol { margin: 0 0 1.25rem; padding-left: 1.25rem; color: #94a3b8; line-height: 1.6; }
+    ol li { margin-bottom: 0.5rem; }
+    .hint {
+      margin: 0 0 1rem;
+      padding: 0.65rem 0.9rem;
+      border-radius: 10px;
+      background: rgba(34, 197, 94, 0.12);
+      color: #86efac;
+      font-size: 0.9rem;
+    }
+    .link { color: #94a3b8; font-size: 0.9rem; word-break: break-all; }
+    .link a { color: #a5b4fc; }
+    .foot { margin-top: 1.25rem; font-size: 0.8rem; color: #64748b; }
+    .downloads { margin-bottom: 1.25rem; }
+    .download-status { color: #94a3b8; font-size: 0.95rem; margin: 0 0 1rem; }
+    .download-list { display: grid; gap: 0.75rem; margin-bottom: 1.25rem; }
+    .download-card {
+      display: block;
+      padding: 0.95rem 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.75);
+      color: #f8fafc !important;
+      text-decoration: none;
+    }
+    .download-card.latest {
+      border-color: rgba(102, 126, 234, 0.75);
+      background: linear-gradient(135deg, #667eea, #5a67d8);
+      box-shadow: 0 8px 24px rgba(102, 126, 234, 0.35);
+    }
+    .download-title { display: flex; justify-content: space-between; gap: 0.75rem; font-weight: 800; }
+    .download-meta { margin-top: 0.35rem; color: rgba(226, 232, 240, 0.85); font-size: 0.85rem; }
+    .badge {
+      flex: none;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.18);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="icon" aria-hidden="true">📱</div>
+      <h1>Tavari Vending — Tablet app</h1>
+      <p class="lead">
+        Install this app on the <strong>vending machine tablet</strong>. It shows the Tavari kiosk and
+        controls the machine over RS485 — <strong>no manufacturer app required</strong>.
+      </p>
+      <div class="version" id="versionBadge">Loading available APKs...</div>
+      <p class="hint" style="display:block; background: rgba(251, 191, 36, 0.15); color: #fcd34d;">
+        <strong>Updating from an older install?</strong> Go to Settings → Apps → <strong>Tavari Vending</strong> →
+        <strong>Uninstall</strong> first. Then install this APK. (Android blocks updates when the signing key changed.)
+      </p>
+      <div class="downloads" id="downloadArea">
+        <p class="download-status">Checking Supabase for uploaded APK builds...</p>
+      </div>
+      <ol>
+        <li>If <strong>Tavari Vending</strong> is already installed, <strong>uninstall it first</strong> (Settings → Apps).</li>
+        <li>Download the newest APK at the top. In Downloads, confirm the file is about <strong>2.5 MB</strong> (not a few KB — that means the download failed).</li>
+        <li>Tap the file to install (allow &quot;Install unknown apps&quot; for Chrome or Files if Android asks).</li>
+        <li>Open <strong>Tavari Vending</strong> and use <strong>Test vend</strong> to confirm the motor runs.</li>
+      </ol>
+      <p class="hint" id="androidHint" style="display:none;">
+        You&apos;re on Android — tap Download, then open the file from your Downloads folder.
+      </p>
+      <p class="link">
+        Kiosk preview:
+        <a href="https://www.tavarios.ca/v/NUQJTT?dispense=rs485">Open in browser</a>
+        (Chrome only — cannot dispense)
+      </p>
+      <p class="foot">Staff: configure devices in Tavari Dashboard → Tavari Vending.</p>
+    </div>
+  </div>
+  <script src="/vending-tablet-download/config.js"></script>
+  <script src="/vending-tablet-download/app.js"></script>
+</body>
+</html>

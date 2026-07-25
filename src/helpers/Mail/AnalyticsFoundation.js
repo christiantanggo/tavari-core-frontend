@@ -1,11 +1,40 @@
 // helpers/Mail/AnalyticsFoundation.js - Fixed Version
 import { supabase } from '../../supabaseClient';
+import { getBusinessRangeStartIso } from '../../utils/businessDateFormat';
 
 class AnalyticsFoundation {
   constructor() {
     this.events = [];
     this.experiments = new Map();
     this.performanceMetrics = new Map();
+  }
+
+  getContentTypeLabel(type) {
+    switch (String(type || '').toLowerCase()) {
+      case 'text':
+        return 'text sections';
+      case 'image':
+        return 'image sections';
+      case 'button':
+        return 'button sections';
+      case 'divider':
+        return 'divider sections';
+      case 'spacer':
+        return 'spacing sections';
+      default:
+        return 'content sections';
+    }
+  }
+
+  getStartDateForTimeframe(timeframe = '30d', businessTimezone = 'America/Toronto') {
+    if (timeframe === 'all') return null;
+
+    const days =
+      timeframe === '7d' ? 6 :
+      timeframe === '90d' ? 89 :
+      29;
+
+    return getBusinessRangeStartIso(days, businessTimezone);
   }
 
   // A/B Testing Foundation
@@ -287,6 +316,13 @@ class AnalyticsFoundation {
   // Campaign Performance Comparison
   async compareCampaignPerformance(campaignIds) {
     try {
+      if (!campaignIds || campaignIds.length === 0) {
+        return {
+          success: true,
+          comparison: []
+        };
+      }
+
       const { data: campaigns, error: campaignsError } = await supabase
         .from('mail_campaigns')
         .select(`
@@ -301,7 +337,13 @@ class AnalyticsFoundation {
 
       if (campaignsError) throw campaignsError;
 
-      // Get analytics data for all campaigns
+      const { data: statsRows, error: statsError } = await supabase
+        .from('mail_campaign_send_stats')
+        .select('*')
+        .in('campaign_id', campaignIds);
+
+      if (statsError) throw statsError;
+
       const { data: analytics, error: analyticsError } = await supabase
         .from('mail_content_analytics')
         .select('*')
@@ -310,19 +352,42 @@ class AnalyticsFoundation {
       if (analyticsError) throw analyticsError;
 
       const comparison = campaigns.map(campaign => {
+        const stats = (statsRows || []).find(row => row.campaign_id === campaign.id) || {};
         const campaignAnalytics = analytics.filter(a => a.campaign_id === campaign.id);
-        
-        const views = campaignAnalytics.filter(a => a.event_type === 'view').length;
-        const clicks = campaignAnalytics.filter(a => a.event_type === 'click').length;
+        const analyticsViews = campaignAnalytics.filter(
+          (a) => a.event_type === 'view' && a.block_id === 'email_open'
+        ).length;
+        const analyticsClicks = campaignAnalytics.filter(
+          (a) => a.event_type === 'click'
+        ).length;
+        const views = Math.max(Number(stats.opened_count || 0), analyticsViews);
+        const clicks = Math.max(Number(stats.clicked_count || 0), analyticsClicks);
         const conversions = campaignAnalytics.filter(a => a.event_type === 'conversion').length;
+        const deliveries = Math.max(
+          Number(stats.delivered_count || 0),
+          Number(stats.sent_count || 0),
+          Number(stats.total_sends || 0),
+          Number(campaign.emails_sent || 0),
+          Number(campaign.total_recipients || 0)
+        );
+        const computedOpenRate = deliveries > 0 ? (views / deliveries) * 100 : 0;
+        const computedClickRate = deliveries > 0 ? (clicks / deliveries) * 100 : 0;
+        const computedDeliveryRate = deliveries > 0 ? 100 : Number(stats.delivery_rate || 0);
 
         return {
           ...campaign,
+          emails_sent: Math.max(Number(campaign.emails_sent || 0), Number(stats.sent_count || 0), Number(stats.total_sends || 0)),
           performance: {
             views,
             clicks,
             conversions,
-            view_rate: campaign.emails_sent > 0 ? (views / campaign.emails_sent) * 100 : 0,
+            deliveries,
+            bounces: Number(stats.bounced_count || 0),
+            unsubscribes: Number(stats.unsubscribed_count || 0),
+            view_rate: Math.max(Number(stats.open_rate || 0), computedOpenRate),
+            click_rate: Math.max(Number(stats.click_rate || 0), computedClickRate),
+            delivery_rate: Math.max(Number(stats.delivery_rate || 0), computedDeliveryRate),
+            bounce_rate: Number(stats.bounce_rate || 0),
             click_through_rate: views > 0 ? (clicks / views) * 100 : 0,
             conversion_rate: views > 0 ? (conversions / views) * 100 : 0
           }
@@ -343,12 +408,11 @@ class AnalyticsFoundation {
   }
 
   // Best Performing Content Analysis
-  async getBestPerformingContent(businessId, timeframe = '30d') {
+  async getBestPerformingContent(businessId, timeframe = '30d', businessTimezone = 'America/Toronto') {
     try {
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - (timeframe === '30d' ? 30 : 7));
+      const startDate = this.getStartDateForTimeframe(timeframe, businessTimezone);
 
-      const { data: campaigns, error: campaignsError } = await supabase
+      let campaignQuery = supabase
         .from('mail_campaigns')
         .select(`
           id,
@@ -356,15 +420,35 @@ class AnalyticsFoundation {
           content_json,
           emails_sent
         `)
-        .eq('business_id', businessId)
-        .gte('created_at', startDate.toISOString());
+        .eq('business_id', businessId);
+
+      if (startDate) {
+        campaignQuery = campaignQuery.gte('created_at', startDate);
+      }
+
+      const { data: campaigns, error: campaignsError } = await campaignQuery;
 
       if (campaignsError) throw campaignsError;
 
-      const { data: analytics, error: analyticsError } = await supabase
+      if (!campaigns || campaigns.length === 0) {
+        return {
+          success: true,
+          top_content: [],
+          analysis_period: timeframe,
+          total_campaigns: 0
+        };
+      }
+
+      let analyticsQuery = supabase
         .from('mail_content_analytics')
         .select('*')
-        .gte('created_at', startDate.toISOString());
+        .in('campaign_id', (campaigns || []).map(c => c.id));
+
+      if (startDate) {
+        analyticsQuery = analyticsQuery.gte('created_at', startDate);
+      }
+
+      const { data: analytics, error: analyticsError } = await analyticsQuery;
 
       if (analyticsError) throw analyticsError;
 
@@ -472,7 +556,7 @@ class AnalyticsFoundation {
     if (bestPerforming.length > 0) {
       recommendations.push({
         type: 'best_practice',
-        suggestion: `Your ${bestPerforming[0].type} blocks perform best. Consider using more of this content type.`,
+        suggestion: `Your ${this.getContentTypeLabel(bestPerforming[0].type)} perform best. Consider using more of that content style.`,
         impact: 'high'
       });
     }
@@ -481,10 +565,9 @@ class AnalyticsFoundation {
   }
 
   // Analytics Dashboard Data
-  async getAnalyticsDashboardData(businessId, timeframe = '30d') {
+  async getAnalyticsDashboardData(businessId, timeframe = '30d', businessTimezone = 'America/Toronto') {
     try {
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - (timeframe === '30d' ? 30 : 7));
+      const startDate = this.getStartDateForTimeframe(timeframe, businessTimezone);
 
       // Get campaign performance
       const campaignPerformance = await this.compareCampaignPerformance(
@@ -492,7 +575,7 @@ class AnalyticsFoundation {
       );
 
       // Get best content
-      const bestContent = await this.getBestPerformingContent(businessId, timeframe);
+      const bestContent = await this.getBestPerformingContent(businessId, timeframe, businessTimezone);
 
       // Generate recommendations
       const recommendations = bestContent.success ? 
@@ -519,11 +602,16 @@ class AnalyticsFoundation {
 
   async getCampaignIds(businessId, startDate) {
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('mail_campaigns')
         .select('id')
-        .eq('business_id', businessId)
-        .gte('created_at', startDate.toISOString());
+        .eq('business_id', businessId);
+
+      if (startDate) {
+        query = query.gte('created_at', startDate);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
       return data.map(c => c.id);

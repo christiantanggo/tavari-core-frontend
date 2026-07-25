@@ -3,6 +3,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { logAction } from '../../helpers/posAudit';
+import { scheduleCustomerDisplayMirrorPush } from '../../services/customerDisplayMirrorSync';
+import {
+  cancelCustomerDisplayPaymentExpiry,
+  clearCustomerDisplayPaymentLocalAndMirror,
+  scheduleCustomerDisplayPaymentAutoClear
+} from '../../services/customerDisplayLocalState';
 
 // Foundation Components
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
@@ -21,12 +27,26 @@ import PaymentSummary from '../../components/POS/POSPaymentScreenComponents/Paym
 import PaymentMethods from '../../components/POS/POSPaymentScreenComponents/PaymentMethods';
 import PaymentAmountInput from '../../components/POS/POSPaymentScreenComponents/PaymentAmountInput';
 import TipControls from '../../components/POS/POSPaymentScreenComponents/TipControls';
+import DiscountControls from '../../components/POS/POSPaymentScreenComponents/DiscountControls';
 import ManagerOverrideModal from '../../components/POS/POSPaymentScreenComponents/ManagerOverrideModal';
 import LoyaltyDisplay from '../../components/POS/POSPaymentScreenComponents/LoyaltyDisplay';
-import TaxBreakdown from '../../components/POS/POSPaymentScreenComponents/TaxBreakdown';
 import { useSaleProcessor } from '../../components/POS/POSPaymentScreenComponents/SaleProcessor';
 import HelcimCardReader from '../../components/POS/HelcimCardReader';
 import useHelcimPayment from '../../hooks/useHelcimPayment';
+import { resolveCurrentPosAttribution } from '../../utils/posSaleAttribution';
+import {
+  dollarsToLoyaltyPoints,
+  getSpendableDollarsInDollarsMode,
+  getSpendableDollarsInPointsMode,
+  isPointsLoyaltyMode,
+  splitLoyaltyRedemptionDollars
+} from '../../utils/posLoyaltyMoney';
+import { calculateTotalLoyaltyPointsToEarn } from '../../utils/loyaltyRewards';
+import { applySaleStockAdjustments } from '../../utils/posInventoryStock';
+import { persistRegisterLockAfterSale } from '../../utils/posRegisterLock';
+import { getSaleItemFoodCostFields } from '../../utils/posLineFoodCost';
+import { getPosLineSubtotal, getPosLineUnitPrice } from '../../utils/posLinePricing';
+import * as GiftCardService from '../../services/GiftCards/GiftCardService';
 
 const PaymentScreen = () => {
   const navigate = useNavigate();
@@ -52,7 +72,10 @@ const PaymentScreen = () => {
   // Permission checks - all users should be able to process transactions
   // Permissions match the PIN used to unlock the register (employee's permissions)
   const canProcessPayments = hasAnyPermission(['pos.sales.process', 'pos.sales.create', 'pos.register.operate']) || hasElevatedPrivileges();
-  const canApplyDiscounts = hasPermission('pos.discounts.apply') || hasElevatedPrivileges();
+  const canApplyDiscounts =
+    hasPermission('pos.discounts.apply') ||
+    hasPermission('pos.discounts.apply_any') ||
+    hasElevatedPrivileges();
   const canUseLoyalty = hasPermission('pos.loyalty.use') || hasElevatedPrivileges();
   const canProcessRefunds = hasPermission('pos.refunds.process') || hasElevatedPrivileges();
   const canOverridePayments = hasPermission('pos.override.manager') || isManager() || isOwner();
@@ -95,6 +118,51 @@ const PaymentScreen = () => {
 
   const receivedSaleData = location.state?.saleData;
 
+  const navigateBackFromPayment = () => {
+    const fromRegister = location.state?.from === 'register';
+    if (!fromRegister) {
+      navigate('/dashboard/pos/tabs');
+      return;
+    }
+
+    const source = saleData || receivedSaleData;
+    const items = source?.items || [];
+    const customer = source?.loyaltyCustomer || null;
+
+    navigate('/dashboard/pos/register', {
+      state: {
+        resumeCart: {
+          items,
+          customer,
+          loyaltyCandidates: customer?.id ? [customer] : [],
+        },
+      },
+    });
+  };
+
+  const clearPersistedRegisterCart = () => {
+    if (!auth.selectedBusinessId) return;
+    sessionStorage.removeItem(`pos_cart_${auth.selectedBusinessId}`);
+  };
+
+  const buildPosSaleNotes = (loyaltyRedeemed, data = saleData) => {
+    const parts = [];
+    if (loyaltyRedeemed > 0) {
+      parts.push(`Loyalty redemption: $${loyaltyRedeemed.toFixed(2)}`);
+    }
+    const discountAmt = Number(data?.discount_amount) || 0;
+    if (discountAmt > 0) {
+      const label = data?.discount_name || 'Discount';
+      parts.push(`${label}: −$${discountAmt.toFixed(2)}`);
+    }
+    if (data?.indian_status_gst_only && (data?.indian_status_certificate_number || '').trim()) {
+      parts.push(
+        `Indian Status (GST only) #${(data.indian_status_certificate_number || '').trim()}`
+      );
+    }
+    return parts.length ? parts.join(' | ') : null;
+  };
+
   // Keep a live reference so async finalization never sees stale `payments`.
   useEffect(() => {
     paymentsRef.current = payments || [];
@@ -102,12 +170,18 @@ const PaymentScreen = () => {
 
   // Sale processor utilities
   const saleProcessor = useSaleProcessor(auth, taxCalc, businessSettings);
+  const saleAttribution = resolveCurrentPosAttribution({
+    authUser: auth.authUser,
+    activePOSUser: auth.activePOSUser,
+    businessId: auth.selectedBusinessId
+  });
+  const effectiveOperatorUserId = saleAttribution.operatorUserId || auth.authUser?.id || null;
 
   // Check permissions on mount
   useEffect(() => {
     if (!permissionsLoading && !canProcessPayments) {
       toast.error('You do not have permission to process payments');
-      navigate(location.state?.from === 'register' ? '/dashboard/pos/register' : '/dashboard/pos/tabs');
+      navigateBackFromPayment();
     }
   }, [permissionsLoading, canProcessPayments, navigate, location.state?.from]);
 
@@ -148,7 +222,11 @@ const PaymentScreen = () => {
 
     const draftSaleRecord = {
       business_id: auth.selectedBusinessId,
-      user_id: auth.authUser.id,
+      user_id: effectiveOperatorUserId,
+      login_user_id: saleAttribution.loginUserId,
+      operator_user_id: effectiveOperatorUserId,
+      login_user_name: saleAttribution.loginUserName,
+      operator_user_name: saleAttribution.operatorUserName,
       customer_id: saleData?.loyaltyCustomer?.id || null,
       loyalty_customer_id: saleData?.loyaltyCustomer?.id || null,
       customer_name: saleData?.loyaltyCustomer?.customer_name || null,
@@ -163,7 +241,9 @@ const PaymentScreen = () => {
       payment_status: 'unpaid',
       payment_method: 'helcim_terminal',
       sale_number: receiptNumber,
-      notes: totalLoyaltyRedeemed > 0 ? `Loyalty redemption: $${totalLoyaltyRedeemed.toFixed(2)}` : null,
+      notes: buildPosSaleNotes(totalLoyaltyRedeemed, saleData),
+      indian_status_gst_only: !!saleData?.indian_status_gst_only,
+      indian_status_certificate_number: saleData?.indian_status_certificate_number?.trim() || null,
       item_count: saleData?.items?.length || 0,
       created_at: nowIso,
       updated_at: nowIso
@@ -191,7 +271,7 @@ const PaymentScreen = () => {
     if (auth.isReady && receivedSaleData && !permissionsLoading) {
       if (!canProcessPayments) {
         toast.error('You do not have permission to process payments');
-        navigate(location.state?.from === 'register' ? '/dashboard/pos/register' : '/dashboard/pos/tabs');
+        navigateBackFromPayment();
         return;
       }
 
@@ -318,17 +398,20 @@ const PaymentScreen = () => {
 
       const usedTodayDollars = todayUsage?.amount_used || 0;
       
-      // Calculate daily limit in dollars
+      // Daily cap in dollars (align with cart: max_redemption_per_day is in “points” at rate/10)
+      const rate = Number(loyaltySettings.redemption_rate) || 10000;
       const dailyLimitPoints = loyaltySettings.max_redemption_per_day || 5000;
-      const dailyLimitDollars = dailyLimitPoints / loyaltySettings.redemption_rate;
+      const dailyLimitDollars = (dailyLimitPoints / rate) * 10;
       
       const remainingDailyLimitDollars = Math.max(0, dailyLimitDollars - usedTodayDollars);
       setDailyUsageRemaining(remainingDailyLimitDollars);
       
-      // Customer balance is in dollars - this is the source of truth
-      const customerBalanceDollars = Math.abs(saleData.loyaltyCustomer.balance || 0);
+      const acc = saleData.loyaltyCustomer;
+      const customerBalanceDollars = isPointsLoyaltyMode(loyaltySettings)
+        ? getSpendableDollarsInPointsMode(acc, loyaltySettings)
+        : getSpendableDollarsInDollarsMode(acc);
       
-      // Available credit is minimum of: customer balance, remaining daily limit, and sale amount
+      // Available credit is minimum of: customer pool, remaining daily limit, and sale amount
       const saleSubtotal = saleData?.subtotal || 0;
       const maxUsableDollars = Math.min(customerBalanceDollars, remainingDailyLimitDollars, saleSubtotal);
       
@@ -337,9 +420,9 @@ const PaymentScreen = () => {
       // Auto-apply logic
       let autoApplyAmount = 0;
       if (loyaltySettings.auto_apply === 'always' && maxUsableDollars > 0) {
-        // Check minimum redemption (in points, convert to dollars)
+        // Minimum redemption in dollars (points ÷ rate × 10, same as cart)
         const minRedemptionPoints = loyaltySettings.min_redemption || 5000;
-        const minRedemptionDollars = minRedemptionPoints / loyaltySettings.redemption_rate;
+        const minRedemptionDollars = (minRedemptionPoints / rate) * 10;
         
         if (maxUsableDollars >= minRedemptionDollars) {
           if (loyaltySettings.allow_partial_redemption) {
@@ -358,7 +441,12 @@ const PaymentScreen = () => {
       const earnRatePercent = loyaltySettings.earn_rate_percentage / 100;
       const taxableAmountForEarning = saleSubtotal - autoApplyAmount; // Earn on amount after loyalty redemption
       const dollarsToEarn = taxableAmountForEarning * earnRatePercent;
-      const pointsToEarn = Math.round(dollarsToEarn * loyaltySettings.redemption_rate);
+      const pointsToEarn = calculateTotalLoyaltyPointsToEarn({
+        subtotal: taxableAmountForEarning,
+        earnRatePercentage: loyaltySettings.earn_rate_percentage,
+        redemptionRate: rate,
+        cartItems: saleData?.items || [],
+      });
       
       setLoyaltyCreditsToEarn(dollarsToEarn);
       setLoyaltyPointsToEarn(pointsToEarn);
@@ -382,15 +470,64 @@ const PaymentScreen = () => {
   const saleSubtotal = saleData?.subtotal || 0;
   const loyaltyRedemption = autoLoyaltyApplied; // Use calculated auto-apply amount
   const discountAmount = saleData?.discount_amount || 0;
+
+  const handleDiscountChange = ({ amount, discount }) => {
+    if (!canApplyDiscounts) {
+      toast.error('You do not have permission to apply discounts');
+      return;
+    }
+    if (!saleData) return;
+
+    const subtotal = Number(saleData.subtotal) || 0;
+    const loyaltyRedemption = Number(autoLoyaltyApplied) || 0;
+    const maxDiscount = Math.max(0, subtotal - loyaltyRedemption);
+    const cappedDiscount = Math.round(Math.min(Math.max(0, Number(amount) || 0), maxDiscount) * 100) / 100;
+
+    setSaleData((prev) => ({
+      ...prev,
+      discount_amount: cappedDiscount,
+      discount_id: discount?.id || null,
+      discount_name: discount?.name || null,
+      discount_type: discount?.type || null,
+      discount_value: discount?.value ?? null
+    }));
+  };
   
   // Recalculate taxes when tip changes or when we have all required data
   const recalculateTaxes = () => {
-    if (!saleData?.items || taxCalc.loading || !taxCalc.taxCategories.length) {
+    if (!saleData?.items) {
       return {
         totalTax: saleData?.tax_amount || 0,
         aggregatedTaxes: saleData?.aggregated_taxes || {},
         aggregatedRebates: saleData?.aggregated_rebates || {},
-        itemTaxDetails: []
+        itemTaxDetails: saleData?.item_tax_details || []
+      };
+    }
+
+    if (saleData.indian_status_gst_only) {
+      const rate =
+        Number(saleData.indian_status_gst_rate) ||
+        Number(businessSettings?.indian_status_gst_rate) ||
+        0.05;
+      const label =
+        (saleData.indian_status_tax_label && String(saleData.indian_status_tax_label).trim()) ||
+        (businessSettings?.indian_status_tax_label && String(businessSettings.indian_status_tax_label).trim()) ||
+        'GST (Indian Status)';
+      return taxCalc.calculateTotalTax(
+        saleData.items,
+        discountAmount,
+        loyaltyRedemption,
+        saleSubtotal,
+        { enabled: true, gstRate: rate, taxLabel: label }
+      );
+    }
+
+    if (taxCalc.loading || !taxCalc.taxCategories.length) {
+      return {
+        totalTax: saleData?.tax_amount || 0,
+        aggregatedTaxes: saleData?.aggregated_taxes || {},
+        aggregatedRebates: saleData?.aggregated_rebates || {},
+        itemTaxDetails: saleData?.item_tax_details || []
       };
     }
 
@@ -412,16 +549,22 @@ const PaymentScreen = () => {
   const subtotalAfterReductions = taxableAmount;
   const finalTotal = subtotalAfterReductions + finalTaxAmount + tipAmount;
   
-  // Apply cash rounding for cash payments using standardized utility
-  const getDisplayTotal = () => {
-    const primaryPaymentMethod = payments.length > 0 ? payments[0].method : currentPayment.method;
-    return taxCalc.applyCashRounding(finalTotal, primaryPaymentMethod);
-  };
+  const cashRoundedTotal = taxCalc.applyCashRounding(finalTotal, 'cash');
+  const hasPayments = payments.length > 0;
+  const allAppliedPaymentsAreCash = payments.every((payment) => payment.method === 'cash');
+  const shouldUseCashRounding =
+    currentPayment.method === 'cash' &&
+    currentPayment.amount !== '' &&
+    (!hasPayments || allAppliedPaymentsAreCash);
 
-  const displayTotal = getDisplayTotal();
+  // Only round when the transaction is actually being paid as cash.
+  const displayTotal = shouldUseCashRounding ? cashRoundedTotal : finalTotal;
   const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
   const remainingBalance = displayTotal - totalPaid;
+  /** Unrounded balance owed — card/terminal/loyalty must never use penny-free cash totals. */
+  const exactRemainingBalance = Math.max(0, finalTotal - totalPaid);
   const changeOwed = Math.max(0, totalPaid - displayTotal);
+  const cashRemainingBalance = Math.max(0, cashRoundedTotal - totalPaid);
 
   // Update payment status on customer display
   const updatePaymentStatus = (status, additionalData = {}) => {
@@ -436,6 +579,7 @@ const PaymentScreen = () => {
           timestamp: Date.now()
         };
         localStorage.setItem('tavari_customer_display_payment', JSON.stringify(updatedPaymentData));
+        scheduleCustomerDisplayMirrorPush(auth.selectedBusinessId);
         console.log('💳 PaymentScreen: Payment status updated:', status, updatedPaymentData);
       } catch (error) {
         console.error('❌ PaymentScreen: Error updating payment status:', error);
@@ -450,6 +594,9 @@ const PaymentScreen = () => {
       toast.error('You do not have permission to process payments');
       return;
     }
+
+    let paymentAmount = amount;
+    let giftCardMeta = null;
 
     // Special handling for loyalty credit payments
     if (method === 'loyalty_credit') {
@@ -472,13 +619,53 @@ const PaymentScreen = () => {
       }
     }
 
+    // Gift card: scan/enter code → apply up to balance → remaining tender still needed
+    if (method === 'gift_card') {
+      const code = window.prompt('Scan or enter gift card code:');
+      if (!code || !String(code).trim()) {
+        setError('Gift card code is required');
+        return;
+      }
+      try {
+        const result = await GiftCardService.redeemGiftCard({
+          businessId: auth.selectedBusinessId,
+          codeOrPayload: code.trim(),
+          amountDollars: amount,
+          redeemerCustomerId: saleData?.loyaltyCustomer?.id || null,
+          processedByUserId: auth.authUser?.id || null,
+        });
+        paymentAmount = Number(result.appliedAmount) || 0;
+        if (paymentAmount <= 0) {
+          setError('No balance available on this gift card');
+          return;
+        }
+        giftCardMeta = {
+          gift_card_code: result.card?.code,
+          gift_card_id: result.card?.id,
+          attached_credit: result.attachedCredit || 0,
+        };
+        if (result.remainingDue > 0.009) {
+          toast(`Gift card applied $${paymentAmount.toFixed(2)}. Collect another tender for $${result.remainingDue.toFixed(2)}.`, { icon: '🎁' });
+        } else {
+          toast.success(`Gift card applied $${paymentAmount.toFixed(2)}`);
+        }
+        if (result.attachedCredit > 0) {
+          toast.success(`Residual $${result.attachedCredit.toFixed(2)} attached to customer gift card credit`);
+        }
+      } catch (gcErr) {
+        setError(gcErr.message || 'Gift card redeem failed');
+        toast.error(gcErr.message || 'Gift card redeem failed');
+        return;
+      }
+    }
+
     // Check for overpayment - allow small overpayments without manager approval
     // All employees should be able to process transactions without manager override
     // Allow $0.05 tolerance for exact payments to account for floating point precision issues
     const exactPaymentTolerance = 0.05;
     const smallOverpaymentThreshold = 0.05;
-    const isSignificantOverpayment = amount > (remainingBalance + smallOverpaymentThreshold);
-    const isWithinExactTolerance = Math.abs(amount - remainingBalance) <= exactPaymentTolerance;
+    const isSignificantOverpayment = paymentAmount > (remainingBalance + smallOverpaymentThreshold);
+    const isWithinExactTolerance = Math.abs(paymentAmount - remainingBalance) <= exactPaymentTolerance;
     
     // Cash payments can always go over (for giving change)
     // For non-cash payments, allow payments within $0.05 tolerance without any approval
@@ -488,7 +675,7 @@ const PaymentScreen = () => {
         // Always show the manager override modal when overpayment is detected
         // The modal will require a manager PIN to approve
         setShowManagerOverride(true);
-        setOverrideReason(`Overpayment detected: Payment amount ($${amount.toFixed(2)}) exceeds remaining balance ($${remainingBalance.toFixed(2)}) by more than $${smallOverpaymentThreshold.toFixed(2)}. Manager approval required.`);
+        setOverrideReason(`Overpayment detected: Payment amount ($${paymentAmount.toFixed(2)}) exceeds remaining balance ($${remainingBalance.toFixed(2)}) by more than $${smallOverpaymentThreshold.toFixed(2)}. Manager approval required.`);
         setError(''); // Clear any previous errors
         return;
       }
@@ -521,7 +708,7 @@ const PaymentScreen = () => {
         context: 'PaymentScreen',
         metadata: { 
           reason: overrideReason, 
-          amount, 
+          amount: paymentAmount, 
           method: method,
           approved_by_pin: true
         }
@@ -531,28 +718,33 @@ const PaymentScreen = () => {
     const newPayment = {
       id: Date.now(),
       method: method,
-      amount,
+      amount: paymentAmount,
       custom_method_name: method === 'custom' ? customName : null,
       tip_amount: payments.length === 0 ? tipAmount : 0,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      ...(giftCardMeta || {}),
     };
 
-    setPayments([...payments, newPayment]);
+    const updatedPayments = [...payments, newPayment];
+    setPayments(updatedPayments);
+    paymentsRef.current = updatedPayments;
     
     // Send payment info to customer display
     const paymentData = {
       method: method,
-      amount: amount,
-      change: method === 'cash' ? Math.max(0, amount - remainingBalance) : 0,
+      amount: paymentAmount,
+      change: method === 'cash' ? Math.max(0, paymentAmount - remainingBalance) : 0,
       status: 'processing',
       timestamp: Date.now(),
       customMethodName: method === 'custom' ? customName : null
     };
     
     localStorage.setItem('tavari_customer_display_payment', JSON.stringify(paymentData));
+    scheduleCustomerDisplayMirrorPush(auth.selectedBusinessId);
+    cancelCustomerDisplayPaymentExpiry();
     console.log('💳 PaymentScreen: Payment data sent to customer display:', paymentData);
     
-    const newRemainingBalance = remainingBalance - amount;
+    const newRemainingBalance = remainingBalance - paymentAmount;
     setCurrentPayment({ 
       method: 'cash', 
       amount: newRemainingBalance > 0 ? newRemainingBalance.toFixed(2) : '' 
@@ -569,6 +761,9 @@ const PaymentScreen = () => {
     if (method === 'cash') {
       // Cash payments are immediate
       updatePaymentStatus('success');
+      if (newRemainingBalance <= 0.01) {
+        await finalizeSale(updatedPayments);
+      }
     } else if (method === 'card') {
       // Card payments need terminal processing
       updatePaymentStatus('processing');
@@ -580,18 +775,22 @@ const PaymentScreen = () => {
       } catch (draftErr) {
         // Remove the pending payment we just added (since we can't start terminal flow)
         setPayments(prev => prev.filter(p => p.id !== newPayment.id));
+        paymentsRef.current = (paymentsRef.current || []).filter((p) => p.id !== newPayment.id);
         setError(draftErr.message || 'Unable to create sale record for Helcim payment');
         updatePaymentStatus('error', { errorMessage: draftErr.message });
         toast.error(draftErr.message || 'Unable to start Helcim payment');
         return;
       }
 
-      setHelcimPaymentAmount(amount);
+      setHelcimPaymentAmount(paymentAmount);
       setShowHelcimTerminal(true);
       updatePaymentStatus('processing');
     } else {
       // Other methods (gift card, loyalty, custom) are immediate
       updatePaymentStatus('success');
+      if (newRemainingBalance <= 0.01) {
+        await finalizeSale(updatedPayments);
+      }
     }
   };
 
@@ -625,23 +824,54 @@ const PaymentScreen = () => {
         lastPayment.card_type = paymentResult.cardType;
         lastPayment.last_four = paymentResult.lastFour;
         lastPayment.status = 'completed';
+
+        // A manager-authorized +$0.01 override charges a different amount than the sale
+        // total so Helcim's duplicate check lets it through. Record what was actually
+        // charged so the till matches the Helcim batch.
+        if (paymentResult.duplicateOverride?.chargedCents) {
+          lastPayment.amount = paymentResult.duplicateOverride.chargedCents / 100;
+          lastPayment.duplicate_override = paymentResult.duplicateOverride;
+        } else if (typeof paymentResult.amount === 'number' && paymentResult.amount > 0) {
+          const charged = Number(paymentResult.amount);
+          const recorded = Number(lastPayment.amount);
+          if (Math.abs(charged - recorded) >= 0.005 && Math.abs(charged - recorded) <= 0.02) {
+            lastPayment.amount = charged;
+          }
+        }
       }
     }
     setPayments(updatedPayments);
+    paymentsRef.current = updatedPayments;
     
     setShowHelcimTerminal(false);
     updatePaymentStatus('success');
-    toast.success('Payment processed successfully');
-    
-    // Clear the device screen after payment completes (non-blocking)
-    try {
-      const deviceCode = paymentResult.deviceCode || 'JSV5';
-      await helcimPayment.clearDevice(deviceCode);
-      console.log('[PaymentScreen] Device clear attempted');
-    } catch (clearError) {
-      // Non-critical - device will clear on next payment if this fails
-      console.log('[PaymentScreen] Device clear failed (non-critical):', clearError);
+    if (paymentResult.duplicateOverride) {
+      toast.success(
+        `Payment processed (manager override charged $${Number(paymentResult.amount).toFixed(2)})`
+      );
+      logAction({
+        action: 'helcim_duplicate_override',
+        context: 'PaymentScreen',
+        metadata: {
+          sale_id: helcimSaleId || draftSaleId || saleData?.id || null,
+          original_cents: paymentResult.duplicateOverride.originalCents,
+          charged_cents: paymentResult.duplicateOverride.chargedCents,
+          transaction_id: paymentResult.transactionId || null
+        }
+      }).catch(() => {});
+    } else {
+      toast.success('Payment processed successfully');
     }
+    
+    // Never block sale completion on device clear — Helcim already captured.
+    // Clear can hang on slow/unavailable Helcim device endpoints.
+    const deviceCode = paymentResult.deviceCode || localStorage.getItem('helcim_device_code') || 'JSV5';
+    Promise.resolve()
+      .then(() => helcimPayment.clearDevice(deviceCode))
+      .then(() => console.log('[PaymentScreen] Device clear attempted'))
+      .catch((clearError) => {
+        console.log('[PaymentScreen] Device clear failed (non-critical):', clearError);
+      });
     
     // Calculate new remaining balance with updated payments
     const totalPaidAfterPayment = updatedPayments.reduce((sum, p) => sum + Number(p.amount), 0);
@@ -650,11 +880,8 @@ const PaymentScreen = () => {
     // If balance is paid off, automatically complete the sale
     if (newRemainingBalance <= 0.01) {
       console.log('[PaymentScreen] Balance paid in full, automatically completing sale...');
-      // Small delay to ensure state updates are processed
-      setTimeout(async () => {
-        // Pass the authoritative payment snapshot (includes Helcim transaction id)
-        await finalizeSale(updatedPayments);
-      }, 100);
+      // Pass the authoritative payment snapshot (includes Helcim transaction id)
+      await finalizeSale(updatedPayments);
     }
   };
 
@@ -663,10 +890,13 @@ const PaymentScreen = () => {
     console.error('[PaymentScreen] Helcim payment failed:', errorMessage);
     
     // Remove the failed payment
-    const updatedPayments = payments.filter((p, index) => 
-      !(index === payments.length - 1 && p.method === 'helcim_terminal')
-    );
-    setPayments(updatedPayments);
+    setPayments(currentPayments => {
+      const next = currentPayments.filter((p, index) =>
+        !(index === currentPayments.length - 1 && p.method === 'helcim_terminal')
+      );
+      paymentsRef.current = next;
+      return next;
+    });
     
     setShowHelcimTerminal(false);
     setError(errorMessage || 'Helcim payment failed. Please try again.');
@@ -674,18 +904,62 @@ const PaymentScreen = () => {
     toast.error(errorMessage || 'Payment failed');
   };
 
+  /**
+   * Helcim declined the charge as a suspected duplicate. Split the blocked total into
+   * two uneven amounts, charge the first half now, and leave the second half as the
+   * remaining balance for a follow-up terminal tap.
+   */
+  const handleHelcimDuplicateSplit = ({ firstCents, secondCents }) => {
+    const firstAmount = (Number(firstCents) || 0) / 100;
+    const secondAmount = (Number(secondCents) || 0) / 100;
+    if (firstAmount <= 0 || secondAmount <= 0) return;
+
+    setPayments((currentPayments) => {
+      const next = [...currentPayments];
+      const last = next[next.length - 1];
+      if (last?.method === 'helcim_terminal') {
+        next[next.length - 1] = {
+          ...last,
+          amount: firstAmount,
+          duplicate_split: {
+            first_amount: firstAmount,
+            second_amount: secondAmount
+          }
+        };
+      }
+      paymentsRef.current = next;
+      return next;
+    });
+
+    setHelcimPaymentAmount(firstAmount);
+    setShowHelcimTerminal(false);
+
+    // Remount the terminal reader with the smaller first charge.
+    window.setTimeout(() => {
+      setShowHelcimTerminal(true);
+    }, 50);
+
+    toast(
+      `Charging $${firstAmount.toFixed(2)} now. After it clears, tap Helcim Terminal again for the remaining $${secondAmount.toFixed(2)}.`,
+      { icon: '💳', duration: 6000 }
+    );
+  };
+
   // Handle Helcim terminal cancellation
-  const handleHelcimPaymentCancel = () => {
-    console.log('[PaymentScreen] Helcim payment cancelled');
+  const handleHelcimPaymentCancel = (details = {}) => {
+    console.log('[PaymentScreen] Helcim payment cancelled', details);
     
     // Remove the cancelled payment
-    const updatedPayments = payments.filter((p, index) => 
-      !(index === payments.length - 1 && p.method === 'helcim_terminal')
-    );
-    setPayments(updatedPayments);
+    setPayments(currentPayments => currentPayments.filter((p, index) =>
+      !(index === currentPayments.length - 1 && p.method === 'helcim_terminal')
+    ));
     
     setShowHelcimTerminal(false);
+    setError(null);
     updatePaymentStatus('cancelled');
+
+    const message = details?.message || 'Payment cancelled';
+    toast(message);
   };
 
   // Handle card payment success/error
@@ -700,6 +974,7 @@ const PaymentScreen = () => {
   // Clear payment display when sale is finalized
   const clearPaymentDisplay = () => {
     localStorage.removeItem('tavari_customer_display_payment');
+    scheduleCustomerDisplayMirrorPush(auth.selectedBusinessId);
     console.log('💳 PaymentScreen: Payment display cleared');
   };
 
@@ -717,7 +992,11 @@ const PaymentScreen = () => {
       return;
     }
 
-    if (remainingBalance > 0.01) {
+    const paymentsForBalance = paymentsSnapshot || paymentsRef.current || payments || [];
+    const paidForBalance = paymentsForBalance.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const remainingForFinalize = displayTotal - paidForBalance;
+
+    if (remainingForFinalize > 0.01) {
       setError('Payment incomplete. Please add more payments to cover the total.');
       return;
     }
@@ -736,15 +1015,24 @@ const PaymentScreen = () => {
       const receiptNumber = draftReceiptNumber || await saleProcessor.generateReceiptNumber();
       const qrCode = saleProcessor.generateQRCode(receiptNumber);
 
+      // Prefer the snapshot from auto-finalize (cash/loyalty/etc.) — React state may still be stale.
+      const paymentsToSave = paymentsSnapshot || paymentsRef.current || payments || [];
+      const paidForReceipt = paymentsToSave.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+      const changeForReceipt = Math.max(0, paidForReceipt - displayTotal);
+
       // Calculate total loyalty redeemed from all loyalty payment methods
-      const totalLoyaltyRedeemed = payments
+      const totalLoyaltyRedeemed = paymentsToSave
         .filter(p => p.method === 'loyalty_credit')
         .reduce((sum, p) => sum + p.amount, 0) + autoLoyaltyApplied;
 
       // Create basic sale record
       const saleRecord = {
         business_id: auth.selectedBusinessId,
-        user_id: auth.authUser.id,
+        user_id: effectiveOperatorUserId,
+        login_user_id: saleAttribution.loginUserId,
+        operator_user_id: effectiveOperatorUserId,
+        login_user_name: saleAttribution.loginUserName,
+        operator_user_name: saleAttribution.operatorUserName,
         customer_id: saleData.loyaltyCustomer?.id || null,
         loyalty_customer_id: saleData.loyaltyCustomer?.id || null,
         customer_name: saleData.loyaltyCustomer?.customer_name || null,
@@ -757,9 +1045,11 @@ const PaymentScreen = () => {
         total: displayTotal,
         
         payment_status: 'completed',
-        payment_method: payments[0]?.method || 'cash',
+        payment_method: paymentsToSave[0]?.method || 'cash',
         sale_number: receiptNumber,
-        notes: totalLoyaltyRedeemed > 0 ? `Loyalty redemption: $${totalLoyaltyRedeemed.toFixed(2)}` : null,
+        notes: buildPosSaleNotes(totalLoyaltyRedeemed, saleData),
+        indian_status_gst_only: !!saleData.indian_status_gst_only,
+        indian_status_certificate_number: saleData.indian_status_certificate_number?.trim() || null,
         item_count: saleData.items?.length || 0,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
@@ -799,24 +1089,32 @@ const PaymentScreen = () => {
 
       // Create receipt record
       const receipt = await saleProcessor.createReceiptRecord(
-        sale.id, receiptNumber, qrCode, saleData, payments, tipAmount, 
-        changeOwed, displayTotal, taxCalculation, finalTaxAmount, 
-        saleSubtotal, discountAmount, totalLoyaltyRedeemed
+        sale.id, receiptNumber, qrCode, saleData, paymentsToSave, tipAmount,
+        changeForReceipt, displayTotal, taxCalculation, finalTaxAmount,
+        saleSubtotal, discountAmount, totalLoyaltyRedeemed, saleAttribution
       );
 
-      // Save sale items
+      // Save sale items (custom items have no inventory_id)
       if (saleData.items && saleData.items.length > 0) {
-        const saleItems = saleData.items.map(item => ({
-          business_id: auth.selectedBusinessId,
-          sale_id: sale.id,
-          inventory_id: item.id,
-          name: item.name,
-          quantity: item.quantity || 1,
-          unit_price: item.price || 0,
-          total_price: (item.price || 0) * (item.quantity || 1),
-          modifiers: item.modifiers || null,
-          created_at: new Date().toISOString()
-        }));
+        const saleItems = saleData.items.map(item => {
+          const quantity = item.quantity || 1;
+          const unitPrice = getPosLineUnitPrice(item);
+          const foodCost = getSaleItemFoodCostFields(item);
+          return {
+            business_id: auth.selectedBusinessId,
+            sale_id: sale.id,
+            inventory_id: item.is_custom || (typeof item.id === 'string' && item.id.startsWith('custom_')) ? null : item.id,
+            category_id: item.category_id || null,
+            name: item.name,
+            quantity,
+            unit_price: unitPrice,
+            total_price: getPosLineSubtotal(item),
+            unit_cost: foodCost.unit_cost,
+            food_cost_total: foodCost.food_cost_total,
+            modifiers: item.modifiers || null,
+            created_at: new Date().toISOString()
+          };
+        });
 
         const { error: itemsError } = await supabase
           .from('pos_sale_items')
@@ -824,10 +1122,24 @@ const PaymentScreen = () => {
 
         if (itemsError) {
           toast.error('Failed to save sale items');
+        } else if (saleItems.length > 0) {
+          try {
+            await applySaleStockAdjustments(
+              supabase,
+              auth.selectedBusinessId,
+              saleData.items.map((item) => ({
+                inventoryId:
+                  item.is_custom || (typeof item.id === 'string' && item.id.startsWith('custom_'))
+                    ? null
+                    : item.id,
+                quantity: item.quantity || 1,
+              }))
+            );
+          } catch (stockError) {
+            console.warn('[PaymentScreen] Inventory stock adjustment failed:', stockError);
+          }
         }
       }
-
-      const paymentsToSave = paymentsSnapshot || paymentsRef.current || payments || [];
 
       // Save payment records
       if (paymentsToSave.length > 0) {
@@ -859,7 +1171,11 @@ const PaymentScreen = () => {
                 })
               : null
           ),
-          processed_by: auth.authUser.id,
+          processed_by: effectiveOperatorUserId,
+          login_user_id: saleAttribution.loginUserId,
+          operator_user_id: effectiveOperatorUserId,
+          login_user_name: saleAttribution.loginUserName,
+          operator_user_name: saleAttribution.operatorUserName,
           created_at: new Date().toISOString()
         }));
 
@@ -871,6 +1187,50 @@ const PaymentScreen = () => {
           console.error('[PaymentScreen] Failed to save payment records:', paymentsError);
           toast.error('Failed to save payment records');
         }
+      }
+
+      // Issue gift cards sold on this sale (after payment is collected)
+      let issuedGiftCards = [];
+      try {
+        const giftCardLines = (saleData.items || []).filter((item) => item.gift_card || item.is_gift_card);
+        for (const item of giftCardLines) {
+          const gc = item.gift_card || {};
+          const qty = Math.max(1, Number(item.quantity) || 1);
+          for (let i = 0; i < qty; i += 1) {
+            // eslint-disable-next-line no-await-in-loop
+            const card = await GiftCardService.issueGiftCard({
+              businessId: auth.selectedBusinessId,
+              productId: gc.gift_card_product_id || item.gift_card_product_id || null,
+              cardType: gc.card_type || 'money',
+              faceValue: gc.face_value ?? item.price,
+              amountPaid: gc.amount_paid ?? item.price,
+              inventoryItemId: gc.inventory_item_id || null,
+              inventoryQty: gc.inventory_qty || 1,
+              purchaserCustomerId: gc.purchaser_customer_id || saleData?.loyaltyCustomer?.id || null,
+              purchaserName: gc.purchaser_name || saleData?.loyaltyCustomer?.customer_name || null,
+              purchaserEmail: gc.purchaser_email || saleData?.loyaltyCustomer?.customer_email || null,
+              purchaserPhone: gc.purchaser_phone || saleData?.loyaltyCustomer?.customer_phone || null,
+              recipientName: gc.recipient_name || null,
+              recipientEmail: gc.recipient_email || null,
+              personalMessage: gc.personal_message || null,
+              notifyRecipient: Boolean(gc.notify_recipient),
+              saleSource: 'pos',
+              saleSaleId: sale.id,
+              processedByUserId: effectiveOperatorUserId,
+            });
+            issuedGiftCards.push(card);
+          }
+        }
+        if (issuedGiftCards.length > 0) {
+          toast.success(
+            issuedGiftCards.length === 1
+              ? `Gift card issued: ${issuedGiftCards[0].code}`
+              : `${issuedGiftCards.length} gift cards issued`
+          );
+        }
+      } catch (gcIssueErr) {
+        console.error('[PaymentScreen] Gift card issue failed:', gcIssueErr);
+        toast.error(gcIssueErr.message || 'Sale saved, but gift card issue failed — issue manually from Gift Cards module');
       }
 
       // DINING MODE: Mark tab items as paid
@@ -960,7 +1320,7 @@ const PaymentScreen = () => {
               .from('pos_tab_items')
               .update({
                 paid_amount: update.paidAmount.toFixed(2),
-                paid_by: auth.authUser.id
+                  paid_by: effectiveOperatorUserId
               })
               .eq('id', update.id);
             
@@ -1026,7 +1386,7 @@ const PaymentScreen = () => {
                 tab_id: saleData.activeTab.id,
                 payment_method: payments[0]?.method || 'cash',
                 amount: totalPaidAmount.toFixed(2),
-                processed_by: auth.authUser.id,
+                processed_by: effectiveOperatorUserId,
                 processed_at: new Date().toISOString(),
                 notes: `Payment for seats: ${saleData.selected_seats?.join(', ') || 'N/A'}`
               });
@@ -1041,93 +1401,150 @@ const PaymentScreen = () => {
         }
       }
 
-      // ENHANCED LOYALTY PROCESSING
+      // ENHANCED LOYALTY PROCESSING — store_credit + points vs legacy balance (dollars program)
       if (saleData.loyaltyCustomer && loyaltySettings?.is_active && canUseLoyalty) {
         const today = saleProcessor.getTodayInBusinessTimezone();
-        const customerBalanceBefore = Math.abs(saleData.loyaltyCustomer.balance || 0);
-        
-        // Process loyalty redemption if any
+        const acc = saleData.loyaltyCustomer;
+        const rate = Number(loyaltySettings.redemption_rate) || 10000;
+        const isPoints = isPointsLoyaltyMode(loyaltySettings);
+        const store0 = Number(acc.store_credit) || 0;
+        const points0 = Math.max(0, Number(acc.points) || 0);
+        const bal0 = Math.max(0, Math.abs(Number(acc.balance) || 0));
+
+        let s = store0;
+        let p = points0;
+        let b = bal0;
+        const pointsModeEarn = isPoints && loyaltyPointsToEarn > 0;
+        const dollarsModeEarn = !isPoints && loyaltyCreditsToEarn > 0;
+        const mustPersist =
+          totalLoyaltyRedeemed > 0 || pointsModeEarn || dollarsModeEarn;
+
         if (totalLoyaltyRedeemed > 0) {
-          // Record redemption transaction
+          const split = splitLoyaltyRedemptionDollars(totalLoyaltyRedeemed, acc, loyaltySettings);
+          s = split.newStore;
+          p = split.newPoints;
+          b = split.newBalance;
+
           await supabase
             .from('pos_loyalty_transactions')
             .insert({
               business_id: auth.selectedBusinessId,
-              loyalty_account_id: saleData.loyaltyCustomer.id,
+              loyalty_account_id: acc.id,
               transaction_id: sale.id,
               transaction_type: 'redeem',
               amount: totalLoyaltyRedeemed,
-              points: Math.round(totalLoyaltyRedeemed * loyaltySettings.redemption_rate),
-              balance_before: customerBalanceBefore,
-              balance_after: customerBalanceBefore - totalLoyaltyRedeemed,
-              points_before: Math.round(customerBalanceBefore * loyaltySettings.redemption_rate),
-              points_after: Math.round((customerBalanceBefore - totalLoyaltyRedeemed) * loyaltySettings.redemption_rate),
+              points: isPoints ? split.pointsRedeemed : null,
+              balance_before: isPoints ? store0 : bal0,
+              balance_after: isPoints ? s : b,
+              points_before: points0,
+              points_after: p,
               description: `Redeemed for receipt ${receiptNumber}`,
-              processed_by: auth.authUser.id,
+              processed_by: effectiveOperatorUserId,
               earned_date: today
             });
 
-          // Update daily usage
+          const maxDay = (loyaltySettings.max_redemption_per_day / rate) * 10;
+          const todayUsed = dailyUsageRemaining > 0
+            ? maxDay - dailyUsageRemaining + totalLoyaltyRedeemed
+            : totalLoyaltyRedeemed;
+
           await supabase
             .from('pos_loyalty_daily_usage')
-            .upsert({
-              business_id: auth.selectedBusinessId,
-              loyalty_account_id: saleData.loyaltyCustomer.id,
-              usage_date: today,
-              amount_used: (dailyUsageRemaining > 0 ? 
-                (loyaltySettings.max_redemption_per_day / loyaltySettings.redemption_rate - dailyUsageRemaining) + totalLoyaltyRedeemed : 
-                totalLoyaltyRedeemed)
-            }, {
-              onConflict: 'business_id,loyalty_account_id,usage_date',
-              ignoreDuplicates: false
-            });
+            .upsert(
+              {
+                business_id: auth.selectedBusinessId,
+                loyalty_account_id: acc.id,
+                usage_date: today,
+                amount_used: todayUsed
+              },
+              {
+                onConflict: 'business_id,loyalty_account_id,usage_date',
+                ignoreDuplicates: false
+              }
+            );
         }
 
-        // Award new loyalty points
-        if (loyaltyPointsToEarn > 0) {
+        if (pointsModeEarn) {
           const tomorrow = new Date();
           tomorrow.setDate(tomorrow.getDate() + 1);
-          
+
           let expiryDate = null;
           if (loyaltySettings.credits_expire && loyaltySettings.expiry_months) {
             expiryDate = new Date();
             expiryDate.setMonth(expiryDate.getMonth() + loyaltySettings.expiry_months);
           }
 
-          const newBalance = customerBalanceBefore + loyaltyCreditsToEarn - totalLoyaltyRedeemed;
-          const newPoints = Math.round(newBalance * loyaltySettings.redemption_rate);
+          const pBefore = p;
+          p += loyaltyPointsToEarn;
 
-          // Record earning transaction
           await supabase
             .from('pos_loyalty_transactions')
             .insert({
               business_id: auth.selectedBusinessId,
-              loyalty_account_id: saleData.loyaltyCustomer.id,
+              loyalty_account_id: acc.id,
               transaction_id: sale.id,
               transaction_type: 'earn',
               amount: loyaltyCreditsToEarn,
               points: loyaltyPointsToEarn,
-              balance_before: customerBalanceBefore - totalLoyaltyRedeemed,
-              balance_after: newBalance,
-              points_before: Math.round((customerBalanceBefore - totalLoyaltyRedeemed) * loyaltySettings.redemption_rate),
-              points_after: newPoints,
+              balance_before: s,
+              balance_after: s,
+              points_before: pBefore,
+              points_after: p,
               description: `Earned from receipt ${receiptNumber}`,
-              processed_by: auth.authUser.id,
+              processed_by: effectiveOperatorUserId,
               earned_date: tomorrow.toISOString().split('T')[0],
               expires_at: expiryDate ? expiryDate.toISOString().split('T')[0] : null
             });
+        } else if (dollarsModeEarn) {
+          const tomorrow = new Date();
+          tomorrow.setDate(tomorrow.getDate() + 1);
 
-          // Update customer balance and points to be in sync
+          let expiryDate = null;
+          if (loyaltySettings.credits_expire && loyaltySettings.expiry_months) {
+            expiryDate = new Date();
+            expiryDate.setMonth(expiryDate.getMonth() + loyaltySettings.expiry_months);
+          }
+
+          const pBeforeEarn = p;
+          const bBefore = b;
+          b += loyaltyCreditsToEarn;
+          p = Math.round(b * rate);
+          const pointsEarnedDelta = Math.max(0, p - pBeforeEarn);
+
+          await supabase
+            .from('pos_loyalty_transactions')
+            .insert({
+              business_id: auth.selectedBusinessId,
+              loyalty_account_id: acc.id,
+              transaction_id: sale.id,
+              transaction_type: 'earn',
+              amount: loyaltyCreditsToEarn,
+              points: pointsEarnedDelta,
+              balance_before: bBefore,
+              balance_after: b,
+              points_before: pBeforeEarn,
+              points_after: p,
+              description: `Earned from receipt ${receiptNumber}`,
+              processed_by: effectiveOperatorUserId,
+              earned_date: tomorrow.toISOString().split('T')[0],
+              expires_at: expiryDate ? expiryDate.toISOString().split('T')[0] : null
+            });
+        }
+
+        if (mustPersist) {
+          const te = (Number(acc.total_earned) || 0) + (loyaltyCreditsToEarn || 0);
+          const ts = (Number(acc.total_spent) || 0) + (totalLoyaltyRedeemed || 0);
           await supabase
             .from('pos_loyalty_accounts')
-            .update({ 
-              balance: newBalance,
-              points: newPoints,
-              total_earned: (saleData.loyaltyCustomer.total_earned || 0) + loyaltyCreditsToEarn,
-              total_spent: (saleData.loyaltyCustomer.total_spent || 0) + totalLoyaltyRedeemed,
+            .update({
+              store_credit: s,
+              points: p,
+              balance: b,
+              total_earned: te,
+              total_spent: ts,
               last_activity: new Date().toISOString()
             })
-            .eq('id', saleData.loyaltyCustomer.id);
+            .eq('id', acc.id);
         }
       }
 
@@ -1138,21 +1555,28 @@ const PaymentScreen = () => {
         receipt_id: receipt.id,
         receipt_number: receiptNumber,
         qr_code: qrCode,
-        payments,
+        payments: paymentsToSave,
         tip_amount: tipAmount,
-        change_given: changeOwed,
+        change_given: changeForReceipt,
         final_total: displayTotal,
         final_tax_amount: finalTaxAmount,
         final_taxable_amount: taxableAmount,
         tax_calculation: taxCalculation,
         cash_rounding_applied: taxCalc.applyCashRounding(finalTotal, 'cash') !== finalTotal,
         business_name: businessSettings?.name || 'Business',
-        cashier_name: auth.authUser?.email || 'Unknown',
+        cashier_name: saleAttribution.operatorUserName,
+        login_user_id: saleAttribution.loginUserId,
+        login_user_name: saleAttribution.loginUserName,
+        operator_user_id: effectiveOperatorUserId,
+        operator_user_name: saleAttribution.operatorUserName,
         loyalty_redeemed: totalLoyaltyRedeemed,
-        loyalty_points_earned: loyaltyPointsToEarn
+        loyalty_points_earned: loyaltyPointsToEarn,
+        issued_gift_cards: issuedGiftCards,
       };
       
       sessionStorage.setItem('lastSaleData', JSON.stringify(enhancedSaleData));
+
+      persistRegisterLockAfterSale(saleData);
 
       toast.success('Sale completed successfully');
 
@@ -1166,19 +1590,21 @@ const PaymentScreen = () => {
           receipt_id: receipt.id,
           receipt_number: receiptNumber,
           total_amount: displayTotal,
-          payment_methods: payments.map(p => p.method),
+          payment_methods: paymentsToSave.map(p => p.method),
           customer_attached: !!saleData.loyaltyCustomer,
           loyalty_redeemed: totalLoyaltyRedeemed,
           loyalty_points_earned: loyaltyPointsToEarn,
-          user_role: auth.userRole
+          login_user_id: saleAttribution.loginUserId,
+          operator_user_id: effectiveOperatorUserId,
+          user_role: auth.userRole,
+          indian_status_gst_only: !!saleData?.indian_status_gst_only
         }
       });
 
-      // Clear payment display and cart data
-      clearPaymentDisplay();
-      
-      // Clear cart data from localStorage to reset customer display
+      // Clear cart data from localStorage to reset customer display (keep payment summary ≤5s)
       localStorage.removeItem('tavari_customer_display_cart');
+      clearPersistedRegisterCart();
+      scheduleCustomerDisplayMirrorPush(auth.selectedBusinessId);
       console.log('🧹 PaymentScreen: Cart data cleared from localStorage');
       
       // Send sale completion signal to customer display
@@ -1189,6 +1615,24 @@ const PaymentScreen = () => {
         timestamp: Date.now()
       };
       localStorage.setItem('tavari_customer_display_sale_complete', JSON.stringify(saleCompletionData));
+      scheduleCustomerDisplayMirrorPush(auth.selectedBusinessId);
+
+      // Refresh payment timestamp so customer display 5s window starts at sale completion (multi-tender safe)
+      try {
+        const payStr = localStorage.getItem('tavari_customer_display_payment');
+        if (payStr) {
+          const p = JSON.parse(payStr);
+          p.timestamp = Date.now();
+          p.status = 'success';
+          localStorage.setItem('tavari_customer_display_payment', JSON.stringify(p));
+          scheduleCustomerDisplayMirrorPush(auth.selectedBusinessId);
+        }
+      } catch {
+        /* ignore */
+      }
+
+      // Payment UI on customer display: max 5s from sale completion (receipt can stay open longer)
+      scheduleCustomerDisplayPaymentAutoClear(auth.selectedBusinessId);
       console.log('✅ PaymentScreen: Sale completion signal sent to customer display:', saleCompletionData);
       
       // For dining mode, navigate back to dining order screen after showing receipt
@@ -1242,7 +1686,7 @@ const PaymentScreen = () => {
   if (permissionsLoading) {
     return (
       <POSAuthWrapper
-        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         componentName="PaymentScreen"
       >
         <div style={styles.container}>
@@ -1260,7 +1704,7 @@ const PaymentScreen = () => {
   if (!canProcessPayments) {
     return (
       <POSAuthWrapper
-        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         componentName="PaymentScreen"
       >
         <div style={TavariStyles.utils.merge(styles.container, TavariStyles.layout.flexCenter)}>
@@ -1292,7 +1736,7 @@ const PaymentScreen = () => {
   if (!receivedSaleData) {
     return (
       <POSAuthWrapper
-        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         componentName="PaymentScreen"
       >
         <div style={TavariStyles.utils.merge(styles.container, TavariStyles.layout.flexCenter)}>
@@ -1318,7 +1762,7 @@ const PaymentScreen = () => {
   if (!saleData || !businessSettings) {
     return (
       <POSAuthWrapper
-        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         componentName="PaymentScreen"
       >
         <div style={styles.container}>
@@ -1342,73 +1786,100 @@ const PaymentScreen = () => {
 
   return (
     <POSAuthWrapper
-      requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+      requiredRoles={['employee', 'manager', 'owner']}
       componentName="PaymentScreen"
     >
+      <style>{`
+        @media (max-width: 720px) {
+          .payment-screen-summary-methods {
+            flex-direction: column !important;
+            align-items: stretch !important;
+          }
+          .payment-screen-methods-col {
+            flex-basis: auto !important;
+            width: 100% !important;
+            max-width: none !important;
+          }
+          .payment-screen-actions {
+            flex-direction: column !important;
+          }
+        }
+      `}</style>
       <div style={styles.container}>
-        <div style={styles.header}>
-          <h2 style={styles.title}>Process Payment</h2>
-          <p style={styles.subtitle}>Complete the payment for this sale</p>
-          
-          <LoyaltyDisplay
-            loyaltyCustomer={saleData.loyaltyCustomer}
-            loyaltySettings={loyaltySettings}
-            availableLoyaltyCredit={availableLoyaltyCredit}
-            dailyUsageRemaining={dailyUsageRemaining}
-            loyaltyPointsToEarn={loyaltyPointsToEarn}
-            loyaltyCreditsToEarn={loyaltyCreditsToEarn}
-          />
-        </div>
-
-        <div style={styles.content}>
-          {/* Payment Summary with Tax Breakdown */}
-          <div style={styles.section}>
-            <h3 style={styles.sectionTitle}>Payment Summary</h3>
-            <PaymentSummary
-              saleSubtotal={saleSubtotal}
-              discountAmount={discountAmount}
-              loyaltyRedemption={loyaltyRedemption}
-              taxableAmount={taxableAmount}
-              taxCalculation={taxCalculation}
-              finalTaxAmount={finalTaxAmount}
-              tipAmount={tipAmount}
-              displayTotal={displayTotal}
-              totalPaid={totalPaid}
-              remainingBalance={remainingBalance}
-              saleData={saleData}
+        {saleData.loyaltyCustomer && loyaltySettings?.is_active && (
+          <div style={styles.loyaltyStrip}>
+            <LoyaltyDisplay
+              loyaltyCustomer={saleData.loyaltyCustomer}
               loyaltySettings={loyaltySettings}
+              availableLoyaltyCredit={availableLoyaltyCredit}
+              dailyUsageRemaining={dailyUsageRemaining}
               loyaltyPointsToEarn={loyaltyPointsToEarn}
               loyaltyCreditsToEarn={loyaltyCreditsToEarn}
-              getBalanceDisplay={getBalanceDisplay}
-            />
-            
-            <TaxBreakdown 
-              taxCalculation={taxCalculation}
-              taxCalc={taxCalc}
             />
           </div>
+        )}
 
-          {/* Tip Controls with updated business settings */}
+        <div style={styles.content}>
+          <div className="payment-screen-summary-methods" style={styles.summaryAndMethodsRow}>
+            <div style={styles.summaryColumn}>
+              <PaymentSummary
+                fillColumn={false}
+                saleSubtotal={saleSubtotal}
+                discountAmount={discountAmount}
+                loyaltyRedemption={loyaltyRedemption}
+                taxableAmount={taxableAmount}
+                taxCalculation={taxCalculation}
+                finalTaxAmount={finalTaxAmount}
+                tipAmount={tipAmount}
+                displayTotal={displayTotal}
+                totalPaid={totalPaid}
+                remainingBalance={remainingBalance}
+                saleData={saleData}
+                loyaltySettings={loyaltySettings}
+                loyaltyPointsToEarn={loyaltyPointsToEarn}
+                loyaltyCreditsToEarn={loyaltyCreditsToEarn}
+                getBalanceDisplay={getBalanceDisplay}
+              />
+            </div>
+
+            <div className="payment-screen-methods-col" style={styles.methodsColumn}>
+              <div className="payment-screen-methods-card" style={styles.methodsCard}>
+                <PaymentMethods
+                  variant="stacked"
+                  fillColumn={false}
+                  currentPayment={currentPayment}
+                  setCurrentPayment={setCurrentPayment}
+                  loyaltySettings={loyaltySettings}
+                  availableLoyaltyCredit={availableLoyaltyCredit}
+                  remainingBalance={remainingBalance}
+                  exactRemainingBalance={exactRemainingBalance}
+                  cashRemainingBalance={cashRemainingBalance}
+                  getBalanceDisplay={getBalanceDisplay}
+                  showCustomMethod={showCustomMethod}
+                  setShowCustomMethod={setShowCustomMethod}
+                  customMethodName={customMethodName}
+                  setCustomMethodName={setCustomMethodName}
+                />
+              </div>
+            </div>
+          </div>
+
+          <DiscountControls
+            saleSubtotal={saleSubtotal}
+            discountAmount={discountAmount}
+            discountName={saleData.discount_name || null}
+            selectedDiscountId={saleData.discount_id || null}
+            onDiscountChange={handleDiscountChange}
+            businessId={auth.selectedBusinessId}
+            canApply={canApplyDiscounts}
+          />
+
           <TipControls
             tipAmount={tipAmount}
             onTipChange={setTipAmount}
             saleSubtotal={saleSubtotal}
             businessSettings={businessSettings}
             defaultTipPercent={businessSettings?.default_tip_percent || 0.15}
-          />
-
-          {/* Payment Methods */}
-          <PaymentMethods
-            currentPayment={currentPayment}
-            setCurrentPayment={setCurrentPayment}
-            loyaltySettings={loyaltySettings}
-            availableLoyaltyCredit={availableLoyaltyCredit}
-            remainingBalance={remainingBalance}
-            getBalanceDisplay={getBalanceDisplay}
-            showCustomMethod={showCustomMethod}
-            setShowCustomMethod={setShowCustomMethod}
-            customMethodName={customMethodName}
-            setCustomMethodName={setCustomMethodName}
           />
 
           {/* Payment Amount Input */}
@@ -1484,13 +1955,14 @@ const PaymentScreen = () => {
                 onPaymentSuccess={handleHelcimPaymentSuccess}
                 onPaymentError={handleHelcimPaymentError}
                 onCancel={handleHelcimPaymentCancel}
+                onSplitRequest={handleHelcimDuplicateSplit}
                 isVisible={showHelcimTerminal}
               />
             </div>
           </div>
         )}
 
-        <div style={styles.actions}>
+        <div className="payment-screen-actions" style={styles.actions}>
           <button
             style={TavariStyles.utils.merge(
               TavariStyles.components.button.base,
@@ -1498,7 +1970,7 @@ const PaymentScreen = () => {
               TavariStyles.components.button.sizes.lg,
               loading || isProcessing ? TavariStyles.utils.disabled({}, {}) : {}
             )}
-            onClick={() => navigate(location.state?.from === 'register' ? '/dashboard/pos/register' : '/dashboard/pos/tabs')}
+            onClick={navigateBackFromPayment}
             disabled={loading || isProcessing}
           >
             {location.state?.from === 'register' ? 'Back to Register' : 'Back to Tabs'}
@@ -1533,57 +2005,60 @@ const PaymentScreen = () => {
 const styles = {
   container: {
     ...TavariStyles.layout.container,
-    gap: TavariStyles.spacing.xl
+    gap: TavariStyles.spacing.md
   },
-  
-  header: {
-    textAlign: 'center',
-    marginBottom: TavariStyles.spacing.xl
+
+  loyaltyStrip: {
+    flexShrink: 0,
+    textAlign: 'left'
   },
-  
-  title: {
-    fontSize: TavariStyles.typography.fontSize['3xl'],
-    fontWeight: TavariStyles.typography.fontWeight.bold,
-    color: TavariStyles.colors.gray800,
-    margin: 0,
-    marginBottom: TavariStyles.spacing.sm
-  },
-  
-  subtitle: {
-    fontSize: TavariStyles.typography.fontSize.lg,
-    color: TavariStyles.colors.gray600,
-    margin: 0,
-    marginBottom: TavariStyles.spacing.md
-  },
-  
+
   content: {
-    flex: 1,
-    overflowY: 'auto',
     display: 'flex',
     flexDirection: 'column',
+    gap: TavariStyles.spacing.md
+  },
+
+  /** Side-by-side on wide terminals; equal-height columns via alignItems stretch */
+  summaryAndMethodsRow: {
+    display: 'flex',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'stretch',
     gap: TavariStyles.spacing.lg
   },
-  
-  section: {
-    ...TavariStyles.layout.card,
-    padding: TavariStyles.spacing.xl
+
+  summaryColumn: {
+    flex: '1 1 280px',
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    alignSelf: 'stretch'
   },
-  
-  sectionTitle: {
-    margin: 0,
-    marginBottom: TavariStyles.spacing.lg,
-    fontSize: TavariStyles.typography.fontSize.xl,
-    fontWeight: TavariStyles.typography.fontWeight.bold,
-    color: TavariStyles.colors.gray800,
-    borderBottom: `2px solid ${TavariStyles.colors.primary}`,
-    paddingBottom: TavariStyles.spacing.sm
+
+  methodsColumn: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: '0 0 auto',
+    width: 'min(280px, 100%)',
+    maxWidth: '100%',
+    minWidth: 'min(200px, 100%)',
+    alignSelf: 'stretch'
+  },
+
+  methodsCard: {
+    ...TavariStyles.layout.card,
+    padding: TavariStyles.spacing.lg,
+    height: '100%',
+    boxSizing: 'border-box'
   },
  
   actions: {
     display: 'flex',
+    flexDirection: 'row',
     gap: TavariStyles.spacing.lg,
     justifyContent: 'space-between',
-    marginTop: TavariStyles.spacing.xl
+    marginTop: TavariStyles.spacing.md
   },
  
   loading: {

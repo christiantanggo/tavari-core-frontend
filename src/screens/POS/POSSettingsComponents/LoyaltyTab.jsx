@@ -1,5 +1,6 @@
 // src/screens/POS/POSSettingsComponents/LoyaltyTab.jsx
 import React from 'react';
+import { Link } from 'react-router-dom';
 import { TavariStyles } from '../../../utils/TavariStyles';
 
 const LoyaltyTab = ({ settings, handleInputChange }) => {
@@ -102,8 +103,17 @@ const LoyaltyTab = ({ settings, handleInputChange }) => {
         </div>
 
         <div style={styles.loyaltyNote}>
-          <strong>Note:</strong> Detailed loyalty program configuration including earning rates, redemption rules, 
+          <strong>Note:</strong> Detailed loyalty program configuration including earning rates, redemption rules,
           and tier settings can be found in the dedicated Loyalty Settings screen.
+        </div>
+
+        <div style={styles.linkRow}>
+          <Link to="/dashboard/pos/loyalty-settings" style={styles.settingsLink}>
+            Open Loyalty Program Settings
+          </Link>
+          <Link to="/dashboard/pos/loyalty-settings?tab=offers" style={styles.settingsLink}>
+            Configure Personalized Offers
+          </Link>
         </div>
       </div>
     </div>
@@ -229,7 +239,23 @@ const styles = {
     fontSize: TavariStyles.typography.fontSize.sm,
     color: TavariStyles.colors.gray700,
     lineHeight: TavariStyles.typography.lineHeight.relaxed
-  }
+  },
+  linkRow: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: TavariStyles.spacing.md,
+    marginTop: TavariStyles.spacing.lg,
+  },
+  settingsLink: {
+    display: 'inline-block',
+    padding: `${TavariStyles.spacing.sm} ${TavariStyles.spacing.lg}`,
+    backgroundColor: TavariStyles.colors.primary,
+    color: TavariStyles.colors.white,
+    borderRadius: TavariStyles.borderRadius.md,
+    fontSize: TavariStyles.typography.fontSize.sm,
+    fontWeight: TavariStyles.typography.fontWeight.semibold,
+    textDecoration: 'none',
+  },
 };
 
 export default LoyaltyTab;

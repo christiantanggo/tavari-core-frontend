@@ -11,12 +11,19 @@ import {
   SecurityWrapper, 
   useSecurityContext 
 } from '../Security';
-import { usePOSAuth } from '../hooks/usePOSAuth';
-import { useTaxCalculations } from '../hooks/useTaxCalculations';
-import POSAuthWrapper from '../components/Auth/POSAuthWrapper';
 import bcrypt from 'bcryptjs';
 import { sessionPersistence } from '../services/SessionPersistence';
-import { clearAllAuthData } from '../utils/authCleanup';
+import { clearAuthDataForExplicitLogout, resolveStoredBusinessId } from '../utils/authCleanup';
+import { persistShiftBusinessId } from '../utils/shiftBusinessId';
+import {
+  getCustomerDisplayBusinessId,
+  setCustomerDisplayPosLocked,
+} from '../services/customerDisplayLocalState';
+import { flushCustomerDisplayMirrorPush } from '../services/customerDisplayMirrorSync';
+import {
+  clearPermissionsSessionCache,
+  clearPosAuthSessionCache,
+} from '../utils/posAuthSessionCache';
 
 const UnlockComponent = () => {
   const { profile } = useUserProfile();
@@ -26,6 +33,8 @@ const UnlockComponent = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [showPin, setShowPin] = useState(false);
   const [failedAttempts, setFailedAttempts] = useState(0);
+  const [pinCooldownUntil, setPinCooldownUntil] = useState(null);
+  const [shiftContextError, setShiftContextError] = useState('');
   const [timeRemaining, setTimeRemaining] = useState(null);
   const [sessionInfo, setSessionInfo] = useState({
     timeLeft: '',
@@ -36,7 +45,15 @@ const UnlockComponent = () => {
   const employeeCacheRef = useRef(null);
   const employeeCachePromiseRef = useRef(null);
 
-  const getCurrentBusinessId = () => localStorage.getItem('currentBusinessId');
+  const getCurrentBusinessId = () => resolveStoredBusinessId();
+  const getStoredPosLoginUser = () => {
+    try {
+      const raw = localStorage.getItem('posLoginUser');
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      return null;
+    }
+  };
 
   const pinsMatch = useCallback(async (inputPin, storedPin) => {
     if (!storedPin) return false;
@@ -70,49 +87,12 @@ const UnlockComponent = () => {
 
     employeeCachePromiseRef.current = (async () => {
       try {
-        const { data: userRoles, error: rolesError } = await supabase
-          .from('user_roles')
-          .select('user_id, role')
-          .eq('business_id', businessId)
-          .eq('active', true);
-
-        if (rolesError) {
-          console.warn('Failed to load user roles for unlock cache:', rolesError.message);
-          return [];
-        }
-
-        if (!userRoles || userRoles.length === 0) {
-          return [];
-        }
-
-        // Dynamically derive role list from role_permissions. If none found, allow all roles present.
-        let roleSet = new Set();
-        try {
-          const { data: rp } = await supabase
-            .from('role_permissions')
-            .select('role_key')
-            .eq('business_id', businessId);
-          if (Array.isArray(rp) && rp.length > 0) {
-            roleSet = new Set(rp.map(r => r.role_key).filter(Boolean));
-          }
-        } catch (e) {
-          // non-fatal
-        }
-
-        const authorizedUserIds = userRoles
-          .filter((ur) => roleSet.size === 0 ? true : roleSet.has(ur.role))
-          .map((ur) => ur.user_id)
-          .filter(Boolean);
-
-        if (authorizedUserIds.length === 0) {
-          return [];
-        }
-
+        // Use RPC function that bypasses RLS to get ALL employees for this business
+        // This allows any employee to unlock regardless of who logged in
         const { data: staffMembers, error: staffError } = await supabase.rpc(
-          'get_staff_pins_for_unlock',
+          'get_all_staff_pins_for_unlock',
           {
-            p_business_id: businessId,
-            business_user_ids: authorizedUserIds
+            p_business_id: businessId
           }
         );
 
@@ -121,10 +101,9 @@ const UnlockComponent = () => {
           return [];
         }
 
-        const roleMap = new Map(userRoles.map((ur) => [ur.user_id, ur.role]));
         const employees = (staffMembers || []).map((staff) => ({
           ...staff,
-          role: roleMap.get(staff.id) || 'employee',
+          role: staff.role || 'employee',
           business_id: businessId
         }));
 
@@ -152,46 +131,42 @@ const UnlockComponent = () => {
     return result;
   }, []);
 
+  // Any staff PIN can unlock (same RPC as POS register — works without an active Supabase session).
   const findEmployeeByPin = useCallback(async (pin) => {
+    const businessId = getCurrentBusinessId();
+    if (!businessId) {
+      console.error('❌ [Unlock] No business ID — cannot validate PIN');
+      return { employee: null, reason: 'no_business' };
+    }
+
     const employees = await loadEmployeeCache();
-    for (const employee of employees) {
-      if (!employee?.pin) continue;
-      if (await pinsMatch(pin, employee.pin)) {
-        return employee;
+    if (!employees.length) {
+      console.error('❌ [Unlock] No staff PINs loaded for business');
+      return { employee: null, reason: 'no_staff_pins' };
+    }
+
+    for (const staff of employees) {
+      if (!staff.pin) continue;
+      if (await pinsMatch(pin, staff.pin)) {
+        return {
+          employee: {
+            ...staff,
+            role: staff.role || 'employee',
+            business_id: businessId,
+          },
+          reason: null,
+        };
       }
     }
-    return null;
+
+    return { employee: null, reason: 'bad_pin' };
   }, [loadEmployeeCache, pinsMatch]);
 
   const getRoleForUser = useCallback(async (userId) => {
     if (!userId) return 'employee';
     const cache = await loadEmployeeCache();
     const cached = cache.find((employee) => employee.id === userId);
-    if (cached?.role) {
-      return cached.role;
-    }
-
-    try {
-      const businessId = getCurrentBusinessId();
-      if (!businessId) return 'employee';
-
-      const { data, error } = await supabase
-        .from('business_users')
-        .select('role')
-        .eq('business_id', businessId)
-        .eq('user_id', userId)
-        .maybeSingle();
-
-      if (error) {
-        console.warn('Unable to resolve role for user:', error.message);
-        return 'employee';
-      }
-
-      return data?.role || 'employee';
-    } catch (err) {
-      console.warn('Failed to fetch role for user:', err?.message || err);
-      return 'employee';
-    }
+    return cached?.role || 'employee';
   }, [loadEmployeeCache]);
 
   const broadcastActivePosUserChange = () => {
@@ -222,6 +197,42 @@ const UnlockComponent = () => {
     }
   });
 
+  // Fresh PIN attempts on each idle lock; recover shift business id instead of silent login redirect
+  useEffect(() => {
+    localStorage.removeItem('pinFailedAttempts');
+    setFailedAttempts(0);
+
+    const cooldownRaw = localStorage.getItem('pinUnlockCooldownUntil');
+    if (cooldownRaw) {
+      const until = parseInt(cooldownRaw, 10);
+      if (until > Date.now()) {
+        setPinCooldownUntil(until);
+      } else {
+        localStorage.removeItem('pinUnlockCooldownUntil');
+      }
+    }
+
+    if (!sessionPersistence.isPersistenceEnabled()) {
+      setShiftContextError('Your shift session has ended. Use Sign Out Completely, then log in with email and password.');
+      return;
+    }
+
+    let businessId = resolveStoredBusinessId();
+    if (!businessId) {
+      const loginUser = getStoredPosLoginUser();
+      if (loginUser?.business_id) {
+        persistShiftBusinessId(loginUser.business_id);
+        businessId = loginUser.business_id;
+      }
+    }
+
+    if (!businessId) {
+      setShiftContextError('Could not determine which business you are working in. Sign out and log in again, or contact a manager.');
+    } else {
+      setShiftContextError('');
+    }
+  }, []);
+
   // Focus PIN input on component mount
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -234,26 +245,29 @@ const UnlockComponent = () => {
   }, []);
 
   // Ensure session continues to refresh even when on unlock screen
-  // This prevents logout while the timeout modal is visible
   useEffect(() => {
-    // Ensure session persistence is enabled
     if (sessionPersistence.isPersistenceEnabled()) {
       sessionPersistence.startAutoRefresh();
+      void sessionPersistence.restoreSession();
     }
-    
-    return () => {
-      // Don't stop refresh on unmount - let it continue
-    };
   }, []);
 
   // Load failed attempts from localStorage
   useEffect(() => {
-    const storedAttempts = parseInt(localStorage.getItem('pinFailedAttempts') || '0', 10);
-    setFailedAttempts(storedAttempts);
-
-    // Update session info
     updateSessionInfo();
-    const interval = setInterval(updateSessionInfo, 1000);
+    const interval = setInterval(() => {
+      updateSessionInfo();
+      const cooldownRaw = localStorage.getItem('pinUnlockCooldownUntil');
+      if (cooldownRaw) {
+        const until = parseInt(cooldownRaw, 10);
+        if (until > Date.now()) {
+          setPinCooldownUntil(until);
+        } else {
+          localStorage.removeItem('pinUnlockCooldownUntil');
+          setPinCooldownUntil(null);
+        }
+      }
+    }, 1000);
     
     return () => clearInterval(interval);
   }, []);
@@ -294,7 +308,7 @@ const UnlockComponent = () => {
       localStorage.setItem('lastForcedLogout', today);
       
       // 🔧 CRITICAL: Use centralized cleanup function
-      clearAllAuthData('forced_logout');
+      clearAuthDataForExplicitLogout('forced_logout');
       
       // Disable session persistence on forced logout
       sessionPersistence.disablePersistence();
@@ -310,31 +324,35 @@ const UnlockComponent = () => {
       }, 'high');
       
       // Even on error, try to clean up
-      clearAllAuthData('logout_error');
+      clearAuthDataForExplicitLogout('logout_error');
       navigate('/login');
     }
   };
 
   const handleUnlock = async () => {
     if (isLoading) return;
+
+    if (pinCooldownUntil && Date.now() < pinCooldownUntil) {
+      const seconds = Math.ceil((pinCooldownUntil - Date.now()) / 1000);
+      setError(`Too many wrong PINs. Wait ${seconds}s and try again.`);
+      return;
+    }
+
+    if (shiftContextError && !resolveStoredBusinessId()) {
+      setError(shiftContextError);
+      return;
+    }
     
     setError('');
     setIsLoading(true);
     clearValidationErrors();
 
     try {
-      // Check for daily logout requirement
-      const now = new Date();
-      const currentHour = now.getHours();
-      const currentMinute = now.getMinutes();
-      const isAfter3am = currentHour > 3 || (currentHour === 3 && currentMinute > 0);
-      const today = now.toISOString().split('T')[0];
-      const lastForcedLogout = localStorage.getItem('lastForcedLogout');
-
-      if (isAfter3am && lastForcedLogout !== today) {
-        await handleForceLogout('Daily security logout (after 3 AM)');
-        return;
-      }
+      // Note: Daily 3am logout is handled by SessionPersistence.refreshToken() and App.jsx
+      // We don't check it here during unlock because:
+      // 1. If it's after 3am and the session expired, the user wouldn't be able to unlock anyway
+      // 2. If the user logged in today (after 3am), they should be able to unlock with PIN
+      // 3. The 3am check should only trigger on session refresh or app load, not during unlock
 
       // Validate PIN input
       const pinValidation = await validateInput(pinInput, 'pin', 'pin');
@@ -358,38 +376,42 @@ const UnlockComponent = () => {
         return;
       }
 
-      let storedPin = profile?.pin;
-      if (!storedPin && profile?.id) {
-        const { data: userRow } = await supabase
-          .from('users')
-          .select('pin')
-          .eq('id', profile.id)
-          .maybeSingle();
+      // Check PIN against ONLY the original logged-in user (full app unlock)
+      // NOTE: For register-only unlock, see POSRegister.jsx which checks all employees
+      console.log('🔓 [Unlock] handleUnlock called - validating PIN for full app unlock');
+      console.log('🔓 [Unlock] PIN input length:', pinInput?.length);
+      console.log('🔓 [Unlock] Profile available:', {
+        hasProfile: !!profile,
+        profileId: profile?.id,
+        profileEmail: profile?.email
+      });
+      
+      const pinResult = await findEmployeeByPin(pinInput);
+      const unlockingUser = pinResult?.employee;
+      const pinMatches = !!unlockingUser;
 
-        storedPin = userRow?.pin;
-      }
-
-      let unlockingUser = profile;
-      let pinMatches = false;
-
-      // Verify against logged-in user's PIN first
-      if (await pinsMatch(pinInput, storedPin)) {
-        pinMatches = true;
-      } else {
-        // Attempt to match against any other employee for this business
-        const alternateUser = await findEmployeeByPin(pinInput);
-        if (alternateUser) {
-          unlockingUser = alternateUser;
-          pinMatches = true;
-        }
-      }
+      console.log('🔓 [Unlock] PIN validation result:', {
+        pinMatches,
+        foundUser: !!unlockingUser,
+        userId: unlockingUser?.id,
+        userEmail: unlockingUser?.email
+      });
 
       if (!pinMatches) {
+        console.log('❌ [Unlock] PIN validation failed - will show error below');
         // Failed attempt, existing logic handles below
       }
 
       if (pinMatches && unlockingUser) {
-        const effectiveRole = unlockingUser.role || await getRoleForUser(unlockingUser.id);
+        console.log('✅ [Unlock] PIN validated successfully - proceeding with full app unlock');
+        const storedLoginUser = getStoredPosLoginUser();
+        const isOriginalLoggedInUser = unlockingUser.id && profile?.id && unlockingUser.id === profile.id;
+        const effectiveRole = (
+          (isOriginalLoggedInUser && storedLoginUser?.id === unlockingUser.id && storedLoginUser?.role)
+          || unlockingUser.role
+          || profile?.role
+          || await getRoleForUser(unlockingUser.id)
+        );
         // Successful unlock
         await recordAction('unlock', true, unlockingUser?.id || profile?.id);
         
@@ -408,31 +430,24 @@ const UnlockComponent = () => {
         }, 'low');
 
         // Insert successful unlock audit log
-        await supabase.from('audit_logs').insert([
-          {
-            user_id: unlockingUser?.id || profile?.id,
-            event_type: 'pin_login',
-            details: {
-              method: 'unlock_screen',
-              time: new Date().toISOString(),
-              device_fingerprint: securityState.deviceFingerprint,
-              user_ip: securityState.userIP
-            },
+        const businessId = getCurrentBusinessId();
+        await supabase.from('audit_logs').insert({
+          user_id: unlockingUser?.id || profile?.id,
+          business_id: businessId || null,
+          event_type: 'pin_login',
+          details: {
+            method: 'unlock_screen',
+            time: new Date().toISOString(),
+            device_fingerprint: securityState.deviceFingerprint,
+            user_ip: securityState.userIP,
           },
-          {
-            user_id: unlockingUser?.id || profile?.id,
-            event_type: 'pin_unlock',
-            details: {
-              method: 'unlock_screen',
-              time: new Date().toISOString(),
-              device_fingerprint: securityState.deviceFingerprint,
-              user_ip: securityState.userIP
-            },
+        }).then(({ error: auditError }) => {
+          if (auditError) {
+            console.warn('Unlock audit log insert failed:', auditError.message);
           }
-        ]);
+        });
 
         // Track which employee unlocked the register so POS can attribute sales
-        const businessId = getCurrentBusinessId();
         if (unlockingUser?.id) {
           const displayName = unlockingUser.full_name || [unlockingUser.first_name, unlockingUser.last_name].filter(Boolean).join(' ') || unlockingUser.email || `Employee ${unlockingUser.id}`;
           const activeUserPayload = {
@@ -450,23 +465,48 @@ const UnlockComponent = () => {
 
           localStorage.setItem('posActiveUser', JSON.stringify(activeUserPayload));
           localStorage.setItem('posLastUnlockedBy', JSON.stringify(activeUserPayload));
+          // Drop stale cashier permission/auth caches so dashboard remounts as the logged-in owner.
+          clearPermissionsSessionCache(businessId || null);
+          clearPosAuthSessionCache(businessId || null);
           broadcastActivePosUserChange();
         }
 
-        // Clear failed attempts
         localStorage.removeItem('pinFailedAttempts');
         setError('');
+
+        localStorage.removeItem('pinUnlockCooldownUntil');
+        setPinCooldownUntil(null);
+
+        setCustomerDisplayPosLocked(false);
+        window.dispatchEvent(new Event('tavari:session-unlocked'));
+        const displayBusinessId = getCustomerDisplayBusinessId();
+        if (displayBusinessId) {
+          flushCustomerDisplayMirrorPush(displayBusinessId);
+        }
         
         // Ensure session is still valid and restore if needed
+        // Note: We don't try to restore if persistence is disabled due to 3am logout
+        // The session might have expired, but that's okay - the user can continue working
+        // The app-level session check will handle redirecting to login if needed
         const { data: { session: currentSession } } = await supabase.auth.getSession();
         if (!currentSession && sessionPersistence.isPersistenceEnabled()) {
-          // Try to restore session before navigating
-          const restoreResult = await sessionPersistence.restoreSession();
-          if (restoreResult.restored) {
-            console.log('✅ Session restored after PIN unlock');
-          } else {
-            console.warn('⚠️ Could not restore session after PIN unlock');
+          // Only try to restore if persistence is still enabled (not disabled by 3am check)
+          try {
+            const restoreResult = await sessionPersistence.restoreSession();
+            if (restoreResult.restored) {
+              console.log('✅ Session restored after PIN unlock');
+            } else {
+              console.log('⚠️ Could not restore session after PIN unlock:', restoreResult.reason);
+              // Don't fail the unlock - let the user continue
+              // The session might be expired, but they can still work
+            }
+          } catch (restoreError) {
+            console.error('⚠️ Error restoring session after PIN unlock:', restoreError);
+            // Don't fail the unlock - continue anyway
           }
+        } else if (!currentSession) {
+          console.log('ℹ️ No active session and persistence disabled - user will need to login when session expires');
+          // Continue with unlock anyway - the app will handle session expiry
         }
         
         const displayName = unlockingUser?.full_name || unlockingUser?.name || unlockingUser?.first_name || profile?.full_name || profile?.first_name;
@@ -482,6 +522,16 @@ const UnlockComponent = () => {
         }
 
       } else {
+        if (pinResult?.reason === 'no_staff_pins' || pinResult?.reason === 'no_business') {
+          setError(
+            pinResult.reason === 'no_business'
+              ? 'Business location not set. Sign out and log in again, or ask a manager.'
+              : 'Unable to load staff PINs for this location. Ask a manager to unlock or sign out and log in again.'
+          );
+          setIsLoading(false);
+          return;
+        }
+
         // Failed PIN attempt
         const newFailedCount = failedAttempts + 1;
         setFailedAttempts(newFailedCount);
@@ -500,6 +550,7 @@ const UnlockComponent = () => {
 
         await supabase.from('audit_logs').insert({
           user_id: profile?.id,
+          business_id: getCurrentBusinessId() || null,
           event_type: 'failed_pin_login',
           details: {
             attempt: newFailedCount,
@@ -534,6 +585,7 @@ const UnlockComponent = () => {
 
           await supabase.from('audit_logs').insert({
             user_id: profile?.id,
+            business_id: getCurrentBusinessId() || null,
             event_type: 'suspicious_activity',
             details: {
               type: 'PIN brute force attempt',
@@ -544,18 +596,22 @@ const UnlockComponent = () => {
           });
         }
 
-        // Handle lockout after 3 failed attempts
+        // Brief cooldown after 3 wrong PINs — keep the day session; do not force full logout
         if (newFailedCount >= 3) {
-          await logSecurityEvent('account_lockout', {
-            user_id: profile?.id,
-            data_type: 'security_enforcement',
-            data_action: 'pin_lockout_triggered',
-            threat_type: 'brute_force_protection',
-            failed_attempt_count: newFailedCount
-          }, 'high');
+          const cooldownUntil = Date.now() + 2 * 60 * 1000;
+          localStorage.setItem('pinUnlockCooldownUntil', cooldownUntil.toString());
+          setPinCooldownUntil(cooldownUntil);
+          localStorage.removeItem('pinFailedAttempts');
+          setFailedAttempts(0);
 
-          toast.error('Account locked. Please log in again.');
-          await handleForceLogout(`Account locked after ${newFailedCount} failed PIN attempts`);
+          await logSecurityEvent('pin_unlock_cooldown', {
+            data_type: 'security_enforcement',
+            data_action: 'pin_cooldown_triggered',
+            failed_attempt_count: newFailedCount
+          }, 'medium');
+
+          setError('Too many wrong PINs. Wait 2 minutes and try again. Your shift login is still active.');
+          toast.error('Wait 2 minutes, then try your PIN again.');
         } else {
           setError(`Incorrect PIN. Attempt ${newFailedCount} of 3.`);
           toast.error(`Incorrect PIN. ${3 - newFailedCount} attempts remaining.`);
@@ -784,6 +840,15 @@ const UnlockComponent = () => {
     }
   };
 
+  const storedLoginUser = getStoredPosLoginUser();
+  const shiftDisplayName =
+    profile?.full_name ||
+    profile?.email ||
+    storedLoginUser?.full_name ||
+    storedLoginUser?.name ||
+    storedLoginUser?.email ||
+    'Shift session';
+
   return (
     <div style={styles.container}>
       <div style={styles.backgroundPattern} />
@@ -798,13 +863,19 @@ const UnlockComponent = () => {
         
         <h2 style={styles.title}>Session Locked</h2>
         <p style={styles.subtitle}>
-          Enter your 4-digit PIN to continue working
+          Enter any staff member&apos;s 4-digit PIN to continue working
         </p>
+
+        {shiftContextError && (
+          <div style={styles.errorMessage}>
+            {shiftContextError}
+          </div>
+        )}
         
         {/* User Information */}
         <div style={styles.userInfo}>
           <div style={styles.userName}>
-            {profile?.full_name || profile?.email || 'Current User'}
+            {shiftDisplayName}
           </div>
           <div style={styles.sessionDetails}>
             <span>Auto-logout at: {sessionInfo.autoLogoutAt}</span>
@@ -841,7 +912,7 @@ const UnlockComponent = () => {
                 }
               }}
               onPaste={handlePinPaste}
-              disabled={isLoading}
+              disabled={isLoading || Boolean(pinCooldownUntil && Date.now() < pinCooldownUntil)}
               maxLength={4}
               autoComplete="off"
               spellCheck={false}
@@ -858,10 +929,11 @@ const UnlockComponent = () => {
             </button>
           </div>
           <div style={styles.attemptsWarning}>
-            {failedAttempts === 0 
-              ? 'Enter your 4-digit PIN'
-              : `${3 - failedAttempts} attempts remaining`
-            }
+            {pinCooldownUntil && Date.now() < pinCooldownUntil
+              ? `Wait ${Math.ceil((pinCooldownUntil - Date.now()) / 1000)}s before trying again`
+              : failedAttempts === 0
+                ? 'Any staff member can enter their 4-digit PIN'
+                : `${3 - failedAttempts} attempts remaining`}
           </div>
         </div>
 
@@ -913,7 +985,7 @@ const Unlock = () => {
       enableAuditLogging={true}
       sensitiveComponent={true}
       requireSecureConnection={true}
-      sessionTimeout={5 * 60 * 1000} // 5 minutes
+      sessionTimeout={24 * 60 * 60 * 1000}
       securityLevel="high"
       autoBlock={false}
       showSecurityStatus={false}
@@ -927,13 +999,7 @@ const Unlock = () => {
         // Rate limit events logged automatically
       }}
     >
-      <POSAuthWrapper
-        requiredRoles={['owner', 'manager', 'admin', 'employee']}
-        requireBusiness={false}
-        componentName="UnlockScreen"
-      >
-        <UnlockComponent />
-      </POSAuthWrapper>
+      <UnlockComponent />
     </SecurityWrapper>
   );
 };

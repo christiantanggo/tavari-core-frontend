@@ -1,9 +1,5 @@
 # Deployment Information
 
-## Current Deployment
-**Date:** January 14, 2026  
-**Version:** v1
+The live **build label** (date + version) is shown in the app on the **dashboard left sidebar**, at the bottom of the navigation.
 
-## Deployment History
-- January 14, 2026 v1 - Fixed Edge Function email exists error handling, added PDF download/print for contract signing
-
+Update that string in `src/components/SidebarNav.jsx` (`SIDEBAR_DEPLOYMENT_LABEL`) when you cut a new release.

@@ -45,31 +45,38 @@ const PETPremiumHoursSection = ({
    * Lieu hours that are paid out should NOT get premiums (they already got premiums when earned)
    */
   const calculateAutomaticPremiumHours = useCallback((premium, regularHoursPaidProp, overtimeHoursProp, statHolidayHoursProp, lieuEarnedProp, regularHours, overtimeHours, lieuUsedHours) => {
-    // Use passed props if available (from calculated preview), otherwise fall back to local hours
-    const regularPaid = formatToTwoDecimals(regularHoursPaidProp !== null && regularHoursPaidProp !== undefined ? regularHoursPaidProp : (regularHours || 0));
-    const overtime = formatToTwoDecimals(overtimeHoursProp !== null && overtimeHoursProp !== undefined ? overtimeHoursProp : (overtimeHours || 0));
-    const statHoliday = formatToTwoDecimals(statHolidayHoursProp !== null && statHolidayHoursProp !== undefined ? statHolidayHoursProp : 0);
-    const lieuUsed = formatToTwoDecimals(lieuUsedHours || 0);
+    // Always get values from localHours (most reliable source - reflects what user actually entered)
+    const totalHrs = parseFloat(localHours?.total_hours || 0);
+    const overtimeHrs = parseFloat(localHours?.overtime_hours || 0);
+    const statHrs = parseFloat(localHours?.stat_worked_hours || 0);
+    const lieuUsedHrs = parseFloat(localHours?.lieu_used || 0);
     
-    // Total paid hours = regular hours paid + overtime + stat holiday + paid-out lieu hours
-    const totalPaidHours = regularPaid + overtime + statHoliday + lieuUsed;
+    // Calculate regular hours: total - overtime - stat holiday (for other premium types)
+    const regularHrs = Math.max(0, totalHrs - overtimeHrs - statHrs);
+    const regularPaid = formatToTwoDecimals(regularHrs);
+    const overtime = formatToTwoDecimals(overtimeHrs);
+    const statHoliday = formatToTwoDecimals(statHrs);
+    const lieuUsed = formatToTwoDecimals(lieuUsedHrs);
   
-    console.log(`🔄 CALCULATING ${premium.name}:`, {
-      applies_to: premium.applies_to,
-      regularPaid,
-      overtime,
-      statHoliday,
-      totalPaidHours,
-      lieuEarned: lieuEarnedProp,
-      lieuUsed,
-      note: 'Premiums apply to paid hours only, not lieu hours paid out'
-    });
+    // Enhanced logging to show breakdown clearly
+    console.log(`🔄 CALCULATING ${premium.name}:`);
+    console.log(`  applies_to: ${premium.applies_to}`);
+    console.log(`  localHours.total_hours: ${totalHrs}`);
+    console.log(`  localHours.overtime_hours: ${overtimeHrs}`);
+    console.log(`  localHours.stat_worked_hours: ${statHrs}`);
+    console.log(`  calculated regularHrs: ${regularHrs} (${totalHrs} - ${overtimeHrs} - ${statHrs})`);
+    console.log(`  regularPaid: ${regularPaid}`);
+    console.log(`  overtime: ${overtime}`);
+    console.log(`  statHoliday: ${statHoliday}`);
+    console.log(`  lieuUsed: ${lieuUsed}`);
   
     switch (premium.applies_to) {
       case 'all_hours':
-        // Apply to all paid hours including lieu payouts
-        const result = formatToTwoDecimals(totalPaidHours);
-        console.log(`🔄 ${premium.name} (all_hours): ${totalPaidHours} paid hours -> ${result}`);
+        // Apply to all hours worked - use total_hours directly (already includes regular + overtime + stat)
+        // Also add lieu used hours (paid out separately)
+        const totalForPremium = totalHrs + lieuUsedHrs;
+        const result = formatToTwoDecimals(totalForPremium);
+        console.log(`🔄 ${premium.name} (all_hours): ${totalHrs} total hours + ${lieuUsedHrs} lieu used = ${totalForPremium} -> ${result}`);
         return result;
       
       case 'specific_hours':
@@ -92,7 +99,7 @@ const PETPremiumHoursSection = ({
       default:
         return 0; // Default to manual entry
     }
-  }, [formatToTwoDecimals]);
+  }, [formatToTwoDecimals, localHours]);
 
   /**
    * Check if premium input should be disabled (automatic calculation)
@@ -148,17 +155,16 @@ const PETPremiumHoursSection = ({
       const overtimeHoursLocal = formatToTwoDecimals(localHours.overtime_hours || 0);
       const lieuUsedHours = formatToTwoDecimals(localHours.lieu_used || 0);
     
-      console.log('🔄 PREMIUM AUTO-CALC:', {
-        regularHoursPaid,
-        overtimeHours,
-        statHolidayHours,
-        lieuEarned,
-        regularHours,
-        overtimeHoursLocal,
-        lieuUsedHours,
-        premiumHours: localHours.premium_hours,
-        note: 'Using paid hours for premium calculation'
-      });
+      console.log('🔄 PREMIUM AUTO-CALC:');
+      console.log(`  regularHoursPaid (prop): ${regularHoursPaid}`);
+      console.log(`  overtimeHours (prop): ${overtimeHours}`);
+      console.log(`  statHolidayHours (prop): ${statHolidayHours}`);
+      console.log(`  lieuEarned (prop): ${lieuEarned}`);
+      console.log(`  regularHours (local): ${regularHours}`);
+      console.log(`  overtimeHoursLocal (local): ${overtimeHoursLocal}`);
+      console.log(`  lieuUsedHours (local): ${lieuUsedHours}`);
+      console.log(`  localHours.overtime_hours: ${localHours.overtime_hours || 0}`);
+      console.log(`  premiumHours:`, localHours.premium_hours);
     
       const updatedPremiumHours = { ...localHours.premium_hours };
       let hasChanges = false;
@@ -191,7 +197,23 @@ const PETPremiumHoursSection = ({
         onPremiumHoursChange(updatedPremiumHours);
       }
     }
-  }, [localHours.total_hours, localHours.overtime_hours, localHours.lieu_used, regularHoursPaid, overtimeHours, statHolidayHours, lieuEarned, allPremiums, calculateAutomaticPremiumHours, onPremiumHoursChange, employee, isEmployeePremiumEnabled, formatToTwoDecimals]);
+  }, [
+    localHours.total_hours,
+    localHours.overtime_hours,
+    localHours.lieu_used,
+    // Re-run when parent sets manual / schedule-imported premium keys (e.g. shift lead) so we do not clobber with a stale spread
+    localHours.premium_hours,
+    regularHoursPaid,
+    overtimeHours,
+    statHolidayHours,
+    lieuEarned,
+    allPremiums,
+    calculateAutomaticPremiumHours,
+    onPremiumHoursChange,
+    employee,
+    isEmployeePremiumEnabled,
+    formatToTwoDecimals
+  ]);
   
   // Handle manual premium hours change
   const handlePremiumHoursChange = useCallback(async (premiumName, newHours, shouldFormat = false) => {
@@ -391,8 +413,13 @@ const PETPremiumHoursSection = ({
           const rawValue = localHours.premium_hours?.[premium.name];
           const currentHours = rawValue || 0;
           const isDisabled = isPremiumInputDisabled(premium) || saving;
+          const isManualPremium = premium.applies_to === 'specific_hours';
           const displayText = getPremiumDisplayText(premium);
           const explanation = getPremiumExplanation(premium);
+          /** Manual premiums (e.g. shift lead) can exceed total hours when adjusting; auto premiums stay capped. */
+          const maxAttr = isManualPremium
+            ? undefined
+            : formatToTwoDecimals(localHours.total_hours || 0);
           
           return (
             <div key={`${premium.id}-${index}`} style={styles.premiumInputGroup}>
@@ -403,7 +430,7 @@ const PETPremiumHoursSection = ({
                 type="number"
                 step="0.01"
                 min="0"
-                max={formatToTwoDecimals(localHours.total_hours || 0)}
+                max={maxAttr}
                 style={{
                   ...styles.input,
                   ...(isDisabled ? {
@@ -412,7 +439,13 @@ const PETPremiumHoursSection = ({
                     opacity: 0.7
                   } : {})
                 }}
-                value={currentHours === 0 && !isDisabled ? '' : currentHours}
+                value={
+                  isDisabled
+                    ? formatToTwoDecimals(typeof currentHours === 'number' ? currentHours : parseFloat(currentHours) || 0)
+                    : currentHours === 0 && !isDisabled
+                      ? ''
+                      : currentHours
+                }
                 onChange={(e) => {
                   if (!isDisabled) {
                     // Allow free typing without formatting

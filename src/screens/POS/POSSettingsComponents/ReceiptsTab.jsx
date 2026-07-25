@@ -12,21 +12,22 @@ const ReceiptsTab = ({ settings, handleInputChange }) => {
         {/* Step 127: Receipt automation toggle */}
         <div style={styles.setting}>
           <TavariCheckbox
-            checked={settings.receipt_automation}
-            onChange={(checked) => handleInputChange('receipt_automation', checked)}
+            checked={!!settings.receipt_auto_print}
+            onChange={(checked) => handleInputChange('receipt_auto_print', checked)}
             label="Enable automatic receipt printing"
-            id="receipt-automation"
-            testId="receipt-automation-checkbox"
+            id="receipt-auto-print"
+            testId="receipt-auto-print-checkbox"
           />
           <div style={styles.settingDescription}>
             When enabled, receipts will automatically print after each transaction without prompting.
+            When off, staff can still print manually from the receipt screen.
           </div>
         </div>
 
         {/* Step 127: Require receipt confirmation toggle */}
         <div style={styles.setting}>
           <TavariCheckbox
-            checked={settings.require_receipt_confirmation}
+            checked={!!settings.require_receipt_confirmation}
             onChange={(checked) => handleInputChange('require_receipt_confirmation', checked)}
             label="Require receipt confirmation"
             id="require-receipt-confirmation"
@@ -55,25 +56,25 @@ const ReceiptsTab = ({ settings, handleInputChange }) => {
         <div style={styles.receiptPreview}>
           <h4 style={styles.subSectionTitle}>Receipt Behavior Preview</h4>
           <div style={styles.previewContent}>
-            {settings.receipt_automation && !settings.require_receipt_confirmation && (
+            {settings.receipt_auto_print && !settings.require_receipt_confirmation && (
               <div style={styles.previewItem}>
                 <span style={styles.previewIcon}>🖨️</span>
                 <span>Receipt automatically prints after every sale - No confirmation needed</span>
               </div>
             )}
-            {!settings.receipt_automation && settings.require_receipt_confirmation && (
+            {!settings.receipt_auto_print && settings.require_receipt_confirmation && (
               <div style={styles.previewItem}>
                 <span style={styles.previewIcon}>❓</span>
                 <span>Staff must ask customer if they want a receipt - Manual printing</span>
               </div>
             )}
-            {settings.receipt_automation && settings.require_receipt_confirmation && (
+            {settings.receipt_auto_print && settings.require_receipt_confirmation && (
               <div style={styles.previewItem}>
                 <span style={styles.previewIcon}>✅</span>
                 <span>Staff confirms receipt preference - Then prints automatically if yes</span>
               </div>
             )}
-            {!settings.receipt_automation && !settings.require_receipt_confirmation && (
+            {!settings.receipt_auto_print && !settings.require_receipt_confirmation && (
               <div style={styles.previewItem}>
                 <span style={styles.previewIcon}>📄</span>
                 <span>Receipt options shown - Staff or customer chooses</span>

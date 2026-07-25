@@ -1,6 +1,6 @@
 // screens/POS/RefundsScreen.jsx - WITH PERMISSION SYSTEM + NO CONSOLE LOGGING
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import toast from 'react-hot-toast';
 
@@ -25,6 +25,7 @@ import BarcodeScanHandler from '../../components/POS/BarcodeScanHandler';
 
 const RefundsScreen = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   
   // Security context for sensitive refund operations
   const {
@@ -42,7 +43,7 @@ const RefundsScreen = () => {
 
   // Authentication using standardized hook
   const auth = usePOSAuth({
-    requiredRoles: ['cashier', 'manager', 'owner'],
+    requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'RefundsScreen'
   });
@@ -95,13 +96,27 @@ const RefundsScreen = () => {
 
   useEffect(() => {
     if (auth.selectedBusinessId && !permissionsLoading && canProcessRefunds) {
-      if (searchTerm) {
-        searchTransactions();
-      } else {
-        loadTransactions();
-      }
+      const trimmedSearchTerm = searchTerm.trim();
+      const timeoutId = setTimeout(() => {
+        if (trimmedSearchTerm) {
+          searchTransactions(trimmedSearchTerm);
+        } else {
+          loadTransactions();
+        }
+      }, 250);
+
+      return () => clearTimeout(timeoutId);
     }
   }, [searchTerm, auth.selectedBusinessId, permissionsLoading, canProcessRefunds]);
+
+  useEffect(() => {
+    const transactionId = location.state?.transactionId;
+    if (!transactionId || !auth.selectedBusinessId || permissionsLoading || !canProcessRefunds) {
+      return;
+    }
+
+    loadTransactionById(transactionId);
+  }, [location.state?.transactionId, auth.selectedBusinessId, permissionsLoading, canProcessRefunds]);
 
   const loadBusinessSettings = async () => {
     try {
@@ -183,6 +198,89 @@ const RefundsScreen = () => {
     }
   };
 
+  const attachRefundTotals = async (sales) => {
+    if (!sales || sales.length === 0) return [];
+
+    const saleIds = sales.map((sale) => sale.id);
+    const { data: refunds, error: refundsError } = await supabase
+      .from('pos_refunds')
+      .select('original_sale_id, total_refund_amount')
+      .in('original_sale_id', saleIds);
+
+    if (refundsError) {
+      throw refundsError;
+    }
+
+    const refundAmounts = {};
+    (refunds || []).forEach((refund) => {
+      refundAmounts[refund.original_sale_id] =
+        (refundAmounts[refund.original_sale_id] || 0) + (refund.total_refund_amount || 0);
+    });
+
+    return sales.map((sale) => ({
+      ...sale,
+      total_refunded: refundAmounts[sale.id] || 0,
+      remaining_refundable: (sale.total || 0) - (refundAmounts[sale.id] || 0)
+    }));
+  };
+
+  const loadTransactionById = async (transactionId) => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const { data: sale, error: saleError } = await supabase
+        .from('pos_sales')
+        .select(`
+          id,
+          sale_number,
+          subtotal,
+          tax,
+          discount,
+          loyalty_discount,
+          total,
+          payment_status,
+          customer_name,
+          created_at,
+          user_id,
+          qr_code,
+          pos_sale_items (
+            id,
+            inventory_id,
+            name,
+            sku,
+            quantity,
+            unit_price,
+            total_price,
+            modifiers,
+            notes
+          )
+        `)
+        .eq('business_id', auth.selectedBusinessId)
+        .eq('id', transactionId)
+        .maybeSingle();
+
+      if (saleError) throw saleError;
+      if (!sale) {
+        setError('Receipt transaction not found');
+        return;
+      }
+
+      const [transactionWithRefunds] = await attachRefundTotals([sale]);
+      setSelectedTransaction(transactionWithRefunds);
+      setShowRefundModal(true);
+      setTransactions((prev) => {
+        const exists = prev.some((item) => item.id === transactionWithRefunds.id);
+        return exists ? prev : [transactionWithRefunds, ...prev];
+      });
+      navigate(location.pathname, { replace: true, state: {} });
+    } catch (err) {
+      setError('Failed to load transaction: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const loadTransactions = async () => {
     try {
       setLoading(true);
@@ -244,34 +342,7 @@ const RefundsScreen = () => {
 
       // Get existing refunds for these sales
       if (sales && sales.length > 0) {
-        const saleIds = sales.map(sale => sale.id);
-        const { data: refunds, error: refundsError } = await supabase
-          .from('pos_refunds')
-          .select('original_sale_id, total_refund_amount')
-          .in('original_sale_id', saleIds);
-
-        if (refundsError) {
-          await logSecurityEvent('refund_load_warning', {
-            action: 'load_refunds_failed',
-            business_id: auth.selectedBusinessId,
-            error_message: refundsError.message
-          }, 'low');
-        }
-
-        // Calculate refunded amounts per sale
-        const refundAmounts = {};
-        (refunds || []).forEach(refund => {
-          refundAmounts[refund.original_sale_id] = 
-            (refundAmounts[refund.original_sale_id] || 0) + (refund.total_refund_amount || 0);
-        });
-
-        // Add refund info to transactions
-        const transactionsWithRefunds = sales.map(sale => ({
-          ...sale,
-          total_refunded: refundAmounts[sale.id] || 0,
-          remaining_refundable: (sale.total || 0) - (refundAmounts[sale.id] || 0)
-        }));
-
+        const transactionsWithRefunds = await attachRefundTotals(sales);
         setTransactions(transactionsWithRefunds);
       } else {
         setTransactions([]);
@@ -289,8 +360,10 @@ const RefundsScreen = () => {
     }
   };
 
-  const searchTransactions = async () => {
-    if (!searchTerm.trim()) {
+  const searchTransactions = async (searchValue = searchTerm) => {
+    const normalizedSearchTerm = searchValue.trim();
+
+    if (!normalizedSearchTerm) {
       loadTransactions();
       return;
     }
@@ -300,7 +373,7 @@ const RefundsScreen = () => {
       setError(null);
 
       // Validate search input
-      const validation = await validateInput(searchTerm, 'text', 'search_term');
+      const validation = await validateInput(normalizedSearchTerm, 'text', 'search_term');
       if (!validation.valid) {
         setError(validation.error);
         setLoading(false);
@@ -318,7 +391,7 @@ const RefundsScreen = () => {
       await logSecurityEvent('refund_search', {
         action: 'search_transactions',
         business_id: auth.selectedBusinessId,
-        search_term_length: searchTerm.length
+        search_term_length: normalizedSearchTerm.length
       }, 'low');
 
       const { data: sales, error } = await supabase
@@ -350,7 +423,7 @@ const RefundsScreen = () => {
         `)
         .eq('business_id', auth.selectedBusinessId)
         .eq('payment_status', 'completed')
-        .or(`sale_number.ilike.%${searchTerm}%,customer_name.ilike.%${searchTerm}%`)
+        .or(`sale_number.ilike.%${normalizedSearchTerm}%,customer_name.ilike.%${normalizedSearchTerm}%`)
         .order('created_at', { ascending: false })
         .limit(50);
 
@@ -360,24 +433,7 @@ const RefundsScreen = () => {
 
       // Get refund info for search results
       if (sales && sales.length > 0) {
-        const saleIds = sales.map(sale => sale.id);
-        const { data: refunds } = await supabase
-          .from('pos_refunds')
-          .select('original_sale_id, total_refund_amount')
-          .in('original_sale_id', saleIds);
-
-        const refundAmounts = {};
-        (refunds || []).forEach(refund => {
-          refundAmounts[refund.original_sale_id] = 
-            (refundAmounts[refund.original_sale_id] || 0) + (refund.total_refund_amount || 0);
-        });
-
-        const transactionsWithRefunds = sales.map(sale => ({
-          ...sale,
-          total_refunded: refundAmounts[sale.id] || 0,
-          remaining_refundable: (sale.total || 0) - (refundAmounts[sale.id] || 0)
-        }));
-
+        const transactionsWithRefunds = await attachRefundTotals(sales);
         setTransactions(transactionsWithRefunds);
       } else {
         setTransactions([]);
@@ -709,7 +765,7 @@ const RefundsScreen = () => {
       securityLevel="high"
     >
       <POSAuthWrapper 
-        requiredRoles={['cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         requireBusiness={true}
         componentName="RefundsScreen"
       >

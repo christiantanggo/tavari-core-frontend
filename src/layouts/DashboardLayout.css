@@ -1,0 +1,70 @@
+/* Mobile slide-out nav; desktop docked sidebar */
+.dashboard-layout-row {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  min-height: calc(100vh - 60px);
+}
+
+.dashboard-sidebar-panel {
+  flex-shrink: 0;
+  width: 240px;
+  min-width: 240px;
+}
+
+.dashboard-main {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  /* HeaderBar is position:fixed (60px) — main content must start below it */
+  padding: 60px 20px 20px;
+}
+
+.nav-drawer-backdrop {
+  display: none;
+}
+
+@media screen and (max-width: 768px) {
+  .dashboard-sidebar-panel {
+    position: fixed;
+    top: 60px;
+    left: 0;
+    bottom: 0;
+    width: min(280px, 88vw);
+    min-width: unset;
+    z-index: 998;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    box-sizing: border-box;
+    max-width: 100vw;
+    pointer-events: none;
+  }
+
+  .dashboard-sidebar-panel.is-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 20px rgba(0, 0, 0, 0.12);
+    pointer-events: auto;
+  }
+
+  .nav-drawer-backdrop {
+    display: block;
+    position: fixed;
+    top: 60px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 997;
+    background: rgba(0, 0, 0, 0.35);
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+  }
+
+  /* SidebarNav root — header offset not needed inside drawer (panel starts below header) */
+  .dashboard-sidebar-panel .tavari-sidebar-nav {
+    padding-top: 0 !important;
+    min-height: 100% !important;
+    height: 100%;
+  }
+}

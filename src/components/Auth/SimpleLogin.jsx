@@ -189,14 +189,6 @@ const SimpleLogin = () => {
     bulletproofList: {
       margin: '10px 0',
       paddingLeft: '20px'
-    },
-    
-    deploymentDate: {
-      marginTop: TavariStyles.spacing.lg,
-      fontSize: TavariStyles.typography.fontSize.xs,
-      color: TavariStyles.colors.gray400,
-      textAlign: 'center',
-      fontStyle: 'italic'
     }
   };
 
@@ -282,10 +274,6 @@ const SimpleLogin = () => {
             <li>No security interference</li>
             <li>Stays logged in indefinitely</li>
           </ul>
-        </div>
-        
-        <div style={styles.deploymentDate}>
-          January 27 2026 V2
         </div>
       </div>
     </div>

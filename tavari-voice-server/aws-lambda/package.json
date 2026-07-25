@@ -1,0 +1,20 @@
+{
+  "name": "tavari-voice-agent-lambda",
+  "version": "1.0.0",
+  "description": "AWS Lambda function for Tavari Voice Agent with Amazon Connect",
+  "type": "module",
+  "main": "handler.js",
+  "scripts": {
+    "test": "node test-handler.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.6.2",
+    "openai": "^4.20.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.0"
+  }
+}
+
+

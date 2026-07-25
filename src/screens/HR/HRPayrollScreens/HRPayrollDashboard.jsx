@@ -9,6 +9,8 @@ import { usePermissions } from '../../../hooks/usePermissions';
 import PermissionGate from '../../../components/Auth/PermissionGate';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
+import TavariModuleHeader from '../../../components/UI/TavariModuleHeader';
+import TavariTabSystemComponent from '../../../components/UI/TavariTabSystemComponent';
 import { TavariStyles } from '../../../utils/TavariStyles';
 import { supabase } from '../../../supabaseClient';
 import toast from 'react-hot-toast';
@@ -28,6 +30,9 @@ import YTDPayrollEntry from '../../../components/HR/HRPayrollComponents/YTDPayro
 import { usePayrollCalculations } from '../../../hooks/usePayrollCalculations';
 
 const HRPayrollDashboard = () => {
+  const [viewportWidth, setViewportWidth] = useState(
+    typeof window !== 'undefined' ? window.innerWidth : 1200
+  );
   const [activeTab, setActiveTab] = useState('entry');
   const [dashboardStats, setDashboardStats] = useState({
     totalEmployees: 0,
@@ -91,6 +96,12 @@ const HRPayrollDashboard = () => {
   const canImportPayroll = hasPermission('hr.payroll.import') || hasElevatedPrivileges();
 
   // Check permissions on mount
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   useEffect(() => {
     if (!permissionsLoading && !canAccessPayroll) {
       toast.error('You do not have permission to access payroll management');
@@ -160,21 +171,24 @@ const HRPayrollDashboard = () => {
       const activePayrollRuns = activeRuns?.length || 0;
 
       // 3. Calculate monthly payroll from current month's finalized runs
+      // Use finalized_at date to determine which month the payroll belongs to
+      // This ensures runs finalized this month are included, regardless of pay_date
       const currentDate = new Date();
       const currentMonth = currentDate.getMonth();
       const currentYear = currentDate.getFullYear();
       const monthStart = new Date(currentYear, currentMonth, 1).toISOString().split('T')[0];
-      const monthEnd = new Date(currentYear, currentMonth + 1, 0).toISOString().split('T')[0];
+      const monthEnd = new Date(currentYear, currentMonth + 1, 0, 23, 59, 59, 999).toISOString().split('T')[0];
 
 
-      // Get all finalized payroll runs for current month
+      // Get all finalized payroll runs finalized in the current month
+      // Use finalized_at to ensure runs finalized this month are included
       const { data: monthlyRuns, error: monthlyRunsError } = await supabase
         .from('hrpayroll_runs')
-        .select('id, pay_date')
+        .select('id, pay_date, finalized_at')
         .eq('business_id', auth.selectedBusinessId)
         .eq('status', 'finalized')
-        .gte('pay_date', monthStart)
-        .lte('pay_date', monthEnd);
+        .gte('finalized_at', monthStart)
+        .lte('finalized_at', monthEnd);
 
       if (monthlyRunsError) {
         console.error('Error loading monthly payroll runs:', monthlyRunsError);
@@ -393,6 +407,7 @@ const HRPayrollDashboard = () => {
               employees={payroll.employees}
               settings={payroll.settings}
               calculateEmployeePay={payroll.calculateEmployeePay}
+              onPayrollFinalized={loadDashboardStats}
             />
           </PermissionGate>
         );
@@ -572,7 +587,7 @@ const HRPayrollDashboard = () => {
     container: {
       minHeight: '100vh',
       backgroundColor: TavariStyles.colors.gray50,
-      paddingTop: '20px'
+      paddingTop: '80px'
     },
     dashboard: {
       display: 'flex',
@@ -603,31 +618,36 @@ const HRPayrollDashboard = () => {
       color: TavariStyles.colors.gray600,
       marginTop: TavariStyles.spacing.xs
     },
-    statsContainer: {
-      display: 'flex',
-      gap: TavariStyles.spacing.md,
-      alignItems: 'center'
+    /** KPI strip — same horizontal inset as BookingsDashboard tabs/stats */
+    statsRowOuter: {
+      width: '100%',
+      maxWidth: '100%',
+      boxSizing: 'border-box',
+      paddingLeft: 'clamp(16px, 3vw, 30px)',
+      paddingRight: 'clamp(16px, 3vw, 30px)',
+      marginBottom: TavariStyles.spacing?.lg || '24px'
     },
     statCard: {
       backgroundColor: TavariStyles.colors.white,
       border: `1px solid ${TavariStyles.colors.gray200}`,
-      borderRadius: TavariStyles.borderRadius?.md || '8px',
-      padding: TavariStyles.spacing.md,
-      minWidth: '120px',
-      textAlign: 'center'
+      borderRadius: '12px',
+      padding: 'clamp(16px, 2.2vw, 22px)',
+      minWidth: 0,
+      textAlign: 'center',
+      boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
     },
     statValue: {
-      fontSize: TavariStyles.typography.fontSize.xl,
+      fontSize: 'clamp(24px, 2.8vw, 32px)',
       fontWeight: TavariStyles.typography.fontWeight.bold,
       color: TavariStyles.colors.primary,
-      display: 'block'
+      display: 'block',
+      marginBottom: '8px'
     },
     statLabel: {
-      fontSize: TavariStyles.typography.fontSize.xs,
+      fontSize: 'clamp(12px, 1.5vw, 14px)',
       color: TavariStyles.colors.gray600,
       textTransform: 'uppercase',
-      letterSpacing: '0.05em',
-      marginTop: TavariStyles.spacing.xs
+      letterSpacing: '0.05em'
     },
     mainContent: {
       flex: 1,
@@ -635,58 +655,9 @@ const HRPayrollDashboard = () => {
       margin: '0 auto',
       width: '100%',
       display: 'flex',
-      flexDirection: 'column'
-    },
-    tabsContainer: {
-      backgroundColor: TavariStyles.colors.white,
-      borderBottom: `1px solid ${TavariStyles.colors.gray200}`,
-      overflowX: 'auto'
-    },
-    tabsList: {
-      display: 'flex',
-      gap: 0,
-      minWidth: 'max-content'
-    },
-    tab: {
-      padding: `${TavariStyles.spacing.md} ${TavariStyles.spacing.lg}`,
-      border: 'none',
-      backgroundColor: 'transparent',
-      cursor: 'pointer',
-      transition: 'all 0.2s ease',
-      borderBottom: '3px solid transparent',
-      fontSize: TavariStyles.typography.fontSize.sm,
-      fontWeight: TavariStyles.typography.fontWeight.semibold,
-      display: 'flex',
-      alignItems: 'center',
-      gap: TavariStyles.spacing.sm,
-      userSelect: 'none',
-      minWidth: 'fit-content',
       flexDirection: 'column',
-      textAlign: 'center'
-    },
-    activeTab: {
-      backgroundColor: TavariStyles.colors.white,
-      color: TavariStyles.colors.primary,
-      borderBottomColor: TavariStyles.colors.primary,
-      boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
-    },
-    inactiveTab: {
-      color: TavariStyles.colors.gray600,
-      backgroundColor: 'transparent'
-    },
-    tabIcon: {
-      fontSize: TavariStyles.typography.fontSize.lg,
-      marginBottom: TavariStyles.spacing.xs
-    },
-    tabLabel: {
-      fontSize: TavariStyles.typography.fontSize.sm,
-      fontWeight: TavariStyles.typography.fontWeight.semibold,
-      marginBottom: '2px'
-    },
-    tabDescription: {
-      fontSize: TavariStyles.typography.fontSize.xs,
-      color: TavariStyles.colors.gray500,
-      lineHeight: TavariStyles.typography.lineHeight.tight
+      paddingLeft: TavariStyles.spacing?.lg || '20px',
+      paddingRight: TavariStyles.spacing?.lg || '20px'
     },
     tabContent: {
       padding: TavariStyles.spacing.xl,
@@ -801,85 +772,70 @@ const HRPayrollDashboard = () => {
           `}</style>
 
           <div style={styles.dashboard}>
-            {/* Header with stats */}
-            <div style={styles.header}>
-              <div style={styles.headerContent}>
-                <div>
-                  <h1 style={styles.title}>Payroll Management</h1>
-                  <p style={styles.subtitle}>
-                    {auth.businessData?.business_name || 'Business'} • {new Date().getFullYear()} Tax Year
-                  </p>
+            <TavariModuleHeader
+              title="Tavari Payroll"
+              description="Create payroll runs, manage wages, issue statements, and review payroll reporting."
+              actionLabel="Run Payroll"
+              onAction={() => handleTabChange('entry')}
+            />
+
+            <TavariTabSystemComponent
+              tabs={availableTabs}
+              mode="state"
+              activeTab={activeTab}
+              onTabChange={handleTabChange}
+              ariaLabel="Payroll module"
+              variant="module"
+            />
+
+            {/* Full-width KPI grid (same pattern as BookingsDashboard dashboard stats) */}
+            <div style={styles.statsRowOuter}>
+              {statsLoading ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    padding: TavariStyles.spacing?.xl || '24px'
+                  }}
+                >
+                  <div style={styles.loadingSpinner} />
                 </div>
-                
-                <div style={styles.statsContainer}>
-                  {statsLoading ? (
-                    <div style={styles.loadingSpinner}></div>
-                  ) : (
-                    <>
-                      <div style={styles.statCard}>
-                        <span style={styles.statValue}>{dashboardStats.totalEmployees}</span>
-                        <span style={styles.statLabel}>Employees</span>
-                      </div>
-                      <div style={styles.statCard}>
-                        <span style={styles.statValue}>{dashboardStats.activePayrollRuns}</span>
-                        <span style={styles.statLabel}>Active Runs</span>
-                      </div>
-                      <div style={styles.statCard}>
-                        <span style={styles.statValue}>
-                          ${formatTaxAmount ? formatTaxAmount(dashboardStats.monthlyPayroll) : dashboardStats.monthlyPayroll.toFixed(2)}
-                        </span>
-                        <span style={styles.statLabel}>Monthly Total</span>
-                      </div>
-                      <div style={styles.statCard}>
-                        <span style={styles.statValue}>{dashboardStats.pendingStatements}</span>
-                        <span style={styles.statLabel}>Statements</span>
-                      </div>
-                    </>
-                  )}
+              ) : (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      viewportWidth <= 768
+                        ? 'repeat(2, minmax(0, 1fr))'
+                        : 'repeat(4, minmax(0, 1fr))',
+                    gap: 'clamp(12px, 2vw, 20px)',
+                    width: '100%'
+                  }}
+                >
+                  <div style={styles.statCard}>
+                    <span style={styles.statValue}>{dashboardStats.totalEmployees}</span>
+                    <span style={styles.statLabel}>Employees</span>
+                  </div>
+                  <div style={styles.statCard}>
+                    <span style={styles.statValue}>{dashboardStats.activePayrollRuns}</span>
+                    <span style={styles.statLabel}>Active Runs</span>
+                  </div>
+                  <div style={styles.statCard}>
+                    <span style={styles.statValue}>
+                      ${formatTaxAmount ? formatTaxAmount(dashboardStats.monthlyPayroll) : dashboardStats.monthlyPayroll.toFixed(2)}
+                    </span>
+                    <span style={styles.statLabel}>Monthly Total</span>
+                  </div>
+                  <div style={styles.statCard}>
+                    <span style={styles.statValue}>{dashboardStats.pendingStatements}</span>
+                    <span style={styles.statLabel}>Statements</span>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             <div style={styles.mainContent}>
-              {/* Tabs navigation */}
-              <div style={{
-                display: 'flex',
-                gap: '2px',
-                marginBottom: '30px',
-                backgroundColor: '#e5e7eb',
-                borderRadius: '8px',
-                padding: '4px',
-                overflowX: 'auto'
-              }}>
-                {availableTabs.map(tab => (
-                  <button
-                    key={tab.id}
-                    style={{
-                      flex: 1,
-                      padding: '12px 20px',
-                      backgroundColor: activeTab === tab.id ? 'white' : 'transparent',
-                      color: activeTab === tab.id ? '#008080' : '#6b7280',
-                      border: 'none',
-                      borderRadius: '6px',
-                      fontSize: '14px',
-                      fontWeight: 'bold',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s ease',
-                      boxShadow: activeTab === tab.id ? '0 2px 4px rgba(0,0,0,0.1)' : 'none',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      whiteSpace: 'nowrap',
-                      minWidth: 'fit-content'
-                    }}
-                    onClick={() => handleTabChange(tab.id)}
-                  >
-                    <span>{tab.icon}</span>
-                    <span>{tab.label}</span>
-                  </button>
-                ))}
-              </div>
-
               {/* Tab content */}
               <div style={styles.tabContent}>
                 {payroll.loading ? (

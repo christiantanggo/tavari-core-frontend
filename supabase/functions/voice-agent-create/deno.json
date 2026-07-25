@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "crypto-js": "npm:crypto-js@4.2.0"
+  }
+}
+

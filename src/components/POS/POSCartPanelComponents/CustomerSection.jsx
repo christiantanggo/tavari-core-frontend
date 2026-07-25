@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { User, Search, History } from 'lucide-react';
 import { TavariStyles } from '../../../utils/TavariStyles';
 import { supabase } from '../../../supabaseClient';
+import { getPosLineSubtotal } from '../../../utils/posLinePricing';
 
 const CustomerSection = ({
   loyaltyCustomer,
@@ -105,9 +106,7 @@ const CustomerSection = ({
       
       // Calculate cart subtotal
       const subtotal = cartItems.reduce((sum, item) => {
-        const price = parseFloat(item.price) || 0;
-        const quantity = parseInt(item.quantity) || 1;
-        return sum + (price * quantity);
+        return sum + getPosLineSubtotal(item);
       }, 0);
 
       // Customer balance in dollars

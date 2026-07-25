@@ -678,6 +678,14 @@ class RateLimiter {
       escalationEnabled: true
     });
 
+    // Ad test play (Music Ad Manager)
+    this.createLimiter('ad_test_play', {
+      maxAttempts: 10,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 60 * 1000, // 1 minute
+      escalationEnabled: false
+    });
+
     // Email sending
     this.createLimiter('email_send', {
       maxAttempts: 50,
@@ -697,11 +705,53 @@ class RateLimiter {
       blockDurationMs: 5 * 60 * 1000, // 5 minutes
       escalationEnabled: false
     });
+    this.createLimiter('load_campaigns', {
+      maxAttempts: 30,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: false
+    });
+    this.createLimiter('load_settings', {
+      maxAttempts: 15,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 60 * 1000, // 1 minute
+      escalationEnabled: false
+    });
+    this.createLimiter('save_mail_settings', {
+      maxAttempts: 5,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 2 * 60 * 1000, // 2 minutes
+      escalationEnabled: false
+    });
+    this.createLimiter('save_pos_settings', {
+      maxAttempts: 10,
+      windowMs: 60 * 1000,
+      blockDurationMs: 60 * 1000,
+      escalationEnabled: false
+    });
+    this.createLimiter('load_dashboard_stats', {
+      maxAttempts: 30,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 60 * 1000, // 1 minute
+      escalationEnabled: false
+    });
+    this.createLimiter('load_contact_stats', {
+      maxAttempts: 30,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 60 * 1000, // 1 minute
+      escalationEnabled: false
+    });
     this.createLimiter('send_test_email', {
       maxAttempts: 5,
       windowMs: 15 * 60 * 1000, // 15 minutes
       blockDurationMs: 30 * 60 * 1000, // 30 minutes
       escalationEnabled: true
+    });
+    this.createLimiter('send_campaign', {
+      maxAttempts: 3,
+      windowMs: 5 * 60 * 1000, // 5 minutes
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: false
     });
 
     // SMS sending
@@ -717,6 +767,26 @@ class RateLimiter {
       maxAttempts: 5,
       windowMs: 60 * 60 * 1000, // 1 hour
       blockDurationMs: 60 * 60 * 1000, // 1 hour
+      escalationEnabled: true
+    });
+
+    // Report generation and delivery
+    this.createLimiter('generate_report', {
+      maxAttempts: 20,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 60 * 1000, // 1 minute
+      escalationEnabled: false
+    });
+    this.createLimiter('export_report', {
+      maxAttempts: 5,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: true
+    });
+    this.createLimiter('email_report', {
+      maxAttempts: 3,
+      windowMs: 60 * 1000, // 1 minute
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
       escalationEnabled: true
     });
 
@@ -938,6 +1008,33 @@ class RateLimiter {
       strictMode: true
     });
 
+    // EmployeeEditor: terminate (distinct from delete / remove from business)
+    this.createLimiter('employee_terminate', {
+      maxAttempts: 8,
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: true,
+      strictMode: true
+    });
+
+    // EmployeeEditor: manager PIN reset for another employee
+    this.createLimiter('pin_reset', {
+      maxAttempts: 10,
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      blockDurationMs: 5 * 60 * 1000, // 5 minutes
+      escalationEnabled: true,
+      strictMode: true
+    });
+
+    // EmployeeEditModal: save / update from modal (checkRateLimit key)
+    this.createLimiter('employee_update', {
+      maxAttempts: 20,
+      windowMs: 10 * 60 * 1000, // 10 minutes
+      blockDurationMs: 3 * 60 * 1000, // 3 minutes
+      escalationEnabled: true,
+      strictMode: true
+    });
+
     // Navigate to add employee
     this.createLimiter('navigate_add_employee', {
       maxAttempts: 10,
@@ -945,6 +1042,33 @@ class RateLimiter {
       blockDurationMs: 1 * 60 * 1000, // 1 minute
       escalationEnabled: false,
       strictMode: false
+    });
+
+    // EmployeeScreen: open add-employee modal
+    this.createLimiter('add_employee_modal', {
+      maxAttempts: 10,
+      windowMs: 5 * 60 * 1000, // 5 minutes
+      blockDurationMs: 1 * 60 * 1000, // 1 minute
+      escalationEnabled: false,
+      strictMode: false
+    });
+
+    // EmployeeScreen: row click / view details rate limit key
+    this.createLimiter('employee_view', {
+      maxAttempts: 30,
+      windowMs: 10 * 60 * 1000, // 10 minutes
+      blockDurationMs: 2 * 60 * 1000, // 2 minutes
+      escalationEnabled: false,
+      strictMode: false
+    });
+
+    // EmployeeScreen: fix auth modal
+    this.createLimiter('fix_auth_modal', {
+      maxAttempts: 5,
+      windowMs: 5 * 60 * 1000, // 5 minutes
+      blockDurationMs: 2 * 60 * 1000, // 2 minutes
+      escalationEnabled: true,
+      strictMode: true
     });
 
     // Open lieu time modal

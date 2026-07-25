@@ -1,11 +1,12 @@
 // src/screens/NewBusiness.jsx - WITH SESSION DEBUG + DB FUNCTION APPROACH
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { SecurityWrapper, useSecurityContext } from '../Security';
 import { usePOSAuth } from '../hooks/usePOSAuth';
-import { usePermissions } from '../hooks/usePermissions';
+import { useUserProfile } from '../hooks/useUserProfile';
 import { useBusinessContext } from '../contexts/BusinessContext';
+import { userCanOpenNewBusinessTenant } from '../helpers/businessTenantGuards';
 import { TavariStyles } from '../utils/TavariStyles';
 import SessionManager from '../components/SessionManager';
 import toast from 'react-hot-toast';
@@ -14,8 +15,10 @@ const NewBusiness = () => {
   const [businessName, setBusinessName] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [ownerAccessPending, setOwnerAccessPending] = useState(true);
   const navigate = useNavigate();
   const { setSelectedBusinessId } = useBusinessContext();
+  const { profile, loading: profileLoading } = useUserProfile();
 
   // Security context for business creation
   const {
@@ -41,12 +44,35 @@ const NewBusiness = () => {
     componentName: 'NewBusiness'
   });
 
-  // Permission checks
-  const { 
-    hasPermission,
-    hasElevatedPrivileges,
-    loading: permissionsLoading 
-  } = usePermissions();
+  useEffect(() => {
+    let cancelled = false;
+
+    const run = async () => {
+      if (authLoading || profileLoading) return;
+
+      const rosterUserId = profile?.id ?? authUser?.id;
+      if (!rosterUserId) {
+        if (!cancelled) navigate('/login');
+        return;
+      }
+
+      const allowed = await userCanOpenNewBusinessTenant(supabase, rosterUserId);
+      if (cancelled) return;
+
+      if (!allowed) {
+        toast.error('Only business owners can create a new business.');
+        navigate('/dashboard/home');
+        return;
+      }
+
+      setOwnerAccessPending(false);
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, profileLoading, profile?.id, authUser?.id, navigate]);
 
   const handleCreateBusiness = async () => {
     console.log('🚀 === START: handleCreateBusiness ===');
@@ -94,6 +120,15 @@ const NewBusiness = () => {
       if (!sessionData?.session) {
         console.error('❌ NO SESSION FOUND!');
         throw new Error('Your session has expired. Please refresh the page and try again.');
+      }
+
+      const rosterUserId = profile?.id ?? authUser?.id;
+      const allowed = await userCanOpenNewBusinessTenant(supabase, rosterUserId);
+      if (!allowed) {
+        toast.error('Only business owners can create a new business.');
+        setIsLoading(false);
+        navigate('/dashboard/home');
+        return;
       }
 
       // USE DATABASE FUNCTION INSTEAD OF DIRECT INSERT
@@ -261,7 +296,7 @@ const NewBusiness = () => {
     }
   };
 
-  if (authLoading || permissionsLoading) {
+  if (authLoading || profileLoading || ownerAccessPending) {
     return (
       <SessionManager>
         <div style={styles.container}>

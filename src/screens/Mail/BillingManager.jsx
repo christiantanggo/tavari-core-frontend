@@ -1,5 +1,6 @@
 // screens/Mail/BillingManager.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import EmailPauseBanner from '../../components/EmailPauseBanner';
@@ -15,11 +16,13 @@ import PermissionGate from '../../components/Auth/PermissionGate';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MAIL_USAGE_TABS, MailUsageTabs } from '../../components/Mail/MailModuleNavigation';
 import toast from 'react-hot-toast';
 
 const BillingManager = () => {
+  const navigate = useNavigate();
   const { business } = useBusiness();
-  const businessId = business?.id;
   
   // Security context for sensitive billing data
   const {
@@ -51,6 +54,13 @@ const BillingManager = () => {
     componentName: 'BillingManager'
   });
 
+  const businessId =
+    selectedBusinessId ||
+    businessData?.id ||
+    localStorage.getItem('currentBusinessId') ||
+    business?.id ||
+    localStorage.getItem('businessId');
+
   // Permission system
   const { 
     hasPermission, 
@@ -80,6 +90,21 @@ const BillingManager = () => {
   const canExportBilling = hasPermission('mail.billing.export') || hasElevatedPrivileges();
 
   const canViewSettings = hasPermission('mail.settings.view') || hasElevatedPrivileges();
+  const usageTabs = MAIL_USAGE_TABS.filter((tab) => (
+    !tab.requiresElevated || (canViewSettings && hasElevatedPrivileges())
+  ));
+
+  const handleUsageTabChange = (tabId) => {
+    if (tabId === 'monitor-logs') {
+      navigate('/dashboard/mail/performance');
+      return;
+    }
+    if (tabId === 'compliance') {
+      navigate('/dashboard/mail/compliance');
+      return;
+    }
+    setActiveTab(tabId);
+  };
 
   const loadBillingData = async () => {
     // Permission check before loading billing data
@@ -724,6 +749,8 @@ const BillingManager = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner />
+          <MailModuleHeader />
           <div style={styles.loadingState}>
             <FiRefreshCw style={{...styles.loadingIcon, animation: 'spin 1s linear infinite'}} />
             <p>Loading billing information...</p>
@@ -737,6 +764,8 @@ const BillingManager = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner />
+          <MailModuleHeader />
           <div style={styles.errorState}>
             <FiAlertCircle style={styles.errorIcon} />
             <h3>Authentication Error</h3>
@@ -751,6 +780,8 @@ const BillingManager = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <EmailPauseBanner />
+          <MailModuleHeader />
           <div style={styles.errorState}>
             <FiAlertCircle style={styles.errorIcon} />
             <h3>Error Loading Billing Data</h3>
@@ -774,6 +805,14 @@ const BillingManager = () => {
           {/* Email Pause Banner */}
           <EmailPauseBanner />
 
+          <MailModuleHeader />
+
+          <MailUsageTabs
+            tabs={usageTabs}
+            activeTab={activeTab}
+            onTabChange={handleUsageTabChange}
+          />
+
           <div style={styles.header}>
             <h2 style={styles.title}>Usage & Billing</h2>
             <div style={styles.headerActions}>
@@ -784,42 +823,6 @@ const BillingManager = () => {
                 </button>
               </PermissionGate>
             </div>
-          </div>
-
-          {/* Tab Navigation */}
-          <div style={styles.tabs}>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'overview' ? styles.activeTab : {})
-              }}
-              onClick={() => setActiveTab('overview')}
-            >
-              <FiPieChart style={styles.tabIcon} />
-              Overview
-            </button>
-            <button
-              style={{
-                ...styles.tab,
-                ...(activeTab === 'history' ? styles.activeTab : {})
-              }}
-              onClick={() => setActiveTab('history')}
-            >
-              <FiCalendar style={styles.tabIcon} />
-              History
-            </button>
-            <PermissionGate permission="mail.settings.view" requireElevated>
-              <button
-                style={{
-                  ...styles.tab,
-                  ...(activeTab === 'settings' ? styles.activeTab : {})
-                }}
-                onClick={() => setActiveTab('settings')}
-              >
-                <FiSettings style={styles.tabIcon} />
-                Settings
-              </button>
-            </PermissionGate>
           </div>
 
           {/* Tab Content */}

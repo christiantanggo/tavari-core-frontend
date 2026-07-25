@@ -53,108 +53,183 @@ export function useSessionLock() {
     setIsLocked(true);
     await logAction({ action: 'lock', context: 'useSessionLock' });
     clearTimers();
+    try {
+      localStorage.setItem('tavari_session_locked', 'true');
+    } catch {
+      /* ignore */
+    }
+    window.dispatchEvent(new CustomEvent('tavari:session-locked'));
   }, []);
 
-  // Multi-staff PIN validation - allows any authorized staff member to unlock
+  // PIN validation - checks ONLY the original logged-in user's PIN (full session unlock)
+  // NOTE: For register-only unlock, see POSRegister.jsx which checks all employees
   const validatePin = async (pin) => {
+    console.log('🔒 [SessionLock] ========== SESSION LOCK UNLOCK - PIN VALIDATION ==========');
+    console.log('🔒 [SessionLock] Checking PIN for ORIGINAL logged-in user only (full session unlock)');
+    
     const bizId = localStorage.getItem('currentBusinessId');
-    if (!bizId || !pin) return false;
+    console.log('🔒 [SessionLock] Business ID:', bizId);
+    console.log('🔒 [SessionLock] PIN input length:', pin?.length);
+    
+    if (!bizId || !pin) {
+      console.error('❌ [SessionLock] Missing business ID or PIN:', { bizId: !!bizId, pin: !!pin });
+      return false;
+    }
 
     try {
+      // Get the original logged-in user ID from the session
+      console.log('🔒 [SessionLock] Checking session for original user...');
+      const { data: { session } } = await supabase.auth.getSession();
+      const originalUserId = session?.user?.id;
+      
+      console.log('🔒 [SessionLock] Session data:', {
+        hasSession: !!session,
+        sessionUserId: originalUserId,
+        sessionEmail: session?.user?.email,
+        sessionExpires: session?.expires_at ? new Date(session.expires_at * 1000).toISOString() : null
+      });
 
-      // Get all authorized users for this business
-      const { data: userRoles, error: rolesError } = await supabase
-        .from('user_roles')
-        .select('user_id, role')
-        .eq('business_id', bizId)
-        .eq('active', true);
-
-      if (rolesError) {
-        console.error('SessionLock: Error fetching user roles:', rolesError);
+      if (!originalUserId) {
+        console.error('❌ [SessionLock] No original logged-in user ID found - cannot validate PIN');
+        console.error('❌ [SessionLock] This means either:');
+        console.error('❌ [SessionLock] 1. Session has expired');
+        console.error('❌ [SessionLock] 2. User is not logged in');
+        console.error('❌ [SessionLock] 3. Session data is corrupted');
+        await logAction({ 
+          action: 'session_unlock_failed', 
+          context: 'useSessionLock', 
+          metadata: { 
+            reason: 'no_session_user_id',
+            hasSession: !!session
+          } 
+        });
         return false;
       }
 
-      if (!userRoles || userRoles.length === 0) {
-        return false;
-      }
-
-      // Allow employee, cashier, manager, owner, admin
-      const allowedRoles = ['employee', 'cashier', 'manager', 'owner', 'admin'];
-      const authorizedUserIds = userRoles
-        .filter(ur => allowedRoles.includes(ur.role))
-        .map(ur => ur.user_id);
-
-
-      if (authorizedUserIds.length === 0) {
-        return false;
-      }
-
-      // Get user data for all authorized users
-      const { data: staffMembers, error: staffError } = await supabase
+      console.log('🔒 [SessionLock] Fetching original user data from database...');
+      // Get ONLY the original user's PIN (not all employees)
+      const { data: userData, error: userError } = await supabase
         .from('users')
         .select('id, full_name, email, pin')
-        .in('id', authorizedUserIds);
+        .eq('id', originalUserId)
+        .maybeSingle();
 
-      if (staffError) {
-        console.error('SessionLock: Error fetching staff:', staffError);
-        return false;
-      }
-
-      if (!staffMembers || staffMembers.length === 0) {
-        return false;
-      }
-
-      // Check PIN against all authorized staff members
-      for (const staff of staffMembers) {
-        if (!staff.pin) {
-          continue;
-        }
-
-        // Check if PIN is hashed or plain text
-        if (staff.pin.startsWith('$2b$') || staff.pin.startsWith('$2a$')) {
-          // Hashed PIN
-          const matches = await bcrypt.compare(String(pin), staff.pin);
-          if (matches) {
-            await logAction({ 
-              action: 'session_unlock_success', 
-              context: 'useSessionLock', 
-              metadata: { 
-                unlocked_by_id: staff.id,
-                unlocked_by_name: staff.full_name || staff.email,
-                unlock_method: 'pin'
-              } 
-            });
-            return true;
-          }
-        } else {
-          // Plain text PIN (for legacy compatibility)
-          const matches = String(staff.pin) === String(pin);
-          if (matches) {
-            await logAction({ 
-              action: 'session_unlock_success', 
-              context: 'useSessionLock', 
-              metadata: { 
-                unlocked_by_id: staff.id,
-                unlocked_by_name: staff.full_name || staff.email,
-                unlock_method: 'pin'
-              } 
-            });
-            return true;
-          }
-        }
-      }
-      await logAction({ 
-        action: 'session_unlock_failed', 
-        context: 'useSessionLock', 
-        metadata: { 
-          pin_length: String(pin).length,
-          staff_checked: staffMembers.length
-        } 
+      console.log('🔒 [SessionLock] Database query result:', {
+        foundUser: !!userData,
+        userId: userData?.id,
+        email: userData?.email,
+        hasPin: !!userData?.pin,
+        pinType: userData?.pin ? (userData.pin.startsWith('$2b$') || userData.pin.startsWith('$2a$') ? 'hashed' : 'plain') : 'none',
+        error: userError?.message || null
       });
-      return false;
+
+      if (userError) {
+        console.error('❌ [SessionLock] Database error fetching user:', userError);
+        console.error('❌ [SessionLock] Error details:', {
+          message: userError.message,
+          code: userError.code,
+          details: userError.details,
+          hint: userError.hint
+        });
+        return false;
+      }
+
+      if (!userData) {
+        console.error('❌ [SessionLock] User not found in database:', originalUserId);
+        await logAction({ 
+          action: 'session_unlock_failed', 
+          context: 'useSessionLock', 
+          metadata: { 
+            reason: 'user_not_found',
+            user_id: originalUserId
+          } 
+        });
+        return false;
+      }
+
+      if (!userData.pin) {
+        console.error('❌ [SessionLock] Original user has no PIN set:', {
+          userId: userData.id,
+          email: userData.email
+        });
+        await logAction({ 
+          action: 'session_unlock_failed', 
+          context: 'useSessionLock', 
+          metadata: { 
+            reason: 'no_pin_set',
+            user_id: originalUserId
+          } 
+        });
+        return false;
+      }
+
+      console.log('🔒 [SessionLock] Comparing PIN...');
+      console.log('🔒 [SessionLock] Input PIN length:', pin?.length);
+      console.log('🔒 [SessionLock] Stored PIN type:', userData.pin.startsWith('$2b$') || userData.pin.startsWith('$2a$') ? 'hashed' : 'plain');
+      
+      // Check if PIN matches (hashed or plain text)
+      let pinMatches = false;
+      if (userData.pin.startsWith('$2b$') || userData.pin.startsWith('$2a$')) {
+        // Hashed PIN
+        console.log('🔒 [SessionLock] Comparing hashed PIN using bcrypt...');
+        pinMatches = await bcrypt.compare(String(pin), userData.pin);
+        console.log('🔒 [SessionLock] bcrypt.compare result:', pinMatches);
+      } else {
+        // Plain text PIN (for legacy compatibility)
+        console.log('🔒 [SessionLock] Comparing plain text PIN...');
+        pinMatches = String(userData.pin) === String(pin);
+        console.log('🔒 [SessionLock] Plain text comparison result:', pinMatches);
+      }
+
+      if (pinMatches) {
+        console.log('✅ [SessionLock] PIN MATCHED - Session unlock authorized');
+        console.log('✅ [SessionLock] Unlocking user:', {
+          id: userData.id,
+          email: userData.email,
+          name: userData.full_name
+        });
+        
+        await logAction({ 
+          action: 'session_unlock_success', 
+          context: 'useSessionLock', 
+          metadata: { 
+            unlocked_by_id: userData.id,
+            unlocked_by_name: userData.full_name || userData.email,
+            unlock_method: 'pin',
+            note: 'Original logged-in user PIN'
+          } 
+        });
+        console.log('🔒 [SessionLock] ============================================');
+        return true;
+      } else {
+        console.log('❌ [SessionLock] PIN DID NOT MATCH');
+        console.log('❌ [SessionLock] This is correct behavior - only original user can unlock full session');
+        await logAction({ 
+          action: 'session_unlock_failed', 
+          context: 'useSessionLock', 
+          metadata: { 
+            pin_length: String(pin).length,
+            user_id: originalUserId,
+            note: 'PIN did not match original user'
+          } 
+        });
+        console.log('🔒 [SessionLock] ============================================');
+        return false;
+      }
 
     } catch (error) {
-      console.error('SessionLock: PIN validation error:', error);
+      console.error('❌ [SessionLock] Exception during PIN validation:', error);
+      console.error('❌ [SessionLock] Error message:', error.message);
+      console.error('❌ [SessionLock] Stack trace:', error.stack);
+      await logAction({ 
+        action: 'session_unlock_error', 
+        context: 'useSessionLock', 
+        metadata: { 
+          error: error.message,
+          stack: error.stack
+        } 
+      });
+      console.log('🔒 [SessionLock] ============================================');
       return false;
     }
   };

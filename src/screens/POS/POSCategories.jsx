@@ -15,9 +15,11 @@ import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { usePermissions } from '../../hooks/usePermissions';
 import PermissionGate from '../../components/Auth/PermissionGate';
 import toast from 'react-hot-toast';
-import { FiLock, FiAlertCircle } from 'react-icons/fi';
+import { FiLock, FiAlertCircle, FiPackage } from 'react-icons/fi';
 
 import CategoryModal from '../../components/CategoryModal';
+import CategoryInventoryItemsModal from '../../components/POS/CategoryInventoryItemsModal';
+import POSInventoryManagementTabs from '../../components/POS/POSInventoryManagementTabs';
 
 const POSCategories = () => {
   const navigate = useNavigate();
@@ -77,6 +79,8 @@ const POSCategories = () => {
   // Tax preview state
   const [showTaxPreview, setShowTaxPreview] = useState(false);
   const [previewSamplePrice, setPreviewSamplePrice] = useState(10.00);
+
+  const [categoryForInventoryModal, setCategoryForInventoryModal] = useState(null);
 
   // Predefined colors with names for dropdown
   const colorOptions = [
@@ -334,6 +338,24 @@ const POSCategories = () => {
     
     setError(null);
     try {
+      const [inventoryCleanup, ingredientCleanup] = await Promise.all([
+        supabase
+          .from('pos_inventory')
+          .update({ category_id: null })
+          .eq('business_id', auth.selectedBusinessId)
+          .eq('category_id', id),
+        supabase
+          .from('ingredients')
+          .update({ category_id: null })
+          .eq('business_id', auth.selectedBusinessId)
+          .eq('category_id', id)
+      ]);
+
+      if (inventoryCleanup.error) throw inventoryCleanup.error;
+      if (ingredientCleanup.error && !['42P01', 'PGRST205'].includes(ingredientCleanup.error.code)) {
+        throw ingredientCleanup.error;
+      }
+
       // Delete tax assignments first
       await supabase
         .from('pos_category_tax_assignments')
@@ -356,8 +378,11 @@ const POSCategories = () => {
       fetchCategories();
       refreshTaxData();
     } catch (err) {
-      setError('Error deleting category: ' + err.message);
-      toast.error('Failed to delete category');
+      const errorMessage = err?.code === '23503'
+        ? `Error deleting "${name}". Some related records still reference this category.`
+        : `Error deleting category: ${err.message}`;
+      setError(errorMessage);
+      toast.error(errorMessage, { duration: 6000 });
     }
   };
 
@@ -599,6 +624,8 @@ const POSCategories = () => {
           </PermissionGate>
         </div>
 
+        <POSInventoryManagementTabs />
+
         {(error || taxError) && (
           <div style={styles.errorBanner}>
             {error || taxError}
@@ -797,6 +824,15 @@ const POSCategories = () => {
                       </div>
                     ) : (
                       <div style={styles.actions}>
+                        <button
+                          type="button"
+                          onClick={() => setCategoryForInventoryModal(category)}
+                          style={styles.itemsButton}
+                          title="View inventory in this category and set display order"
+                        >
+                          <FiPackage size={14} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+                          Items
+                        </button>
                         <PermissionGate
                           permission="pos.categories.manage"
                           fallback={
@@ -852,6 +888,14 @@ const POSCategories = () => {
           onSave={handleCategoryModalSave}
           taxCategories={taxCategories}
           colorOptions={colorOptions}
+        />
+
+        <CategoryInventoryItemsModal
+          isOpen={!!categoryForInventoryModal}
+          onClose={() => setCategoryForInventoryModal(null)}
+          category={categoryForInventoryModal}
+          businessId={auth.selectedBusinessId}
+          canReorder={canManageCategories}
         />
 
         {/* Tax Assignment Modal */}
@@ -1331,7 +1375,18 @@ const styles = {
   
   actions: {
     display: 'flex',
-    gap: TavariStyles.spacing.xs
+    flexWrap: 'wrap',
+    gap: TavariStyles.spacing.xs,
+    alignItems: 'center'
+  },
+
+  itemsButton: {
+    ...TavariStyles.components.button.base,
+    backgroundColor: TavariStyles.colors.gray700,
+    color: TavariStyles.colors.white,
+    ...TavariStyles.components.button.sizes.sm,
+    display: 'inline-flex',
+    alignItems: 'center'
   },
   
   editActions: {

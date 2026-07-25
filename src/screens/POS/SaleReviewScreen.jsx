@@ -14,6 +14,9 @@ import PermissionGate from '../../components/Auth/PermissionGate';
 // Foundation Components
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { TavariStyles } from '../../utils/TavariStyles';
+import { formatDateTimeForBusiness, getBusinessTimezone } from '../../utils/businessDateFormat';
+import { getPosLineSubtotal } from '../../utils/posLinePricing';
+import DiscountControls from '../../components/POS/POSPaymentScreenComponents/DiscountControls';
 
 const SaleReviewScreen = () => {
   const navigate = useNavigate();
@@ -54,7 +57,10 @@ const SaleReviewScreen = () => {
   const canCreateSales = hasAnyPermission(['pos.sales.create', 'pos.register.operate']) || hasElevatedPrivileges();
   const canViewAllSales = hasPermission('pos.sales.view_all') || hasElevatedPrivileges();
   const canViewReports = hasPermission('pos.reports.view') || hasElevatedPrivileges();
-  const canApplyDiscounts = hasPermission('pos.discounts.apply') || hasElevatedPrivileges();
+  const canApplyDiscounts =
+    hasPermission('pos.discounts.apply') ||
+    hasPermission('pos.discounts.apply_any') ||
+    hasElevatedPrivileges();
 
   // Use tax calculations hook
   const taxCalc = useTaxCalculations(auth.selectedBusinessId);
@@ -67,6 +73,7 @@ const SaleReviewScreen = () => {
   const [dailyUsage, setDailyUsage] = useState(null);
   const [showReceiptModal, setShowReceiptModal] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState(null);
+  const businessTimezone = getBusinessTimezone(auth.businessData);
 
   // Get cart data from navigation state
   const checkoutData = location.state?.checkoutData;
@@ -331,7 +338,91 @@ const SaleReviewScreen = () => {
 
     await recordAction('sale_review_cancelled', auth.selectedBusinessId, true);
 
-    navigate('/dashboard/pos/register');
+    const items = cartData?.items || checkoutData?.items || [];
+    const customer =
+      loyaltyCustomer ||
+      cartData?.loyaltyCustomer ||
+      checkoutData?.loyaltyCustomer ||
+      null;
+
+    navigate('/dashboard/pos/register', {
+      state: {
+        resumeCart: {
+          items,
+          customer,
+          loyaltyCandidates: customer?.id ? [customer] : [],
+        },
+      },
+    });
+  };
+
+  const recalculateCartWithDiscount = (discountAmount, discountMeta = null) => {
+    if (!cartData?.items) return;
+
+    const subtotal = Number(cartData.subtotal) || 0;
+    const loyaltyRedemption = Number(cartData.loyalty_redemption) || 0;
+    const maxDiscount = Math.max(0, subtotal - loyaltyRedemption);
+    const cappedDiscount = Math.round(Math.min(Math.max(0, Number(discountAmount) || 0), maxDiscount) * 100) / 100;
+
+    let taxResult;
+    if (cartData.indian_status_gst_only) {
+      const rate =
+        Number(cartData.indian_status_gst_rate) ||
+        Number(businessSettings?.indian_status_gst_rate) ||
+        0.05;
+      const label =
+        (cartData.indian_status_tax_label && String(cartData.indian_status_tax_label).trim()) ||
+        (businessSettings?.indian_status_tax_label && String(businessSettings.indian_status_tax_label).trim()) ||
+        'GST (Indian Status)';
+      taxResult = taxCalc.calculateTotalTax(
+        cartData.items,
+        cappedDiscount,
+        loyaltyRedemption,
+        subtotal,
+        { enabled: true, gstRate: rate, taxLabel: label }
+      );
+    } else if (!taxCalc.loading && taxCalc.taxCategories?.length) {
+      taxResult = taxCalc.calculateTotalTax(
+        cartData.items,
+        cappedDiscount,
+        loyaltyRedemption,
+        subtotal
+      );
+    } else {
+      taxResult = {
+        totalTax: Number(cartData.tax_amount) || 0,
+        aggregatedTaxes: cartData.aggregated_taxes || {},
+        aggregatedRebates: cartData.aggregated_rebates || {},
+        itemTaxDetails: cartData.item_tax_details || []
+      };
+    }
+
+    const serviceFeeRate = Number(businessSettings.service_fee) || 0;
+    const serviceFee = serviceFeeRate > 0 ? subtotal * serviceFeeRate : 0;
+    const taxableAmount = subtotal - cappedDiscount - loyaltyRedemption;
+    const totalAmount = taxableAmount + (Number(taxResult.totalTax) || 0) + serviceFee;
+
+    setCartData((prev) => ({
+      ...prev,
+      discount_amount: cappedDiscount,
+      discount_id: discountMeta?.id || null,
+      discount_name: discountMeta?.name || null,
+      discount_type: discountMeta?.type || null,
+      discount_value: discountMeta?.value ?? null,
+      tax_amount: Number(taxResult.totalTax) || 0,
+      aggregated_taxes: taxResult.aggregatedTaxes || {},
+      aggregated_rebates: taxResult.aggregatedRebates || {},
+      item_tax_details: taxResult.itemTaxDetails || [],
+      total_amount: Math.round(totalAmount * 100) / 100
+    }));
+  };
+
+  const handleDiscountChange = ({ amount, discount }) => {
+    if (!canApplyDiscounts) {
+      toast.error('You do not have permission to apply discounts');
+      return;
+    }
+    recalculateCartWithDiscount(amount, discount);
   };
 
   const handleProceedToPayment = async () => {
@@ -435,7 +526,7 @@ const SaleReviewScreen = () => {
         securityLevel="high"
       >
         <POSAuthWrapper
-          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="SaleReviewScreen"
         >
@@ -468,7 +559,7 @@ const SaleReviewScreen = () => {
         securityLevel="high"
       >
         <POSAuthWrapper
-          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="SaleReviewScreen"
         >
@@ -506,7 +597,7 @@ const SaleReviewScreen = () => {
         securityLevel="high"
       >
         <POSAuthWrapper
-          requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="SaleReviewScreen"
         >
@@ -532,17 +623,18 @@ const SaleReviewScreen = () => {
       securityLevel="high"
     >
       <POSAuthWrapper
-        requiredRoles={['employee', 'cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         requireBusiness={true}
         componentName="SaleReviewScreen"
       >
         <div style={styles.container}>
-          <div style={styles.header}>
-            <h2>Review Sale</h2>
-            <p>Please review the order details before proceeding to payment</p>
-          </div>
+          <div style={styles.mainArea}>
+            <div style={styles.header}>
+              <h2>Review Sale</h2>
+              <p>Please review the order details before proceeding to payment</p>
+            </div>
 
-          <div style={styles.content}>
+            <div style={styles.content}>
             {/* Cart Items Review - WITH REBATE NAMES */}
             <div style={styles.section}>
               <h3 style={styles.sectionTitle}>Items ({cartData.item_count})</h3>
@@ -580,7 +672,7 @@ const SaleReviewScreen = () => {
                       </div>
                       <div style={styles.itemDetails}>
                         <div style={styles.quantity}>Qty: {item.quantity}</div>
-                        <div style={styles.price}>${(item.price * item.quantity).toFixed(2)}</div>
+                        <div style={styles.price}>${getPosLineSubtotal(item).toFixed(2)}</div>
                       </div>
                     </div>
                   );
@@ -608,9 +700,34 @@ const SaleReviewScreen = () => {
               </div>
             )}
 
+            <DiscountControls
+              saleSubtotal={cartData.subtotal || 0}
+              discountAmount={cartData.discount_amount || 0}
+              discountName={cartData.discount_name || null}
+              selectedDiscountId={cartData.discount_id || null}
+              onDiscountChange={handleDiscountChange}
+              businessId={auth.selectedBusinessId}
+              canApply={canApplyDiscounts}
+            />
+
             {/* Sale Totals - USING ACTUAL CHECKOUT DATA */}
             <div style={styles.section}>
               <h3 style={styles.sectionTitle}>Order Total</h3>
+              {cartData.indian_status_gst_only && (cartData.indian_status_certificate_number || '').trim() && (
+                <div style={{
+                  padding: TavariStyles.spacing.md,
+                  backgroundColor: TavariStyles.colors.successBg || '#e8f5e9',
+                  borderRadius: TavariStyles.borderRadius.md,
+                  marginBottom: TavariStyles.spacing.md,
+                  fontSize: TavariStyles.typography.fontSize.sm
+                }}>
+                  <strong>Indian Status (GST only)</strong>
+                  <div>Status #: {(cartData.indian_status_certificate_number || '').trim()}</div>
+                  <div style={{ marginTop: 4, color: TavariStyles.colors.gray600 }}>
+                    Tax uses federal GST rate from settings ({((Number(cartData.indian_status_gst_rate) || 0.05) * 100).toFixed(2)}%)
+                  </div>
+                </div>
+              )}
               <div style={styles.totals}>
                 <div style={styles.totalRow}>
                   <span>Subtotal</span>
@@ -619,7 +736,7 @@ const SaleReviewScreen = () => {
 
                 {cartData.discount_amount > 0 && (
                   <div style={styles.totalRowDiscount}>
-                    <span>Discount</span>
+                    <span>{cartData.discount_name || 'Discount'}</span>
                     <span>-${cartData.discount_amount.toFixed(2)}</span>
                   </div>
                 )}
@@ -685,6 +802,21 @@ const SaleReviewScreen = () => {
                 </div>
               </div>
             </div>
+            </div>
+          </div>
+
+          {/* Action Buttons - right column: 25% width, Back 25% height / Proceed 75% height */}
+          <div style={styles.actionsColumn}>
+            <div style={styles.backButtonWrapper}>
+              <button style={styles.backButton} onClick={handleBackToRegister}>
+                Back to Register
+              </button>
+            </div>
+            <div style={styles.proceedButtonWrapper}>
+              <button style={styles.proceedButton} onClick={handleProceedToPayment}>
+                Proceed to Payment - ${cartData.total_amount.toFixed(2)}
+              </button>
+            </div>
           </div>
 
           {/* Transaction Receipt Modal */}
@@ -702,7 +834,7 @@ const SaleReviewScreen = () => {
                 </div>
                 <div style={styles.receiptDetails}>
                   <div style={styles.detailRow}>
-                    <strong>Date:</strong> {new Date(selectedTransaction.created_at).toLocaleString()}
+                    <strong>Date:</strong> {formatDateTimeForBusiness(selectedTransaction.created_at, businessTimezone)}
                   </div>
                   <div style={styles.detailRow}>
                     <strong>Total:</strong> ${selectedTransaction.final_total?.toFixed(2) || selectedTransaction.total?.toFixed(2) || '0.00'}
@@ -739,15 +871,6 @@ const SaleReviewScreen = () => {
             </div>
           )}
 
-          {/* Action Buttons */}
-          <div style={styles.actions}>
-            <button style={styles.backButton} onClick={handleBackToRegister}>
-              Back to Register
-            </button>
-            <button style={styles.proceedButton} onClick={handleProceedToPayment}>
-              Proceed to Payment - ${cartData.total_amount.toFixed(2)}
-            </button>
-          </div>
         </div>
       </POSAuthWrapper>
     </SecurityWrapper>
@@ -758,17 +881,53 @@ const SaleReviewScreen = () => {
 const styles = {
   container: {
     ...TavariStyles.layout.container,
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'stretch',
     padding: TavariStyles.spacing.xl,
-    paddingTop: '100px'
+    paddingTop: '56px',
+    gap: TavariStyles.spacing.lg,
+    minHeight: 'auto'
+  },
+  mainArea: {
+    flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column'
   },
   header: {
-    marginBottom: TavariStyles.spacing['3xl'],
-    textAlign: 'center'
+    marginBottom: TavariStyles.spacing.lg,
+    textAlign: 'center',
+    flexShrink: 0
   },
   content: {
-    flex: 1,
     overflowY: 'auto',
-    marginBottom: TavariStyles.spacing.xl
+    marginBottom: 0
+  },
+  actionsColumn: {
+    width: '25%',
+    minWidth: 140,
+    display: 'flex',
+    flexDirection: 'column',
+    alignSelf: 'stretch',
+    gap: 0
+  },
+  backButtonWrapper: {
+    height: '25%',
+    minHeight: 56,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: TavariStyles.spacing.sm
+  },
+  proceedButtonWrapper: {
+    height: '75%',
+    flex: 1,
+    minHeight: 120,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: TavariStyles.spacing.sm
   },
   section: {
     ...TavariStyles.layout.card,
@@ -977,16 +1136,23 @@ const styles = {
     ...TavariStyles.components.button.base,
     ...TavariStyles.components.button.variants.secondary,
     ...TavariStyles.components.button.sizes.lg,
-    flex: 1
+    width: '100%',
+    minHeight: 48,
+    flex: 1,
+    alignSelf: 'stretch'
   },
   proceedButton: {
     ...TavariStyles.components.button.base,
     ...TavariStyles.components.button.variants.primary,
     ...TavariStyles.components.button.sizes.lg,
-    flex: 2
+    width: '100%',
+    minHeight: 48,
+    flex: 1,
+    alignSelf: 'stretch'
   },
   loading: {
     ...TavariStyles.components.loading.container,
+    flex: 1,
     fontSize: TavariStyles.typography.fontSize.xl,
     color: TavariStyles.colors.gray600
   },
@@ -995,6 +1161,7 @@ const styles = {
     marginBottom: TavariStyles.spacing.xl
   },
   error: {
+    flex: 1,
     textAlign: 'center',
     padding: TavariStyles.spacing['4xl'],
     color: TavariStyles.colors.danger

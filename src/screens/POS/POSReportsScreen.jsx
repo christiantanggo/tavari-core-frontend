@@ -6,7 +6,6 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
-import PermissionGate from '../../components/Auth/PermissionGate';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
 
@@ -60,29 +59,52 @@ const POSReportsScreen = () => {
     hasPermission,
     hasAnyPermission,
     hasElevatedPrivileges,
+    hasLoggedInUserElevatedPrivileges,
     loading: permissionsLoading
   } = usePermissions();
+
+  const hasReportElevatedAccess = hasElevatedPrivileges() || hasLoggedInUserElevatedPrivileges();
 
   // Permission checks for different report types
   const canViewSalesReports = hasAnyPermission([
     'pos.reports.view',
-    'pos.reports.sales'
-  ]) || hasElevatedPrivileges();
+    'pos.reports.sales',
+    'reports.pos.view',
+    'reports.pos.sales'
+  ]) || hasReportElevatedAccess;
 
   const canViewFinancialReports = hasAnyPermission([
     'pos.reports.view',
-    'pos.reports.financial'
-  ]) || hasElevatedPrivileges();
+    'pos.reports.financial',
+    'reports.pos.view',
+    'reports.pos.financial'
+  ]) || hasReportElevatedAccess;
 
   const canViewInventoryReports = hasAnyPermission([
     'pos.reports.view',
-    'pos.reports.inventory'
-  ]) || hasElevatedPrivileges();
+    'pos.reports.inventory',
+    'reports.pos.view',
+    'reports.pos.inventory'
+  ]) || hasReportElevatedAccess;
 
-  const canViewEmployeeReports = hasPermission('pos.reports.employee') || hasElevatedPrivileges();
-  const canViewCustomerReports = hasPermission('pos.reports.customer') || hasElevatedPrivileges();
-  const canExportReports = hasPermission('pos.reports.export') || hasElevatedPrivileges();
-  const canEmailReports = hasPermission('pos.reports.email') || hasElevatedPrivileges();
+  const canViewEmployeeReports = hasAnyPermission([
+    'pos.reports.employee',
+    'reports.pos.employee',
+    'reports.pos.view'
+  ]) || hasReportElevatedAccess;
+  const canViewCustomerReports = hasAnyPermission([
+    'pos.reports.customer',
+    'reports.pos.customer',
+    'reports.pos.view'
+  ]) || hasReportElevatedAccess;
+  const canExportReports = hasAnyPermission([
+    'pos.reports.export',
+    'reports.export'
+  ]) || hasReportElevatedAccess;
+  const canEmailReports = hasAnyPermission([
+    'pos.reports.email',
+    'reports.email'
+  ]) || hasReportElevatedAccess;
 
   // Tax calculations
   const {
@@ -246,18 +268,24 @@ const POSReportsScreen = () => {
         .from('user_roles')
         .select(`
           user_id,
-          users!inner(id, email, first_name, last_name)
+          users!inner(id, email, first_name, last_name, employment_status, status)
         `)
         .eq('business_id', auth.selectedBusinessId)
         .eq('active', true);
       
       if (error) throw error;
       
-      const employeeList = data?.map(role => ({
-        id: role.user_id,
-        full_name: `${role.users.first_name || ''} ${role.users.last_name || ''}`.trim() || role.users.email,
-        email: role.users.email
-      })) || [];
+      const employeeList = (data || [])
+        .filter((role) => {
+          const employeeStatus = (role.users?.employment_status || role.users?.status || '').toLowerCase();
+          return employeeStatus === 'active';
+        })
+        .map(role => ({
+          id: role.user_id,
+          full_name: `${role.users.first_name || ''} ${role.users.last_name || ''}`.trim() || role.users.email,
+          email: role.users.email
+        }))
+        .sort((left, right) => (left.full_name || '').localeCompare(right.full_name || ''));
       
       setEmployees(employeeList);
     } catch (err) {
@@ -312,6 +340,32 @@ const POSReportsScreen = () => {
     }
   };
 
+  const loadPaymentsForSales = async (saleIds) => {
+    if (!Array.isArray(saleIds) || saleIds.length === 0) {
+      return [];
+    }
+
+    const batchSize = 100;
+    const paymentRows = [];
+
+    for (let index = 0; index < saleIds.length; index += batchSize) {
+      const batchSaleIds = saleIds.slice(index, index + batchSize);
+      const { data: batchPayments, error: batchPaymentsError } = await supabase
+        .from('pos_payments')
+        .select('payment_method, amount, sale_id')
+        .eq('business_id', auth.selectedBusinessId)
+        .in('sale_id', batchSaleIds);
+
+      if (batchPaymentsError) {
+        throw batchPaymentsError;
+      }
+
+      paymentRows.push(...(batchPayments || []));
+    }
+
+    return paymentRows;
+  };
+
   const generateReport = async () => {
     if (!auth.selectedBusinessId || !auth.isReady) return;
     if (!canViewCurrentReport()) {
@@ -344,9 +398,10 @@ const POSReportsScreen = () => {
       let salesQuery = supabase
         .from('pos_sales')
         .select(`
-          id, subtotal, tax, discount, loyalty_discount, total, created_at, user_id, payment_status,
+          id, subtotal, tax, discount, loyalty_discount, total, created_at, user_id, operator_user_id, operator_user_name, payment_status,
           pos_sale_items (
-            id, inventory_id, name, quantity, unit_price, total_price, category_id
+            id, inventory_id, name, quantity, unit_price, total_price, category_id,
+            pos_categories (name)
           )
         `)
         .eq('business_id', auth.selectedBusinessId)
@@ -354,13 +409,57 @@ const POSReportsScreen = () => {
         .lt('created_at', end);
 
       if (selectedEmployee !== 'all') {
-        salesQuery = salesQuery.eq('user_id', selectedEmployee);
+        salesQuery = salesQuery.or(`operator_user_id.eq.${selectedEmployee},and(operator_user_id.is.null,user_id.eq.${selectedEmployee})`);
       }
 
       const { data: sales, error: salesError } = await salesQuery;
       if (salesError) throw salesError;
 
       const completedSales = sales?.filter(sale => sale.payment_status === 'paid' || sale.payment_status === 'completed') || [];
+
+      const inventoryIdsMissingCategories = [
+        ...new Set(
+          completedSales.flatMap((sale) =>
+            (sale.pos_sale_items || [])
+              .filter((item) => !item.category_id && item.inventory_id)
+              .map((item) => item.inventory_id)
+          )
+        )
+      ];
+
+      let inventoryCategoryMap = {};
+      if (inventoryIdsMissingCategories.length > 0) {
+        const { data: inventoryRows, error: inventoryCategoryError } = await supabase
+          .from('pos_inventory')
+          .select(`
+            id,
+            category_id,
+            pos_categories (name)
+          `)
+          .in('id', inventoryIdsMissingCategories);
+
+        if (inventoryCategoryError) throw inventoryCategoryError;
+
+        inventoryCategoryMap = (inventoryRows || []).reduce((map, row) => {
+          map[row.id] = {
+            category_id: row.category_id || null,
+            category_name: row.pos_categories?.name || null
+          };
+          return map;
+        }, {});
+      }
+
+      const enrichedCompletedSales = completedSales.map((sale) => ({
+        ...sale,
+        pos_sale_items: (sale.pos_sale_items || []).map((item) => {
+          const inventoryCategory = inventoryCategoryMap[item.inventory_id] || null;
+          return {
+            ...item,
+            category_id: item.category_id || inventoryCategory?.category_id || null,
+            category_name: item.pos_categories?.name || inventoryCategory?.category_name || null
+          };
+        })
+      }));
 
       // Get refunds
       let refundsQuery = supabase
@@ -378,13 +477,7 @@ const POSReportsScreen = () => {
       if (refundsError) throw refundsError;
 
       // Get payments
-      const { data: payments, error: paymentsError } = await supabase
-        .from('pos_payments')
-        .select('payment_method, amount, sale_id')
-        .eq('business_id', auth.selectedBusinessId)
-        .in('sale_id', completedSales?.map(s => s.id) || []);
-
-      if (paymentsError) throw paymentsError;
+      const payments = await loadPaymentsForSales(enrichedCompletedSales.map((sale) => sale.id));
 
       // Get setup statistics
       const [inventoryResult, categoriesResult, modifiersResult, discountsResult, stationsResult] = await Promise.all([
@@ -396,15 +489,15 @@ const POSReportsScreen = () => {
       ]);
 
       // Calculate totals
-      const salesTotals = completedSales?.reduce((sum, sale) => sum + (Number(sale.total) || 0), 0) || 0;
+      const salesTotals = enrichedCompletedSales?.reduce((sum, sale) => sum + (Number(sale.total) || 0), 0) || 0;
       const refundTotals = refunds?.reduce((sum, refund) => sum + (Number(refund.total_refund_amount) || 0), 0) || 0;
       const netSales = salesTotals - refundTotals;
 
       // Calculate tax breakdown
       let taxBreakdown = { totalTax: 0, aggregatedTaxes: {}, aggregatedRebates: {} };
       
-      if (includeTaxBreakdown && completedSales?.length > 0) {
-        const totalTaxFromSales = completedSales.reduce((sum, sale) => sum + (Number(sale.tax) || 0), 0);
+      if (includeTaxBreakdown && enrichedCompletedSales?.length > 0) {
+        const totalTaxFromSales = enrichedCompletedSales.reduce((sum, sale) => sum + (Number(sale.tax) || 0), 0);
         const totalTaxFromRefunds = refunds?.reduce((sum, refund) => sum + (Number(refund.tax_refunded) || 0), 0) || 0;
         taxBreakdown.totalTax = totalTaxFromSales - totalTaxFromRefunds;
       }
@@ -424,7 +517,7 @@ const POSReportsScreen = () => {
 
       // Calculate top items
       const itemTotals = {};
-      completedSales?.forEach(sale => {
+      enrichedCompletedSales?.forEach(sale => {
         if (sale.pos_sale_items) {
           sale.pos_sale_items.forEach(item => {
             const key = item.name;
@@ -443,13 +536,13 @@ const POSReportsScreen = () => {
 
       // Calculate employee stats
       const employeeStats = {};
-      completedSales?.forEach(sale => {
-        const userId = sale.user_id;
+      enrichedCompletedSales?.forEach(sale => {
+        const userId = sale.operator_user_id || sale.user_id;
         if (!employeeStats[userId]) {
           const employee = employees.find(e => e.id === userId);
           employeeStats[userId] = {
             id: userId,
-            name: employee ? employee.full_name || employee.email : 'Unknown',
+            name: sale.operator_user_name || (employee ? employee.full_name || employee.email : 'Unknown'),
             sales: 0,
             revenue: 0,
             transactions: 0
@@ -492,8 +585,8 @@ const POSReportsScreen = () => {
         topItems,
         employeeStats: Object.values(employeeStats).sort((a, b) => b.revenue - a.revenue),
         comparisonData,
-        totalTransactions: completedSales?.length || 0,
-        avgTransaction: completedSales?.length > 0 ? (salesTotals / completedSales.length) : 0,
+        totalTransactions: enrichedCompletedSales?.length || 0,
+        avgTransaction: enrichedCompletedSales?.length > 0 ? (salesTotals / enrichedCompletedSales.length) : 0,
         taxBreakdown,
         setupStats: {
           inventoryCount: inventoryResult.data?.length || 0,
@@ -506,7 +599,7 @@ const POSReportsScreen = () => {
           activeStations: stationsResult.data?.filter(s => s.is_active !== false).length || 0
         },
         rawData: {
-          sales: completedSales,
+          sales: enrichedCompletedSales,
           refunds,
           payments
         }
@@ -517,7 +610,7 @@ const POSReportsScreen = () => {
         date_range: dateRange,
         total_sales: salesTotals,
         net_sales: netSales,
-        transactions_count: completedSales?.length || 0
+        transactions_count: enrichedCompletedSales?.length || 0
       }, true);
 
     } catch (err) {
@@ -909,7 +1002,7 @@ const POSReportsScreen = () => {
           </div>
 
           {/* Quick Summary Cards */}
-          <PermissionGate permissions={['pos.reports.view']} fallback={null}>
+          {(canViewSalesReports || canViewFinancialReports || canViewInventoryReports || canViewEmployeeReports || canViewCustomerReports) && (
             <div style={styles.summaryGrid}>
               <div style={styles.summaryCard}>
                 <div style={styles.summaryValue}>{formatCurrency(reportData.salesTotals)}</div>
@@ -928,7 +1021,7 @@ const POSReportsScreen = () => {
                 <div style={styles.summaryLabel}>Avg Transaction</div>
               </div>
             </div>
-          </PermissionGate>
+          )}
 
           {/* Report Content */}
           {loading ? (

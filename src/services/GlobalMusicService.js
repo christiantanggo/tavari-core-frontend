@@ -68,6 +68,8 @@ class GlobalMusicService {
     
     // Announcement handling
     this.announcementAudio = null;
+    /** Used for signed/cross-origin URLs only; never connected to Web Audio to avoid CORS silence. */
+    this._announcementDirect = null;
     this.isPlayingAnnouncement = false;
     this.musicVolumeBeforeAnnouncement = 0.7;
     
@@ -101,17 +103,52 @@ class GlobalMusicService {
     // Playback tracking
     this.currentPlayLogId = null;
 
+    // Play announcement/ad every X songs (local ads only; does not touch schedule logic)
+    this.songsPlayedSinceLastAd = 0;
+    this.adEveryXSongsSettings = null; // { ad_frequency, local_ads_enabled }
+    this.adSettingsCacheTime = 0;
+    this.AD_SETTINGS_CACHE_MS = 60 * 1000;
+    /** When true, play an ad after every 1 song (for testing). Overrides ad_frequency. */
+    this.adTestModeEveryOneSong = false;
+    /** True while we're fetching an ad in the ended handler so a second ended doesn't start another ad. */
+    this._adPlayScheduled = false;
+    /** True while playAnnouncementsThenNext is running; prevents overlapping ad runs. */
+    this._announcementsInProgress = false;
+    /** For round-robin: index into the ordered list of local ads (wraps). */
+    this._localAdRoundRobinIndex = 0;
+    /** Interval that force-stops music during ad block so it can never play behind ads. */
+    this._adBlockMusicGuardInterval = null;
+
     this.setupAudio();
     this.setupUserInteraction();
   }
 
-  setupAudio() {
-    this.audio = document.getElementById('global-audio-element') || new Audio();
-    if (!document.getElementById('global-audio-element')) {
-      this.audio.id = 'global-audio-element';
-      this.audio.style.display = 'none';
-      document.body.appendChild(this.audio);
+  normalizeBusinessId(value) {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    if (!normalized || normalized === 'null' || normalized === 'undefined') {
+      return null;
     }
+    return normalized;
+  }
+
+  hasValidBusinessId() {
+    return Boolean(this.normalizeBusinessId(this.businessId));
+  }
+
+  setupAudio() {
+    // CRITICAL: Only one music element must exist. Remove any existing (legacy or ours)
+    // so we never have two elements both playing.
+    ['global-audio-element', 'tavari-global-music-audio'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.pause();
+        el.remove();
+      }
+    });
+    this.audio = new Audio();
+    this.audio.id = 'tavari-global-music-audio';
+    this.audio.style.display = 'none';
+    document.body.appendChild(this.audio);
 
     this.audio.volume = this.volume;
     this.audio.preload = 'auto';
@@ -133,17 +170,40 @@ class GlobalMusicService {
     });
 
     this.audio.addEventListener('ended', async () => {
-      // Log song completion before moving to next
-      if (this.currentPlayLogId) {
-        await playbackTrackingService.logSongEnd(this.currentPlayLogId, {
-          completed: true,
-          skipped: false,
-          duration: Math.floor(this.audio.duration || 0)
-        });
-        this.currentPlayLogId = null;
+      if (this.isPlayingAnnouncement || this._adPlayScheduled) return;
+      this._adPlayScheduled = true;
+      this.songsPlayedSinceLastAd += 1;
+      this._forceStopMusic();
+      try {
+        if (this.currentPlayLogId) {
+          await playbackTrackingService.logSongEnd(this.currentPlayLogId, {
+            completed: true,
+            skipped: false,
+            duration: Math.floor(this.audio.duration || 0)
+          });
+          this.currentPlayLogId = null;
+        }
+        const settings = await this.getAdEveryXSongsSettings();
+        const effectiveFrequency = this.adTestModeEveryOneSong ? 1 : (settings?.ad_frequency ?? 0);
+        const adEnabled = this.adTestModeEveryOneSong || (settings?.ad_enabled && settings?.local_ads_enabled);
+        if (adEnabled && effectiveFrequency > 0 && this.songsPlayedSinceLastAd >= effectiveFrequency) {
+          this.songsPlayedSinceLastAd = 0;
+          const adsPerSlot = Math.max(1, Math.min(10, settings?.ads_per_slot || 1));
+          const ads = await this.getNextLocalAds(adsPerSlot);
+          const withPath = ads.filter((a) => a?.file_path);
+          if (withPath.length > 0) {
+            await this.playAnnouncementsThenNext(withPath);
+            return;
+          }
+        }
+        await this.next();
+        this.ensurePlayback();
+      } catch (e) {
+        await this.next();
+        this.ensurePlayback();
+      } finally {
+        this._adPlayScheduled = false;
       }
-      await this.next();
-      this.ensurePlayback();
     });
 
     this.audio.addEventListener('error', async () => {
@@ -221,6 +281,7 @@ class GlobalMusicService {
   }
   
   async ensurePlayback() {
+    if (this.isPlayingAnnouncement || this._adPlayScheduled || this._announcementsInProgress) return;
     // Ensure music is playing if it should be
     if (!this.isInitialized || !this.businessId) {
       return;
@@ -261,23 +322,35 @@ class GlobalMusicService {
   }
 
   async initialize(businessId) {
-    if (!businessId) {
-      console.warn('⚠️ [GlobalMusicService] initialize called without businessId');
+    const normalizedBusinessId = this.normalizeBusinessId(businessId);
+    if (!normalizedBusinessId) {
+      console.error('🎵 Refusing to initialize music service without a valid businessId:', businessId);
+      return { success: false, error: 'businessId is required' };
+    }
+
+    if (this.isInitialized && this.businessId === normalizedBusinessId) {
       return;
     }
 
-    if (this.isInitialized && this.businessId === businessId) {
-      console.log('✅ [GlobalMusicService] Already initialized with same business ID:', businessId);
-      return;
-    }
-
-    if (this.isInitialized && this.businessId && this.businessId !== businessId) {
-      console.log('🔄 [GlobalMusicService] Business ID changed, destroying old service:', this.businessId, '->', businessId);
+    if (this.isInitialized && this.businessId && this.businessId !== normalizedBusinessId) {
       this.destroy();
     }
 
-    console.log('🎵 [GlobalMusicService] Initializing with business ID:', businessId);
-    this.businessId = businessId;
+    this.businessId = normalizedBusinessId;
+    
+    // CRITICAL: Set app.current_business_id for RLS policies
+    // This is required for music_playlist_tracks RLS to work correctly
+    try {
+      const { error: configError } = await supabase.rpc('exec_sql', {
+        sql: `SELECT set_config('app.current_business_id', '${normalizedBusinessId}', false)`
+      }).catch(() => ({ error: null })); // Silently fail if RPC doesn't exist
+      
+      if (!configError) {
+        // RLS session variable set
+      }
+    } catch (e) {
+      // RPC might not exist, use session variable
+    }
     
     // Check for kiosk mode flag from Electron or window
     if (window.__TAVARI_KIOSK_MODE__ || window.__TAVARI_ENABLE_AUTOPLAY__) {
@@ -285,9 +358,24 @@ class GlobalMusicService {
     }
 
     try {
+      // CRITICAL: Ensure business ID is set before loading tracks
+      if (!this.businessId) {
+        throw new Error('businessId is required for initialization');
+      }
+      
       // CRITICAL: Load tracks FIRST (old working order)
       // This ensures tracks are always available, even if schedule check fails
       await this.loadTracks();
+      
+      // If loadTracks returned 0 tracks, continue (might be RLS or session issue)
+      if (!this.tracks || this.tracks.length === 0) {
+        try {
+          await supabase.auth.getSession();
+        } catch (e) {
+          // Ignore session check errors
+        }
+      }
+      
       await this.loadSchedules();
       
       // Initialize playback tracking service with installation context
@@ -297,27 +385,20 @@ class GlobalMusicService {
       
       if (window.electronAPI) {
         try {
-          console.log('🔍 [GlobalMusicService] Detected Electron - looking up installation...');
           const systemInfo = await window.electronAPI.getSystemInfo();
-          console.log('📡 [GlobalMusicService] System info:', systemInfo);
           
           if (systemInfo?.fingerprint) {
-            console.log('🔍 [GlobalMusicService] Looking up installation by fingerprint:', systemInfo.fingerprint, 'for business:', businessId);
-            
             // First try with business_id filter
             let { data, error } = await supabase
               .from('music_installations')
               .select('id, device_name, business_id, status')
               .eq('device_fingerprint', systemInfo.fingerprint)
-              .eq('business_id', businessId)
+              .eq('business_id', normalizedBusinessId)
               .eq('status', 'active')
               .maybeSingle();
             
-            console.log('📦 [GlobalMusicService] Installation lookup result (with business filter):', { data, error });
-            
             // If not found, try without business_id filter (in case it was registered to a different business)
             if (!data && !error) {
-              console.log('🔍 [GlobalMusicService] Not found with business filter, trying without business filter...');
               const { data: data2, error: error2 } = await supabase
                 .from('music_installations')
                 .select('id, device_name, business_id, status')
@@ -325,45 +406,37 @@ class GlobalMusicService {
                 .eq('status', 'active')
                 .maybeSingle();
               
-              console.log('📦 [GlobalMusicService] Installation lookup result (without business filter):', { data: data2, error: error2 });
-              
               if (data2) {
-                console.log('⚠️ [GlobalMusicService] Found installation but for different business:', data2.business_id, 'vs current:', businessId);
-                // Still use it if business matches or if we want to allow cross-business
-                if (data2.business_id === businessId) {
+                if (data2.business_id === normalizedBusinessId) {
                   data = data2;
                 }
               }
             }
             
-            if (error) {
-              console.warn('⚠️ [GlobalMusicService] Error looking up installation:', error);
-            } else if (data) {
+            if (!error && data) {
               installationId = data.id;
-              // device_id doesn't exist in music_installations table
               deviceId = null;
-              console.log('✅ [GlobalMusicService] Found installation:', { 
-                installationId, 
-                deviceName: data.device_name,
-                businessId: data.business_id
-              });
-            } else {
-              console.log('ℹ️ [GlobalMusicService] No installation found for fingerprint:', systemInfo.fingerprint);
-              console.log('💡 [GlobalMusicService] Desktop kiosk may need to be registered via InstallationManager');
             }
-          } else {
-            console.log('⚠️ [GlobalMusicService] No fingerprint in system info:', systemInfo);
           }
         } catch (error) {
-          console.warn('⚠️ [GlobalMusicService] Error getting installation info:', error);
+          // Ignore installation lookup errors
         }
       } else {
-        // Running in browser - no installation ID
+        // Running in browser - use a stable browser-specific device ID for playback reporting
+        try {
+          deviceId = localStorage.getItem('music_v2_device_id');
+          if (!deviceId) {
+            deviceId = `browser-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+            localStorage.setItem('music_v2_device_id', deviceId);
+          }
+        } catch (error) {
+          deviceId = `browser-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+        }
       }
       
       // Initializing playback tracking
       
-      await playbackTrackingService.initialize(businessId, installationId, deviceId);
+      await playbackTrackingService.initialize(normalizedBusinessId, installationId, deviceId);
       
       // Set up network monitoring FIRST
       this.setupNetworkMonitoring();
@@ -424,6 +497,10 @@ class GlobalMusicService {
       this.scheduleSubscription = null;
     }
 
+    if (!this.hasValidBusinessId()) {
+      return;
+    }
+
     // Create a unique channel name for this business
     const channelName = `music-schedules-${this.businessId}`;
 
@@ -479,6 +556,10 @@ class GlobalMusicService {
       this.playlistSubscription = null;
     }
 
+    if (!this.hasValidBusinessId()) {
+      return;
+    }
+
     const channelName = `music-playlists-${this.businessId}`;
 
     this.playlistSubscription = supabase
@@ -519,6 +600,10 @@ class GlobalMusicService {
     if (this.trackSubscription) {
       supabase.removeChannel(this.trackSubscription);
       this.trackSubscription = null;
+    }
+
+    if (!this.hasValidBusinessId()) {
+      return;
     }
 
     const channelName = `music-tracks-${this.businessId}`;
@@ -573,8 +658,7 @@ class GlobalMusicService {
       this.announcementSubscription = null;
     }
 
-    if (!this.businessId) {
-      console.warn('📢 Cannot subscribe to announcements: no business ID');
+    if (!this.hasValidBusinessId()) {
       return;
     }
 
@@ -588,17 +672,10 @@ class GlobalMusicService {
           event: 'announcement'
         },
         async (payload) => {
-          console.log('📢 Announcement received:', payload);
           await this.playAnnouncement(payload.payload);
         }
       )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          console.log('📢 ✅ Subscribed to announcements channel:', channelName);
-        } else if (status === 'CHANNEL_ERROR') {
-          console.error('📢 ❌ Failed to subscribe to announcements channel');
-        }
-      });
+      .subscribe(() => {});
   }
   
   /**
@@ -606,104 +683,514 @@ class GlobalMusicService {
    * Call this from browser console: window.globalMusicService.resubscribeAnnouncements()
    */
   resubscribeAnnouncements() {
-    console.log('📢 Manually re-subscribing to announcements...');
     this.subscribeToAnnouncements();
   }
 
   /**
-   * Play an announcement - pauses music, plays announcement, then resumes music
+   * Play an announcement - pauses music, plays announcement, then resumes music.
+   * Uses the same single ad element and lock as song-ended ads so only one ad ever plays at a time.
    */
   async playAnnouncement(announcementData) {
-    if (!announcementData || this.isPlayingAnnouncement) {
-      return; // Already playing an announcement or invalid data
-    }
-
-    // Store current music state OUTSIDE try block so it's available in finally
+    if (!announcementData) return;
+    if (this._announcementsInProgress || this.isPlayingAnnouncement) return;
+    this._announcementsInProgress = true;
+    this.isPlayingAnnouncement = true;
     const wasPlaying = this.isPlaying;
-    
     try {
-      this.isPlayingAnnouncement = true;
-      
+      this._stopAnyPlayingAnnouncement();
       this.musicVolumeBeforeAnnouncement = this.volume;
-      
-      // Pause music
-      if (wasPlaying) {
-        this.pause();
+      if (this.audio) {
+        this.audio.volume = 0;
+        this.audio.pause();
       }
-      
-      // Lower music volume to 20% if it was playing (ducking)
-      if (wasPlaying && this.audio) {
-        this.audio.volume = 0.2;
-      }
-      
-      // Create announcement audio element if it doesn't exist
-      if (!this.announcementAudio) {
-        this.announcementAudio = new Audio();
-        this.announcementAudio.volume = 1.0; // Announcements play at full volume
-      }
-      
-      // Get audio URL from announcement data
+      this.isPlaying = false;
+      this.notifyListeners();
+
       let audioUrl = null;
-      
       if (announcementData.audioUrl) {
-        // Direct URL provided
         audioUrl = announcementData.audioUrl;
       } else if (announcementData.file_path) {
-        // File path provided - get signed URL
         const { data, error } = await supabase.storage
           .from('music-files')
           .createSignedUrl(announcementData.file_path, 3600);
-        
-        if (error || !data?.signedUrl) {
-          throw new Error('Failed to get announcement audio URL');
-        }
-        
+        if (error || !data?.signedUrl) throw new Error('Failed to get announcement audio URL');
         audioUrl = data.signedUrl;
       } else if (announcementData.text) {
-        // Text-to-speech announcement - would need TTS service
-        console.warn('📢 Text-to-speech announcements not yet implemented');
         this.isPlayingAnnouncement = false;
-        if (wasPlaying) {
-          this.audio.volume = this.musicVolumeBeforeAnnouncement;
-          await this.play();
-        }
+        this._announcementsInProgress = false;
+        if (this.audio) this.audio.volume = this.musicVolumeBeforeAnnouncement;
+        this.isPlaying = wasPlaying;
+        this.notifyListeners();
+        if (wasPlaying && this.audio) await this.play();
         return;
       } else {
         throw new Error('No audio source provided in announcement');
       }
-      
-      // Load and play announcement
-      this.announcementAudio.src = audioUrl;
-      
-      await new Promise((resolve, reject) => {
-        this.announcementAudio.onended = () => {
-          resolve();
-        };
-        
-        this.announcementAudio.onerror = (error) => {
-          console.error('📢 Error playing announcement:', error);
-          reject(error);
-        };
-        
-        this.announcementAudio.play().catch(reject);
-      });
-      
-      console.log('📢 Announcement finished playing');
-      
+
+      const adVolume = await this._getAdVolumeAdjustment();
+      await this._playAnnouncementUrlDirect(audioUrl, adVolume);
     } catch (error) {
-      console.error('📢 Error in playAnnouncement:', error);
+      // Announcement playback failed
     } finally {
-      // Restore music state
       this.isPlayingAnnouncement = false;
-      
-      if (this.audio) {
-        this.audio.volume = this.musicVolumeBeforeAnnouncement;
+      this._announcementsInProgress = false;
+      if (this.audio) this.audio.volume = this.musicVolumeBeforeAnnouncement;
+      this.isPlaying = wasPlaying;
+      this.notifyListeners();
+      if (wasPlaying && this.audio) await this.play();
+    }
+  }
+
+  /**
+   * Test mode: when true, an ad plays after every 1 song (overrides ad_frequency).
+   * Use for testing announcement/ad flow without waiting for multiple songs.
+   */
+  setAdTestModeEveryOneSong(enabled) {
+    this.adTestModeEveryOneSong = !!enabled;
+  }
+
+  getAdTestModeEveryOneSong() {
+    return this.adTestModeEveryOneSong;
+  }
+
+  /**
+   * Clear cached ad-every-X-songs settings so the next check refetches from the database.
+   * Call this after saving ad settings in the UI so the running player uses the new values.
+   */
+  clearAdEveryXSongsSettingsCache() {
+    this.adEveryXSongsSettings = null;
+    this.adSettingsCacheTime = 0;
+  }
+
+  /**
+   * Get ad-every-X-songs settings from music_settings (cached briefly).
+   * Returns { ad_frequency: number, local_ads_enabled: boolean } or null.
+   */
+  async getAdEveryXSongsSettings() {
+    const now = Date.now();
+    if (this.adEveryXSongsSettings && (now - this.adSettingsCacheTime) < this.AD_SETTINGS_CACHE_MS) {
+      return this.adEveryXSongsSettings;
+    }
+    if (!this.businessId) return null;
+    try {
+      const { data, error } = await supabase
+        .from('music_settings')
+        .select('ad_frequency, ad_enabled, ad_volume_adjustment, ad_selection_mode, ads_per_slot')
+        .eq('business_id', this.businessId)
+        .limit(1)
+        .maybeSingle();
+      if (error || !data) return null;
+      const vol = data.ad_volume_adjustment != null ? parseFloat(data.ad_volume_adjustment) : 2;
+      const mode = data.ad_selection_mode === 'round_robin' ? 'round_robin' : 'random';
+      const perSlot = data.ads_per_slot != null ? Math.max(1, Math.min(10, parseInt(data.ads_per_slot, 10) || 1)) : 1;
+      this.adEveryXSongsSettings = {
+        ad_frequency: typeof data.ad_frequency === 'number' ? data.ad_frequency : parseInt(data.ad_frequency, 10) || 0,
+        ad_enabled: data.ad_enabled !== false,
+        local_ads_enabled: true,
+        ad_volume_adjustment: (Number.isNaN(vol) || vol < 0.5 || vol > 2) ? 2 : vol,
+        ad_selection_mode: mode,
+        ads_per_slot: perSlot
+      };
+      this.adSettingsCacheTime = now;
+      return this.adEveryXSongsSettings;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Get one active local ad for this business (for rotation, picks randomly from first 20).
+   * Only returns ads whose schedule includes today (start_date <= today <= end_date; null = no limit).
+   * If start_date/end_date columns are missing (schema not migrated), returns any active ad.
+   */
+  async getNextLocalAd() {
+    if (!this.businessId) return null;
+    try {
+      const { data, error } = await supabase
+        .from('music_local_ads')
+        .select('id, file_path, start_date, end_date')
+        .eq('business_id', this.businessId)
+        .eq('active', true)
+        .limit(50);
+      if (error) {
+        if (error.message && error.message.includes('start_date') || error.message?.includes('end_date')) {
+          const fallback = await supabase
+            .from('music_local_ads')
+            .select('id, file_path')
+            .eq('business_id', this.businessId)
+            .eq('active', true)
+            .limit(20);
+          if (fallback.error || !fallback.data?.length) return null;
+          const pick = fallback.data[Math.floor(Math.random() * fallback.data.length)];
+          return pick;
+        }
+        return null;
       }
-      
-      // Resume music if it was playing
-      if (wasPlaying && this.audio) {
-        await this.play();
+      if (!data?.length) return null;
+      const today = new Date().toISOString().slice(0, 10);
+      const scheduled = data.filter((ad) => {
+        const startOk = ad.start_date == null || String(ad.start_date).slice(0, 10) <= today;
+        const endOk = ad.end_date == null || String(ad.end_date).slice(0, 10) >= today;
+        return startOk && endOk;
+      });
+      if (!scheduled.length) return null;
+      const pick = scheduled[Math.floor(Math.random() * Math.min(20, scheduled.length))];
+      return { id: pick.id, file_path: pick.file_path };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Get up to `count` local ads for this business. Uses ad_selection_mode (random vs round_robin).
+   * Returns array of { id, file_path }. Only includes ads whose schedule includes today.
+   */
+  async getNextLocalAds(count = 1) {
+    if (!this.businessId || count < 1) return [];
+    const settings = await this.getAdEveryXSongsSettings();
+    const mode = settings?.ad_selection_mode === 'round_robin' ? 'round_robin' : 'random';
+    try {
+      const { data, error } = await supabase
+        .from('music_local_ads')
+        .select('id, file_path, start_date, end_date')
+        .eq('business_id', this.businessId)
+        .eq('active', true)
+        .order('id', { ascending: true })
+        .limit(100);
+      if (error) {
+        if (error.message && (error.message.includes('start_date') || error.message.includes('end_date'))) {
+          const fallback = await supabase
+            .from('music_local_ads')
+            .select('id, file_path')
+            .eq('business_id', this.businessId)
+            .eq('active', true)
+            .order('id', { ascending: true })
+            .limit(100);
+          if (fallback.error || !fallback.data?.length) return [];
+          return this._pickLocalAds(fallback.data, count, mode);
+        }
+        return [];
       }
+      if (!data?.length) return [];
+      const today = new Date().toISOString().slice(0, 10);
+      const scheduled = data.filter((ad) => {
+        const startOk = ad.start_date == null || String(ad.start_date).slice(0, 10) <= today;
+        const endOk = ad.end_date == null || String(ad.end_date).slice(0, 10) >= today;
+        return startOk && endOk;
+      });
+      return this._pickLocalAds(scheduled, count, mode);
+    } catch (e) {
+      return [];
+    }
+  }
+
+  _pickLocalAds(scheduled, count, mode) {
+    if (!scheduled?.length) return [];
+    const take = Math.min(count, scheduled.length);
+    let out = [];
+    if (mode === 'round_robin') {
+      const start = this._localAdRoundRobinIndex % scheduled.length;
+      for (let i = 0; i < take; i++) {
+        out.push(scheduled[(start + i) % scheduled.length]);
+      }
+      this._localAdRoundRobinIndex = (start + take) % scheduled.length;
+    } else {
+      const shuffled = [...scheduled].sort(() => Math.random() - 0.5);
+      out = shuffled.slice(0, take);
+    }
+    const seen = new Set();
+    const deduped = out.filter((a) => {
+      if (seen.has(a.id)) return false;
+      seen.add(a.id);
+      return true;
+    });
+    return deduped.map((a) => ({ id: a.id, file_path: a.file_path }));
+  }
+
+  /**
+   * Boost for live ad/announcement playback (1.0 = normal, 2.0 = 200% of music).
+   * Uses Web Audio API so we can go above the HTML5 Audio volume cap of 1.0.
+   */
+  static get AD_VOLUME_BOOST() {
+    return 2;
+  }
+
+  /**
+   * Force music to stop and stay silent. Call at start of ad block and repeatedly during ads.
+   * Ensures music never plays behind ads even if another path tries to start it.
+   */
+  _forceStopMusic() {
+    if (!this.audio) return;
+    this.audio.pause();
+    this.audio.volume = 0;
+  }
+
+  /**
+   * Start a guard interval that force-stops music every 150ms while ads are playing.
+   * Stops music from ever playing behind ads (back-to-back or single).
+   */
+  _startAdBlockMusicGuard() {
+    this._stopAdBlockMusicGuard();
+    this._forceStopMusic();
+    this._adBlockMusicGuardInterval = setInterval(() => {
+      if (this.isPlayingAnnouncement || this._announcementsInProgress) {
+        this._forceStopMusic();
+      } else {
+        this._stopAdBlockMusicGuard();
+      }
+    }, 150);
+  }
+
+  _stopAdBlockMusicGuard() {
+    if (this._adBlockMusicGuardInterval) {
+      clearInterval(this._adBlockMusicGuardInterval);
+      this._adBlockMusicGuardInterval = null;
+    }
+  }
+
+  /**
+   * Stop any currently playing announcement on both ad elements so only one ad plays at a time.
+   */
+  _stopAnyPlayingAnnouncement() {
+    if (this.announcementAudio) {
+      this.announcementAudio.pause();
+      this.announcementAudio.removeAttribute('src');
+      this.announcementAudio.load();
+    }
+    if (this._announcementDirect) {
+      this._announcementDirect.pause();
+      this._announcementDirect.removeAttribute('src');
+      this._announcementDirect.src = '';
+      this._announcementDirect.load();
+      this._announcementDirect.onended = null;
+      this._announcementDirect.onerror = null;
+    }
+  }
+
+  /**
+   * Dispose the current ad element so the next play uses a fresh one.
+   * Prevents compounded echo from reused element state across many ad plays.
+   */
+  _disposeAnnouncementDirect() {
+    if (this._announcementDirect) {
+      this._announcementDirect.pause();
+      this._announcementDirect.removeAttribute('src');
+      this._announcementDirect.src = '';
+      this._announcementDirect.load();
+      this._announcementDirect.onended = null;
+      this._announcementDirect.onerror = null;
+      this._announcementDirect = null;
+    }
+  }
+
+  /**
+   * Get ad volume multiplier from settings (1 = same as music, 2 = 200% of music). Uses cache.
+   */
+  async _getAdVolumeAdjustment() {
+    const settings = await this.getAdEveryXSongsSettings();
+    const v = settings?.ad_volume_adjustment;
+    if (v == null || Number.isNaN(parseFloat(v))) return 2;
+    const n = parseFloat(v);
+    return (n >= 0.5 && n <= 2) ? n : 2;
+  }
+
+  /**
+   * ONLY ad audio output: one HTML Audio element per ad play, then disposed.
+   * When volumeAdjustment > 1, routes through Web Audio GainNode so announcements can play at 200% of music.
+   */
+  async _playAnnouncementUrlDirect(audioUrl, volumeAdjustment = 1) {
+    this._stopAnyPlayingAnnouncement();
+    this._forceStopMusic();
+    this._disposeAnnouncementDirect();
+    const el = new Audio();
+    this._announcementDirect = el;
+    const gainMultiplier = Math.max(0.5, Math.min(2, volumeAdjustment || 1));
+    el.volume = gainMultiplier > 1 ? 1 : gainMultiplier;
+    el.crossOrigin = 'anonymous';
+    el.src = audioUrl;
+    if (gainMultiplier > 1) {
+      const Ctx = typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext);
+      if (Ctx) {
+        try {
+          const ctx = this._adAudioContext || new Ctx();
+          if (!this._adAudioContext) this._adAudioContext = ctx;
+          if (ctx.state === 'suspended') await ctx.resume();
+          const source = ctx.createMediaElementSource(el);
+          const gainNode = ctx.createGain();
+          gainNode.gain.value = gainMultiplier;
+          source.connect(gainNode);
+          gainNode.connect(ctx.destination);
+        } catch (e) {
+          if (typeof console !== 'undefined' && console.warn) console.warn('[GlobalMusicService] ad gain setup failed', e);
+        }
+      }
+    }
+    return new Promise((resolve, reject) => {
+      const done = (err) => {
+        el.onended = null;
+        el.onerror = null;
+        if (err) reject(err);
+        else resolve();
+      };
+      el.onended = () => done();
+      el.onerror = (e) => done(e);
+      this._forceStopMusic();
+      el.play().catch(reject);
+    });
+  }
+
+  /**
+   * Play cross-origin URL with volume boost via fetch + decodeAudioData + GainNode (no CORS zeroes).
+   */
+  async _playAnnouncementUrlWithGain(audioUrl, gainValue) {
+    const Ctx = typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext);
+    if (!Ctx) throw new Error('Web Audio not supported');
+    const ctx = this._adAudioContext || new Ctx();
+    if (!this._adAudioContext) this._adAudioContext = ctx;
+    if (ctx.state === 'suspended') await ctx.resume();
+    const response = await fetch(audioUrl, { mode: 'cors' });
+    if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+    const arrayBuffer = await response.arrayBuffer();
+    const decoded = await ctx.decodeAudioData(arrayBuffer);
+    const source = ctx.createBufferSource();
+    source.buffer = decoded;
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = gainValue;
+    source.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    source.start(0);
+    return new Promise((resolve) => {
+      const durationMs = (decoded.duration || 30) * 1000;
+      setTimeout(resolve, durationMs + 100);
+    });
+  }
+
+  /**
+   * Ensure announcement audio is routed through Web Audio API gain so we can boost volume.
+   */
+  _ensureAnnouncementGain() {
+    if (!this.announcementAudio) return;
+    if (this._announcementGainNode) return;
+    try {
+      const Ctx = typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext);
+      if (!Ctx) return;
+      if (!this._adAudioContext) this._adAudioContext = new Ctx();
+      const ctx = this._adAudioContext;
+      const source = ctx.createMediaElementSource(this.announcementAudio);
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = GlobalMusicService.AD_VOLUME_BOOST;
+      source.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      this._announcementGainNode = gainNode;
+    } catch (e) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[GlobalMusicService] announcement gain setup failed', e);
+      }
+    }
+  }
+
+  /**
+   * Play an announcement then either resume the same track or advance to the next.
+   * @param {Object} announcementData - { file_path } or { audioUrl }
+   * @param {Object} [options] - { resumeSameTrack: boolean } When true (e.g. Test live), resume current song after ad; otherwise play next track.
+   */
+  async playAnnouncementThenNext(announcementData, options = {}) {
+    if (!announcementData) return;
+    if (this._announcementsInProgress || this.isPlayingAnnouncement) return;
+    this._announcementsInProgress = true;
+    this.isPlayingAnnouncement = true;
+    const wasPlaying = this.isPlaying;
+    const resumeSameTrack = options.resumeSameTrack === true;
+    this._forceStopMusic();
+    this._startAdBlockMusicGuard();
+    try {
+      this._stopAnyPlayingAnnouncement();
+      this.musicVolumeBeforeAnnouncement = this.volume;
+      this._forceStopMusic();
+      this.isPlaying = false;
+      this.notifyListeners();
+
+      let audioUrl = null;
+      if (announcementData.audioUrl) {
+        audioUrl = announcementData.audioUrl;
+      } else if (announcementData.file_path) {
+        const { data, error } = await supabase.storage
+          .from('music-files')
+          .createSignedUrl(announcementData.file_path, 3600);
+        if (error || !data?.signedUrl) throw new Error('Failed to get ad audio URL');
+        audioUrl = data.signedUrl;
+      } else {
+        throw new Error('No audio source in announcement data');
+      }
+      const adVolume = await this._getAdVolumeAdjustment();
+      await this._playAnnouncementUrlDirect(audioUrl, adVolume);
+    } catch (e) {
+      throw e;
+    } finally {
+      this._stopAdBlockMusicGuard();
+      this.isPlayingAnnouncement = false;
+      this._announcementsInProgress = false;
+      if (this.audio) this.audio.volume = this.musicVolumeBeforeAnnouncement;
+      this.isPlaying = wasPlaying;
+      this.notifyListeners();
+      if (resumeSameTrack) {
+        if (wasPlaying && this.audio?.src) this.play().catch(() => {});
+      } else {
+        await this.next();
+        this.ensurePlayback();
+      }
+    }
+  }
+
+  /**
+   * Play multiple ads strictly one-after-another, then advance to the next music track.
+   * Music and ads never play at the same time.
+   * @param {Array<{ file_path: string }>} adsArray - Ads to play in order
+   */
+  async playAnnouncementsThenNext(adsArray) {
+    if (!adsArray?.length) return;
+    if (this._announcementsInProgress) return;
+    this._announcementsInProgress = true;
+    if (this.isPlayingAnnouncement) {
+      this._announcementsInProgress = false;
+      return;
+    }
+    this.isPlayingAnnouncement = true;
+    const wasPlaying = this.isPlaying;
+    this._forceStopMusic();
+    this._startAdBlockMusicGuard();
+    try {
+      this._stopAnyPlayingAnnouncement();
+      this.musicVolumeBeforeAnnouncement = this.volume;
+      this._forceStopMusic();
+      this.isPlaying = false;
+      this.notifyListeners();
+
+      const adVolume = await this._getAdVolumeAdjustment();
+      for (let i = 0; i < adsArray.length; i++) {
+        const ad = adsArray[i];
+        if (!ad?.file_path) continue;
+        this._forceStopMusic();
+        const { data, error } = await supabase.storage
+          .from('music-files')
+          .createSignedUrl(ad.file_path, 3600);
+        if (error || !data?.signedUrl) continue;
+        this._forceStopMusic();
+        await this._playAnnouncementUrlDirect(data.signedUrl, adVolume);
+      }
+    } catch (e) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[GlobalMusicService] playAnnouncementsThenNext error', e);
+      }
+    } finally {
+      this._stopAdBlockMusicGuard();
+      this.isPlayingAnnouncement = false;
+      this._announcementsInProgress = false;
+      if (this.audio) this.audio.volume = this.musicVolumeBeforeAnnouncement;
+      this.isPlaying = wasPlaying;
+      this.notifyListeners();
+      await this.next();
+      this.ensurePlayback();
     }
   }
 
@@ -726,11 +1213,9 @@ class GlobalMusicService {
     });
 
     if (error) {
-      console.error('📢 Error sending announcement:', error);
       throw error;
     }
 
-    console.log('📢 Announcement sent to channel:', channelName);
     return true;
   }
 
@@ -745,7 +1230,7 @@ class GlobalMusicService {
       this.remoteCommandSubscription = null;
     }
 
-    if (!this.businessId) {
+    if (!this.hasValidBusinessId()) {
       return;
     }
 
@@ -759,17 +1244,10 @@ class GlobalMusicService {
           event: 'command'
         },
         async (payload) => {
-          console.log('🎮 Remote command received:', payload);
           await this.handleRemoteCommand(payload.payload);
         }
       )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          console.log('🎮 ✅ Subscribed to remote commands channel:', channelName);
-        } else if (status === 'CHANNEL_ERROR') {
-          console.error('🎮 ❌ Failed to subscribe to remote commands channel');
-        }
-      });
+      .subscribe(() => {});
   }
 
   /**
@@ -777,26 +1255,23 @@ class GlobalMusicService {
    */
   async handleRemoteCommand(commandData) {
     if (!commandData || !commandData.action) {
-      console.warn('🎮 Invalid remote command received');
       return;
     }
 
     try {
       switch (commandData.action) {
         case 'restart':
-          console.log('🔄 Remote restart command received');
           await this.handleRemoteRestart(commandData);
           break;
         case 'resubscribe':
-          console.log('🔄 Remote resubscribe command received');
           this.subscribeToAnnouncements();
           this.subscribeToRemoteCommands();
           break;
         default:
-          console.warn('🎮 Unknown remote command:', commandData.action);
+          break;
       }
     } catch (error) {
-      console.error('🎮 Error handling remote command:', error);
+      // Ignore remote command errors
     }
   }
 
@@ -806,11 +1281,9 @@ class GlobalMusicService {
   async handleRemoteRestart(commandData) {
     // If Electron app, use Electron API to restart
     if (window.electronAPI && window.electronAPI.restartApp) {
-      console.log('🔄 Restarting Electron app via remote command...');
       try {
         await window.electronAPI.restartApp();
       } catch (error) {
-        console.error('🔄 Error restarting Electron app:', error);
         // Fallback to page reload
         setTimeout(() => {
           window.location.reload();
@@ -818,7 +1291,6 @@ class GlobalMusicService {
       }
     } else {
       // Web app - just reload the page
-      console.log('🔄 Reloading page via remote command...');
       setTimeout(() => {
         window.location.reload();
       }, 1000);
@@ -848,11 +1320,9 @@ class GlobalMusicService {
     });
 
     if (error) {
-      console.error('🎮 Error sending remote command:', error);
       throw error;
     }
 
-    console.log('🎮 Remote command sent to channel:', channelName, commandData);
     return true;
   }
 
@@ -867,7 +1337,8 @@ class GlobalMusicService {
   }
 
   async loadTracks() {
-    if (!this.businessId) {
+    if (!this.hasValidBusinessId()) {
+      console.warn('🎵 Skipping track load without a valid businessId');
       return;
     }
     
@@ -877,6 +1348,9 @@ class GlobalMusicService {
       return;
     }
     
+    const previousTracks = Array.isArray(this.tracks) ? this.tracks : [];
+    const previousPlaylist = Array.isArray(this.playlist) ? this.playlist : [];
+
     // Load all tracks without pagination limit
     let allTracks = [];
     let page = 0;
@@ -895,18 +1369,26 @@ class GlobalMusicService {
         .order('title', { ascending: true })
         .range(page * pageSize, (page + 1) * pageSize - 1);
       
-      // Add a small random delay to prevent caching issues
       const { data, error } = await query;
 
       if (error) {
-        console.error('❌ [GlobalMusicService] Error loading tracks:', error);
-        console.error('❌ [GlobalMusicService] Business ID:', this.businessId);
-        console.error('❌ [GlobalMusicService] Query details:', {
-          table: 'music_tracks',
-          business_id: this.businessId,
-          page,
-          pageSize
+        console.error('🎵 loadTracks query failed:', {
+          message: error.message,
+          code: error.code,
+          businessId: this.businessId,
+          hint: 'Music kiosk needs a valid Supabase login on this device (RLS).',
         });
+        // Do not replace a known-good in-memory list with an empty list because
+        // of a transient network/auth/RLS failure.
+        if (previousTracks.length > 0) {
+          return;
+        }
+
+        const recovered = this.restoreTracksFromCache();
+        if (recovered) {
+          return;
+        }
+
         return;
       }
 
@@ -919,6 +1401,22 @@ class GlobalMusicService {
       }
     }
     
+    if (allTracks.length === 0) {
+      console.warn('🎵 loadTracks returned 0 rows for business:', this.businessId, {
+        hint: 'Often caused by loading before JWT refresh completes, or RLS denying this user.',
+      });
+      if (previousTracks.length > 0 || previousPlaylist.length > 0) {
+        // Empty responses can happen during session restore or brief Supabase/RLS
+        // failures. Keep the music playing with the last known good state.
+        return;
+      }
+
+      const recovered = this.restoreTracksFromCache();
+      if (recovered) {
+        return;
+      }
+    }
+
     // Filter to shuffle tracks (like MusicLibrary does in JavaScript)
     const shuffleTracks = allTracks.filter(t => t.include_in_shuffle);
     const nonShuffleTracks = allTracks.filter(t => !t.include_in_shuffle);
@@ -926,33 +1424,6 @@ class GlobalMusicService {
     // Use shuffle tracks if available, otherwise fall back to ALL tracks
     // This ensures shuffle mode works, but if no shuffle tracks exist, we still show all tracks
     this.tracks = shuffleTracks.length > 0 ? shuffleTracks : allTracks;
-    
-    // Log track loading results
-    console.log('🎵 [GlobalMusicService] Track loading complete:', {
-      businessId: this.businessId,
-      totalInDb: allTracks.length,
-      shuffleTracks: shuffleTracks.length,
-      nonShuffleTracks: nonShuffleTracks.length,
-      loadedTracks: this.tracks.length
-    });
-    
-    // Log track filtering for debugging
-    if (allTracks.length > 0 && this.tracks.length === 0) {
-      console.warn('⚠️ All tracks filtered out!', {
-        totalTracks: allTracks.length,
-        shuffleTracks: shuffleTracks.length,
-        nonShuffleTracks: nonShuffleTracks.length,
-        sampleTrack: allTracks[0] ? {
-          id: allTracks[0].id,
-          title: allTracks[0].title,
-          include_in_shuffle: allTracks[0].include_in_shuffle
-        } : null
-      });
-    }
-    
-    if (allTracks.length === 0) {
-      console.warn('⚠️ [GlobalMusicService] No tracks found in database for business:', this.businessId);
-    }
 
     // Use filtered tracks for playlist
     this.playlist = this.tracks;
@@ -970,10 +1441,44 @@ class GlobalMusicService {
     this.notifyListeners();
   }
 
+  restoreTracksFromCache() {
+    try {
+      const cached = localStorage.getItem(`tavari_music_cache_${this.businessId}`);
+      if (!cached) return false;
+
+      const cacheData = JSON.parse(cached);
+      const cachedTracks = cacheData?.currentPlaylist?.tracks || [];
+      if (!Array.isArray(cachedTracks) || cachedTracks.length === 0) {
+        return false;
+      }
+
+      this.tracks = cachedTracks;
+      this.playlist = cachedTracks;
+      this.currentIndex = Math.min(
+        cacheData?.currentPlaylist?.currentIndex || 0,
+        Math.max(cachedTracks.length - 1, 0)
+      );
+      this.isShuffleAllMode = true;
+      this.shuffleMode = true;
+      this.currentPlaylistId = cacheData?.currentPlaylist?.id || null;
+      this.playlistInfo = cacheData?.currentPlaylist?.info || null;
+      this.offlineCache = cacheData;
+      this.notifyListeners();
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   /**
    * Load schedules with retry logic and offline fallback
    */
   async loadSchedules() {
+    if (!this.hasValidBusinessId()) {
+      console.warn('🎵 Skipping schedule load without a valid businessId');
+      return;
+    }
+
     // If offline, use cache
     if (!this.isOnline) {
       await this.loadCachedSchedules();
@@ -1008,7 +1513,7 @@ class GlobalMusicService {
   /**
    * BULLETPROOF schedule monitoring with:
    * - Real-time subscriptions (instant updates)
-   * - Aggressive polling (30 seconds - backup when realtime fails)
+   * - Fallback polling (2 minutes - backup when realtime fails)
    * - Frequent activation checks (10 seconds)
    * - Offline cache support
    * 
@@ -1017,6 +1522,19 @@ class GlobalMusicService {
    * schedule activation and cause music to not play at scheduled times.
    */
   async startScheduleMonitoring() {
+    if (!this.hasValidBusinessId()) {
+      console.warn('🎵 Schedule monitoring blocked: missing valid businessId');
+      if (this.scheduleInterval) {
+        clearInterval(this.scheduleInterval);
+        this.scheduleInterval = null;
+      }
+      if (this.scheduleReloadInterval) {
+        clearInterval(this.scheduleReloadInterval);
+        this.scheduleReloadInterval = null;
+      }
+      return;
+    }
+
     if (this.scheduleInterval) {
       clearInterval(this.scheduleInterval);
     }
@@ -1024,8 +1542,7 @@ class GlobalMusicService {
       clearInterval(this.scheduleReloadInterval);
     }
 
-    // AGGRESSIVE POLLING: Reload schedules every 30 seconds (not 5 minutes!)
-    // This ensures we catch changes even if realtime fails
+    // Fallback polling catches changes if realtime fails without hitting Supabase every 30 seconds.
     this.scheduleReloadInterval = setInterval(async () => {
       try {
         if (this.isOnline) {
@@ -1042,7 +1559,7 @@ class GlobalMusicService {
         await this.loadCachedSchedules();
         this.checkSchedules();
       }
-    }, 30 * 1000); // 30 seconds - MUCH more aggressive
+    }, 2 * 60 * 1000);
 
     // Check schedules for activation every 10 seconds (unchanged)
     this.scheduleInterval = setInterval(() => {
@@ -1068,7 +1585,7 @@ class GlobalMusicService {
     // Reload tracks every 5 minutes to catch new uploads
     this.trackReloadInterval = setInterval(async () => {
       try {
-        if (this.isOnline && this.businessId) {
+      if (this.isOnline && this.hasValidBusinessId()) {
           const previousTrackCount = this.tracks?.length || 0;
           await this.loadTracks();
           const newTrackCount = this.tracks?.length || 0;
@@ -1146,6 +1663,10 @@ class GlobalMusicService {
   setupNetworkMonitoring() {
     // Listen for online/offline events
     window.addEventListener('online', () => {
+      if (!this.hasValidBusinessId()) {
+        return;
+      }
+
       this.isOnline = true;
       this.syncRetryCount = 0;
       this.loadSchedules().then(async () => {
@@ -1155,6 +1676,10 @@ class GlobalMusicService {
     });
     
     window.addEventListener('offline', () => {
+      if (!this.hasValidBusinessId()) {
+        return;
+      }
+
       this.isOnline = false;
       this.loadCachedSchedules();
     });
@@ -1164,7 +1689,7 @@ class GlobalMusicService {
       const wasOnline = this.isOnline;
       this.isOnline = navigator.onLine;
       
-      if (!wasOnline && this.isOnline) {
+      if (!wasOnline && this.isOnline && this.hasValidBusinessId()) {
         // Just came back online - sync immediately
         this.loadSchedules().then(async () => {
           await this.cacheCurrentState();
@@ -1178,7 +1703,28 @@ class GlobalMusicService {
    * Cache current state for offline use
    */
   async cacheCurrentState() {
+    if (!this.hasValidBusinessId()) {
+      return;
+    }
+
     try {
+      const existingCached = localStorage.getItem(`tavari_music_cache_${this.businessId}`);
+      let existingCacheData = null;
+      if (existingCached) {
+        try {
+          existingCacheData = JSON.parse(existingCached);
+        } catch (error) {
+          existingCacheData = null;
+        }
+      }
+
+      const currentTracks = Array.isArray(this.playlist) ? this.playlist : [];
+      const existingTracks = existingCacheData?.currentPlaylist?.tracks || [];
+      if (currentTracks.length === 0 && Array.isArray(existingTracks) && existingTracks.length > 0) {
+        // Never overwrite a working offline cache with an empty transient state.
+        return;
+      }
+
       const cacheData = {
         schedules: this.schedules,
         currentPlaylist: {
@@ -1203,12 +1749,25 @@ class GlobalMusicService {
    * Load schedules from cache when offline
    */
   async loadCachedSchedules() {
+    if (!this.hasValidBusinessId()) {
+      return false;
+    }
+
     try {
       const cached = localStorage.getItem(`tavari_music_cache_${this.businessId}`);
       if (cached) {
         const cacheData = JSON.parse(cached);
         this.schedules = cacheData.schedules || [];
         this.activeSchedule = cacheData.activeSchedule;
+        const cachedTracks = cacheData?.currentPlaylist?.tracks || [];
+        if ((!this.playlist || this.playlist.length === 0) && cachedTracks.length > 0) {
+          this.tracks = cachedTracks;
+          this.playlist = cachedTracks;
+          this.currentIndex = Math.min(
+            cacheData?.currentPlaylist?.currentIndex || 0,
+            Math.max(cachedTracks.length - 1, 0)
+          );
+        }
         return true;
       }
     } catch (error) {
@@ -1284,7 +1843,6 @@ class GlobalMusicService {
         try {
           return this.isScheduleActive(schedule, currentTime, currentDate, currentDay);
         } catch (error) {
-          console.error(`📅 Error checking schedule ${schedule.id}:`, error);
           return false;
         }
       });
@@ -1341,24 +1899,12 @@ class GlobalMusicService {
         playlistMismatch;
 
       if (shouldActivate) {
-        console.log(`📅 ✅ ACTIVATING schedule: ${bestSchedule.playlist?.name || bestSchedule.playlist_id} (Priority: ${bestSchedule.priority || 1})`);
-        console.log(`📅 Schedule details:`, {
-          id: bestSchedule.id,
-          playlist_id: bestSchedule.playlist_id,
-          start_time: bestSchedule.start_time,
-          end_time: bestSchedule.end_time,
-          schedule_date: bestSchedule.schedule_date,
-          repeat_type: bestSchedule.repeat_type,
-          day_of_week: bestSchedule.day_of_week
-        });
         this.activeSchedule = bestSchedule;
         this.lastScheduleActivationDate = currentDate; // Track when it was activated
         try {
           await this.switchToScheduledPlaylist(bestSchedule.playlist_id, bestSchedule);
-          console.log(`📅 ✅ Successfully switched to scheduled playlist: ${bestSchedule.playlist?.name || bestSchedule.playlist_id}`);
           await this.cacheCurrentState();
         } catch (error) {
-          console.error(`📅 ❌ ERROR switching to scheduled playlist:`, error);
           // Don't throw - allow retry on next check
         }
       } else {
@@ -1372,19 +1918,25 @@ class GlobalMusicService {
           const hasCurrentTrack = this.currentTrack !== null;
           
           // Only reload if we have no tracks or no current track
-          if (!hasTracks || !hasCurrentTrack) {
+          // Add a debounce to prevent rapid reloads (max once per 10 seconds)
+          const lastReloadKey = `last_reload_${this.activeSchedule.playlist_id}`;
+          const lastReloadTime = this[lastReloadKey] || 0;
+          const timeSinceLastReload = Date.now() - lastReloadTime;
+          
+          if ((!hasTracks || !hasCurrentTrack) && timeSinceLastReload > 10000) {
             try {
+              this[lastReloadKey] = Date.now(); // Update reload timestamp
               await this.switchToScheduledPlaylist(this.activeSchedule.playlist_id, this.activeSchedule);
               await this.cacheCurrentState();
             } catch (error) {
-              console.error(`📅 ❌ ERROR reloading playlist:`, error);
+              // Ignore reload errors
             }
           } else if (!isActuallyPlaying && (this.userInteracted || this.isKioskMode)) {
             // Just ensure playback - don't reload the playlist
             try {
               await this.ensurePlayback();
             } catch (error) {
-              console.error(`📅 ❌ ERROR starting playback:`, error);
+              // Ignore playback errors
             }
           }
         } else if (this.activeSchedule && 
@@ -1396,21 +1948,17 @@ class GlobalMusicService {
           const timeSinceLastSwitch = Date.now() - lastSwitchTime;
           
           if (timeSinceLastSwitch > 5000) { // Only switch if it's been at least 5 seconds since last switch
-            console.log(`📅 ⚠️ Schedule marked active but playlist mismatch! Current: ${this.currentPlaylistId}, Expected: ${this.activeSchedule.playlist_id}`);
-            console.log(`📅 🔄 Forcing playlist switch to match active schedule...`);
             try {
               this.lastPlaylistSwitchTime = Date.now();
               await this.switchToScheduledPlaylist(this.activeSchedule.playlist_id, this.activeSchedule);
-              console.log(`📅 ✅ Successfully corrected playlist to match active schedule`);
               await this.cacheCurrentState();
             } catch (error) {
-              console.error(`📅 ❌ ERROR correcting playlist:`, error);
+              // Ignore correction errors
             }
           }
         }
       }
     } catch (error) {
-      console.error(`📅 ❌ CRITICAL ERROR in checkSchedules:`, error);
       // Don't throw - allow retry on next interval
     }
   }
@@ -1524,7 +2072,6 @@ class GlobalMusicService {
       // If no date or day constraints, schedule is always active (time already matched)
       return true;
     } catch (error) {
-      console.error(`📅 Error in isScheduleActive for schedule ${schedule.id}:`, error);
       return false; // Fail safe: don't activate if there's an error
     }
   }
@@ -1542,7 +2089,6 @@ class GlobalMusicService {
    * schedule activation and cause music to not play at scheduled times.
    */
   async switchToScheduledPlaylist(playlistId, schedule = null) {
-    console.log(`🔄 [switchToScheduledPlaylist] Starting switch to playlist: ${playlistId}`, { schedule });
     try {
       const { data: playlist, error: playlistError } = await supabase
         .from('music_playlists')
@@ -1551,28 +2097,70 @@ class GlobalMusicService {
         .single();
 
       if (playlistError) {
-        console.error(`❌ [switchToScheduledPlaylist] Error loading playlist:`, playlistError);
         throw playlistError;
       }
-      
-      console.log(`✅ [switchToScheduledPlaylist] Loaded playlist: ${playlist.name} (type: ${playlist.playlist_type})`);
 
       let tracks = [];
       
-      // For both shuffle and ordered playlists, load tracks from the playlist_tracks junction table
-      // The playlist_type only determines playback order, not which tracks to include
-      const { data: playlistTracksData, error: playlistTracksError } = await supabase
-        .from('music_playlist_tracks')
-        .select('music_tracks(*)')
-        .eq('playlist_id', playlistId)
-        .order('sort_order');
+      // For shuffle playlists, load tracks dynamically from music_tracks based on include_in_shuffle
+      // For ordered playlists, load from playlist_tracks junction table
+      if (playlist.playlist_type === 'shuffle') {
+        const { data: shuffleTracks, error: shuffleError } = await supabase
+          .from('music_tracks')
+          .select('*')
+          .eq('business_id', this.businessId)
+          .eq('include_in_shuffle', true);
+        
+        if (shuffleError) {
+          throw shuffleError;
+        }
+        
+        tracks = shuffleTracks || [];
+      } else {
+        // For ordered playlists, load from playlist_tracks junction table
+        const { data: playlistTracksData, error: playlistTracksError } = await supabase
+          .from('music_playlist_tracks')
+          .select('music_tracks(*), track_id, sort_order')
+          .eq('playlist_id', playlistId)
+          .order('sort_order');
 
-      if (playlistTracksError) {
-        console.error(`❌ [switchToScheduledPlaylist] Error loading playlist tracks:`, playlistTracksError);
-        throw playlistTracksError;
+        if (playlistTracksError) {
+          // Try alternative query without nested select
+          const { data: trackIds, error: idsError } = await supabase
+            .from('music_playlist_tracks')
+            .select('track_id, sort_order')
+            .eq('playlist_id', playlistId)
+            .order('sort_order');
+          
+          if (!idsError && trackIds && trackIds.length > 0) {
+            const trackIdList = trackIds.map(pt => pt.track_id).filter(Boolean);
+            const { data: tracksData, error: tracksError } = await supabase
+              .from('music_tracks')
+              .select('*')
+              .in('id', trackIdList)
+              .eq('business_id', this.businessId);
+            
+            if (!tracksError && tracksData) {
+              // Sort by original order
+              const trackMap = {};
+              tracksData.forEach(t => trackMap[t.id] = t);
+              tracks = trackIds.map(pt => trackMap[pt.track_id]).filter(t => t !== null);
+            } else {
+              throw playlistTracksError; // Throw original error
+            }
+          } else {
+            throw playlistTracksError;
+          }
+        } else {
+          tracks = playlistTracksData?.map(pt => pt.music_tracks).filter(t => t !== null && t !== undefined) || [];
+        }
       }
-      
-      tracks = playlistTracksData?.map(pt => pt.music_tracks).filter(t => t !== null) || [];
+
+      if (tracks.length === 0 && this.playlist?.length > 0) {
+        // A scheduled playlist query can briefly return empty during auth/RLS/network
+        // recovery. Do not wipe an active playlist because of that transient state.
+        return;
+      }
       
       // If playlist type is shuffle, randomize the order
       if (playlist.playlist_type === 'shuffle') {
@@ -1592,11 +2180,8 @@ class GlobalMusicService {
         this.stopWhenComplete = false;
       }
 
-      console.log(`📦 [switchToScheduledPlaylist] Loaded ${tracks.length} tracks for playlist: ${playlist.name}`);
-
       if (tracks.length > 0) {
         await this.loadTrack(tracks[0]);
-        console.log(`🎵 [switchToScheduledPlaylist] Loaded first track: ${tracks[0].title}`);
         
         // For scheduled playlists, always try to play (enable kiosk mode if needed)
         if (!this.isKioskMode && !this.userInteracted) {
@@ -1605,17 +2190,12 @@ class GlobalMusicService {
         
         if (this.userInteracted || this.isKioskMode) {
           await this.play();
-          console.log(`▶️ [switchToScheduledPlaylist] Started playback`);
           
           // Ensure playback continues (handles autoplay blocking)
           setTimeout(() => {
             this.ensurePlayback();
           }, 500);
-        } else {
-          console.log(`⏸️ [switchToScheduledPlaylist] Waiting for user interaction before playing`);
         }
-      } else {
-        console.warn(`⚠️ [switchToScheduledPlaylist] Playlist ${playlist.name} has no tracks!`);
       }
 	  
       this.currentPlaylistId = playlistId;
@@ -1628,7 +2208,6 @@ class GlobalMusicService {
       this.shuffleMode = playlist.playlist_type === 'shuffle';
       this.lastPlaylistSwitchTime = Date.now(); // Track when we switched to prevent rapid re-switching
 
-      console.log(`✅ [switchToScheduledPlaylist] Playlist switch complete: ${playlist.name} (${tracks.length} tracks)`);
       this.notifyListeners();
     } catch (error) {
       // Silent error handling
@@ -1736,6 +2315,10 @@ class GlobalMusicService {
   }
 
   async play() {
+    if (this.isPlayingAnnouncement || this._announcementsInProgress) {
+      this._forceStopMusic();
+      return;
+    }
     if (!this.readyToPlay || !this.currentTrack) {
       await this.loadFirstTrack();
     }
@@ -1744,6 +2327,7 @@ class GlobalMusicService {
       return;
     }
 
+    this._pauseOtherMusicElements();
     try {
       await this.audio.play();
       this.isPlaying = true;
@@ -1752,6 +2336,20 @@ class GlobalMusicService {
       this.isPlaying = false;
       this.notifyListeners();
     }
+  }
+
+  /**
+   * Pause any audio element that could be playing music (same id) so only one plays.
+   */
+  _pauseOtherMusicElements() {
+    const ourId = this.audio?.id;
+    if (!ourId) return;
+    document.querySelectorAll('audio').forEach((el) => {
+      if (el !== this.audio && (el.id === ourId || el.id === 'global-audio-element')) {
+        el.pause();
+        el.currentTime = 0;
+      }
+    });
   }
 
   pause() {
@@ -1801,7 +2399,7 @@ class GlobalMusicService {
     
     this.currentIndex = (this.currentIndex + 1) % this.playlist.length;
     await this.loadTrack(this.playlist[this.currentIndex]);
-    
+    if (this.audio) this.audio.volume = this.volume;
     if (this.isPlaying) {
       this.play();
     }
@@ -1830,7 +2428,9 @@ class GlobalMusicService {
 
   setVolume(volume) {
     this.volume = Math.max(0, Math.min(1, volume));
-    this.audio.volume = this.volume;
+    if (!this.isPlayingAnnouncement && !this._announcementsInProgress) {
+      this.audio.volume = this.volume;
+    }
     this.notifyListeners();
   }
 
@@ -1926,11 +2526,16 @@ class GlobalMusicService {
       this.remoteCommandSubscription = null;
     }
     
-    // Clean up announcement audio
+    this._adPlayScheduled = false;
     if (this.announcementAudio) {
       this.announcementAudio.pause();
       this.announcementAudio.src = '';
       this.announcementAudio = null;
+    }
+    if (this._announcementDirect) {
+      this._announcementDirect.pause();
+      this._announcementDirect.removeAttribute('src');
+      this._announcementDirect = null;
     }
     
     // Clear network monitoring
@@ -1947,6 +2552,7 @@ class GlobalMusicService {
     
     // Stop keepalive
     this.stopKeepalive();
+    this._stopAdBlockMusicGuard();
     
     // Log current song end if playing
     if (this.currentPlayLogId && this.currentTrack) {
@@ -2023,9 +2629,12 @@ class GlobalMusicService {
    * Useful for forcing an immediate refresh when new music is uploaded
    */
   async reloadTracks() {
-    if (!this.businessId) {
+    if (!this.hasValidBusinessId()) {
       // Try to get businessId from localStorage as fallback
-      const storedBusinessId = localStorage.getItem('selectedBusinessId') || localStorage.getItem('currentBusinessId');
+      const storedBusinessId =
+        this.normalizeBusinessId(localStorage.getItem('tavariPinnedBusinessId')) ||
+        this.normalizeBusinessId(localStorage.getItem('selectedBusinessId')) ||
+        this.normalizeBusinessId(localStorage.getItem('currentBusinessId'));
       if (storedBusinessId) {
         this.businessId = storedBusinessId;
       } else {

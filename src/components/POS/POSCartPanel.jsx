@@ -1,9 +1,17 @@
 // components/POS/POSCartPanel.jsx - Complete refactored version with Save & Exit functionality
 import React, { useState, useEffect } from 'react';
 import { TavariStyles } from '../../utils/TavariStyles';
-import { ShoppingCart, Plus, Minus, Trash2, User, Search, History, X } from 'lucide-react';
+import { ShoppingCart, Plus, Minus, Trash2, User, Search, History, X, Pencil, BadgeCheck } from 'lucide-react';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { supabase } from '../../supabaseClient';
+import TavariCheckbox from '../UI/TavariCheckbox';
+import {
+  getSpendableDollarsInDollarsMode,
+  getSpendableDollarsInPointsMode,
+  isPointsLoyaltyMode
+} from '../../utils/posLoyaltyMoney';
+import { calculateTotalLoyaltyPointsToEarn } from '../../utils/loyaltyRewards';
+import { getPosLineSubtotal } from '../../utils/posLinePricing';
 
 const POSCartPanel = ({
   cartItems = [],
@@ -15,6 +23,7 @@ const POSCartPanel = ({
   tabMode = false,
   activeTab = null,
   loyaltyCustomer = null,
+  loyaltyCandidates = [],
   businessSettings = {},
   currentEmployee = null,
   businessId,
@@ -31,10 +40,36 @@ const POSCartPanel = ({
   // Customer management props
   onCustomerAttach = null,
   onCustomerDetach = null,
+  onLoyaltyCustomerSwitch = null,
   
   // Save and Exit Tab functionality
-  onSaveAndExit = null
+  onSaveAndExit = null,
+  
+  // Custom item (e.g. birthday party balance)
+  onAddCustomItem = null,
+  onUpdateCustomItem = null,
+
+  // Indian Status (GST-only) — whole order; cleared when cart is cleared
+  indianStatusGstOnly = false,
+  indianStatusCertificateNumber = '',
+  indianStatusGstRate = 0.05,
+  indianStatusTaxLabel = 'GST (Indian Status)',
+  onIndianStatusApply = null,
+  onIndianStatusClear = null
 }) => {
+	
+  // Custom item modals
+  const [showCustomItemModal, setShowCustomItemModal] = useState(false);
+  const [customItemName, setCustomItemName] = useState('');
+  const [customItemPrice, setCustomItemPrice] = useState('');
+  const [customItemTaxIncluded, setCustomItemTaxIncluded] = useState(true);
+  const [editingCustomItem, setEditingCustomItem] = useState(null);
+  const [editCustomName, setEditCustomName] = useState('');
+  const [editCustomPrice, setEditCustomPrice] = useState('');
+  const [editCustomTaxIncluded, setEditCustomTaxIncluded] = useState(true);
+
+  const [showIndianStatusModal, setShowIndianStatusModal] = useState(false);
+  const [indianCertDraft, setIndianCertDraft] = useState('');
 	
   // LOYALTY STATE
   const [loyaltySettings, setLoyaltySettings] = useState(null);
@@ -59,10 +94,13 @@ const POSCartPanel = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [showLoyaltySwitchModal, setShowLoyaltySwitchModal] = useState(false);
+  const [loyaltySwitchBusy, setLoyaltySwitchBusy] = useState(false);
 
   // Tax calculation hook
   const {
     calculateTotalTax,
+    getCombinedTaxRate,
     applyCashRounding,
     formatTaxAmount
   } = useTaxCalculations(businessId);
@@ -161,21 +199,22 @@ const POSCartPanel = ({
       setUsedToday(usedTodayDollars);
       
       // Calculate daily limit in dollars
+      const rate = Number(loyaltySettings.redemption_rate) || 10000;
       const dailyLimitPoints = loyaltySettings.max_redemption_per_day || 5000;
-      const dailyLimitDollars = (dailyLimitPoints / loyaltySettings.redemption_rate) * 10;
+      const dailyLimitDollars = (dailyLimitPoints / rate) * 10;
       const remainingDailyLimitDollars = Math.max(0, dailyLimitDollars - usedTodayDollars);
       
       setDailyUsageRemaining(remainingDailyLimitDollars);
       
       // Calculate cart subtotal
       const subtotal = cartItems.reduce((sum, item) => {
-        const price = parseFloat(item.price) || 0;
-        const quantity = parseInt(item.quantity) || 1;
-        return sum + (price * quantity);
+        return sum + getPosLineSubtotal(item);
       }, 0);
 
-      // Customer balance in dollars
-      const customerBalanceDollars = loyaltyCustomer.balance || 0;
+      // Spendable dollars: store credit + points (or legacy pool) — not raw `balance` alone in points mode
+      const customerBalanceDollars = isPointsLoyaltyMode(loyaltySettings)
+        ? getSpendableDollarsInPointsMode(loyaltyCustomer, loyaltySettings)
+        : getSpendableDollarsInDollarsMode(loyaltyCustomer);
       
       // Available credit calculation
       const maxUsableDollars = Math.min(customerBalanceDollars, remainingDailyLimitDollars, subtotal);
@@ -202,7 +241,12 @@ const POSCartPanel = ({
       const earnRatePercent = loyaltySettings.earn_rate_percentage / 100;
       const taxableAmountForEarning = subtotal - autoApplyAmount;
       const dollarsToEarn = taxableAmountForEarning * earnRatePercent;
-      const pointsToEarn = Math.round(dollarsToEarn * loyaltySettings.redemption_rate / 10);
+      const pointsToEarn = calculateTotalLoyaltyPointsToEarn({
+        subtotal: taxableAmountForEarning,
+        earnRatePercentage: loyaltySettings.earn_rate_percentage,
+        redemptionRate: rate,
+        cartItems,
+      });
       
       setLoyaltyPointsToEarn(pointsToEarn);
 
@@ -462,31 +506,76 @@ const POSCartPanel = ({
     }
   };
 
-  // Calculate subtotal
+  const indianModeActive =
+    !!indianStatusGstOnly && (indianStatusCertificateNumber || '').trim().length > 0;
+
+  const gstRateForIndian = Math.min(1, Math.max(0, Number(indianStatusGstRate) || 0));
+
+  // Calculate subtotal (for tax-included custom items, use pre-tax amount so subtotal + tax = total)
   const subtotal = cartItems.reduce((sum, item) => {
-    const price = parseFloat(item.price) || 0;
-    const quantity = parseInt(item.quantity) || 1;
-    return sum + (price * quantity);
+    const lineTotal = getPosLineSubtotal(item);
+    if (item.is_custom && item.tax_included !== false && getCombinedTaxRate) {
+      const rate = indianModeActive ? gstRateForIndian : getCombinedTaxRate(item);
+      if (rate > 0) return sum + lineTotal / (1 + rate);
+    }
+    return sum + lineTotal;
   }, 0);
+
+  const indianTaxOptions = indianModeActive
+    ? {
+        enabled: true,
+        gstRate: gstRateForIndian,
+        taxLabel: (indianStatusTaxLabel || 'GST (Indian Status)').trim() || 'GST (Indian Status)'
+      }
+    : null;
 
   // Calculate tax using the standardized utility
   const taxCalculation = cartItems.length > 0 ? 
-    calculateTotalTax(cartItems, 0, autoLoyaltyApplied, subtotal) :
+    calculateTotalTax(cartItems, 0, autoLoyaltyApplied, subtotal, indianTaxOptions) :
     { totalTax: 0, aggregatedTaxes: {}, aggregatedRebates: {} };
 
   const taxAmount = taxCalculation.totalTax;
   const finalSubtotal = subtotal - autoLoyaltyApplied;
   const total = finalSubtotal + taxAmount;
 
-  // Helper function to display balance in correct format
-  const getBalanceDisplay = (dollarAmount) => {
-    if (!loyaltySettings) return '$0.00';
-    
-    if (loyaltySettings.loyalty_mode === 'points') {
-      const points = Math.round(dollarAmount * loyaltySettings.redemption_rate / 10);
-      return `${points.toLocaleString()} pts`;
+  const formatLoyaltyAccountSummary = (c) => {
+    if (!c) return '—';
+    if (!loyaltySettings) {
+      const n = (Number(c.store_credit) || 0) + (Number(c.balance) || 0);
+      return `$${n.toFixed(2)}`;
     }
-    return `$${dollarAmount.toFixed(2)}`;
+    if (isPointsLoyaltyMode(loyaltySettings)) {
+      const pts = Math.round(Number(c.points) || 0);
+      const sc = Number(c.store_credit) || 0;
+      if (sc > 0) {
+        return `${pts.toLocaleString()} pts · $${sc.toFixed(2)} acct`;
+      }
+      return `${pts.toLocaleString()} pts`;
+    }
+    return `$${getSpendableDollarsInDollarsMode(c).toFixed(2)}`;
+  };
+
+  const switchableLoyaltyCandidates = (Array.isArray(loyaltyCandidates) ? loyaltyCandidates : [])
+    .filter((c) => c?.id);
+  const canSwitchLoyaltyCustomer =
+    !!loyaltyCustomer?.id &&
+    typeof onLoyaltyCustomerSwitch === 'function' &&
+    switchableLoyaltyCandidates.length > 1;
+
+  const handlePickLoyaltyCandidate = async (candidate) => {
+    const candidateId = String(candidate?.id || '').trim();
+    if (!candidateId || loyaltySwitchBusy || !onLoyaltyCustomerSwitch) return;
+    if (candidateId === String(loyaltyCustomer?.id || '').trim()) {
+      setShowLoyaltySwitchModal(false);
+      return;
+    }
+    setLoyaltySwitchBusy(true);
+    try {
+      const ok = await onLoyaltyCustomerSwitch(candidate);
+      if (ok) setShowLoyaltySwitchModal(false);
+    } finally {
+      setLoyaltySwitchBusy(false);
+    }
   };
 
   const styles = {
@@ -501,29 +590,47 @@ const POSCartPanel = ({
       overflow: 'hidden'
     },
     
-    // HEADER WITH SAVE & EXIT BUTTON
+    // HEADER: row 1 = cart + qty + GST badge; row 2 = action buttons
     header: {
       display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
+      flexDirection: 'column',
+      alignItems: 'stretch',
+      gap: TavariStyles.spacing.sm,
       padding: `${TavariStyles.spacing.md} ${TavariStyles.spacing.lg}`,
+      paddingBottom: TavariStyles.spacing.md,
       backgroundColor: TavariStyles.colors.primary,
       color: TavariStyles.colors.white,
       borderTopLeftRadius: TavariStyles.borderRadius.lg,
       borderTopRightRadius: TavariStyles.borderRadius.lg,
+      flexShrink: 0
+    },
+
+    headerTopRow: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      flexWrap: 'wrap',
+      gap: TavariStyles.spacing.sm,
+      minHeight: 28
+    },
+
+    headerTopRowClear: {
       flexShrink: 0,
-      height: '60px'
+      marginLeft: 'auto'
     },
     
     headerTitle: {
       display: 'flex',
       alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: TavariStyles.spacing.xs,
       fontSize: TavariStyles.typography.fontSize.lg,
-      fontWeight: TavariStyles.typography.fontWeight.bold
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      flex: '1 1 auto'
     },
     
     cartCount: {
-      marginLeft: TavariStyles.spacing.sm,
+      marginLeft: TavariStyles.spacing.xs,
       backgroundColor: TavariStyles.colors.white,
       color: TavariStyles.colors.primary,
       borderRadius: TavariStyles.borderRadius.full,
@@ -531,9 +638,20 @@ const POSCartPanel = ({
       fontSize: TavariStyles.typography.fontSize.sm,
       fontWeight: TavariStyles.typography.fontWeight.bold
     },
+
+    headerButtonRow: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: TavariStyles.spacing.sm,
+      paddingTop: TavariStyles.spacing.sm,
+      borderTop: '1px solid rgba(255,255,255,0.28)'
+    },
     
     buttonGroup: {
       display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
       gap: TavariStyles.spacing.sm
     },
     
@@ -578,7 +696,25 @@ const POSCartPanel = ({
     },
     
     customerDetails: {
-      flex: 1
+      flex: 1,
+      minWidth: 0
+    },
+
+    customerNameRow: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: TavariStyles.spacing.sm,
+      width: '100%'
+    },
+
+    customerLoyaltyRow: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: TavariStyles.spacing.sm,
+      width: '100%',
+      marginTop: '4px'
     },
     
     customerName: {
@@ -586,7 +722,9 @@ const POSCartPanel = ({
       fontWeight: TavariStyles.typography.fontWeight.bold,
       color: TavariStyles.colors.gray900,
       margin: 0,
-      lineHeight: '1.1'
+      lineHeight: '1.1',
+      minWidth: 0,
+      flex: 1
     },
     
     customerBalance: {
@@ -595,7 +733,8 @@ const POSCartPanel = ({
       color: TavariStyles.colors.success,
       margin: 0,
       lineHeight: '1.3',
-      marginTop: '4px'
+      minWidth: 0,
+      flex: 1
     },
     
     customerSubtext: {
@@ -614,7 +753,109 @@ const POSCartPanel = ({
       padding: '2px 6px',
       borderRadius: TavariStyles.borderRadius.sm,
       border: `1px solid ${loyaltyCustomer ? TavariStyles.colors.success : TavariStyles.colors.gray300}`,
-      alignSelf: 'flex-start'
+      alignSelf: 'flex-start',
+      flexShrink: 0,
+      textAlign: 'center',
+      minWidth: '72px'
+    },
+
+    switchLoyaltyButton: {
+      border: `1px solid ${TavariStyles.colors.primary || '#008080'}`,
+      background: TavariStyles.colors.white,
+      color: TavariStyles.colors.primary || '#008080',
+      borderRadius: TavariStyles.borderRadius.sm,
+      padding: '2px 8px',
+      fontSize: '32px',
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      cursor: sessionLocked ? 'not-allowed' : 'pointer',
+      flexShrink: 0,
+      minWidth: '72px',
+      textAlign: 'center',
+      opacity: sessionLocked ? 0.6 : 1
+    },
+
+    loyaltySwitchOverlay: {
+      position: 'fixed',
+      inset: 0,
+      backgroundColor: 'rgba(0,0,0,0.45)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 1200,
+      padding: TavariStyles.spacing.lg
+    },
+
+    loyaltySwitchModal: {
+      width: '100%',
+      maxWidth: 420,
+      maxHeight: '80vh',
+      overflow: 'auto',
+      backgroundColor: TavariStyles.colors.white,
+      borderRadius: TavariStyles.borderRadius.lg || 12,
+      boxShadow: TavariStyles.shadows?.lg || '0 10px 30px rgba(0,0,0,0.2)',
+      padding: TavariStyles.spacing.lg
+    },
+
+    loyaltySwitchHeader: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: TavariStyles.spacing.sm,
+      marginBottom: TavariStyles.spacing.sm
+    },
+
+    loyaltySwitchTitle: {
+      margin: 0,
+      fontSize: TavariStyles.typography.fontSize.lg,
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      color: TavariStyles.colors.gray900
+    },
+
+    loyaltySwitchClose: {
+      border: 'none',
+      background: 'transparent',
+      cursor: 'pointer',
+      padding: 4,
+      color: TavariStyles.colors.gray600
+    },
+
+    loyaltySwitchHint: {
+      margin: `0 0 ${TavariStyles.spacing.md}`,
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray600,
+      lineHeight: 1.4
+    },
+
+    loyaltySwitchList: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: TavariStyles.spacing.sm
+    },
+
+    loyaltySwitchOption: {
+      width: '100%',
+      textAlign: 'left',
+      border: `1px solid ${TavariStyles.colors.gray300}`,
+      background: TavariStyles.colors.white,
+      borderRadius: TavariStyles.borderRadius.md,
+      padding: TavariStyles.spacing.md,
+      cursor: loyaltySwitchBusy ? 'wait' : 'pointer'
+    },
+
+    loyaltySwitchOptionActive: {
+      borderColor: TavariStyles.colors.primary || '#008080',
+      background: TavariStyles.colors.successBg || '#ecfdf5'
+    },
+
+    loyaltySwitchOptionName: {
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      color: TavariStyles.colors.gray900,
+      marginBottom: 2
+    },
+
+    loyaltySwitchOptionMeta: {
+      fontSize: TavariStyles.typography.fontSize.sm,
+      color: TavariStyles.colors.gray600
     },
     
     // LOYALTY CARDS
@@ -807,7 +1048,7 @@ const POSCartPanel = ({
     },
     
     emptyCartIcon: {
-      fontSize: '32px',
+      fontSize: '10px',
       marginBottom: TavariStyles.spacing.sm
     },
     
@@ -861,7 +1102,7 @@ const POSCartPanel = ({
     },
     
     modifierPrice: {
-      fontSize: '10px',
+      fontSize: '12px',
       color: TavariStyles.colors.gray600,
       fontWeight: TavariStyles.typography.fontWeight.medium
     },
@@ -901,7 +1142,7 @@ const POSCartPanel = ({
       marginLeft: '4px',
       minWidth: '24px',
       height: '24px',
-      fontSize: '12px'
+      fontSize: '24px'
     },
     
     // CHECKOUT SECTION
@@ -1016,7 +1257,7 @@ const POSCartPanel = ({
     closeButton: {
       background: 'transparent',
       border: 'none',
-      fontSize: '24px',
+      fontSize: '19px',
       cursor: 'pointer',
       color: TavariStyles.colors.gray600,
       padding: TavariStyles.spacing.xs,
@@ -1028,37 +1269,180 @@ const POSCartPanel = ({
     }
   };
 
+  const showHeaderButtonRow =
+    (!tabMode && (!!onAddCustomItem || !!onIndianStatusApply)) ||
+    (tabMode && activeTab && cartItems.length > 0);
+
   return (
     <div style={styles.container}>
-      {/* HEADER WITH SAVE & EXIT BUTTON */}
+      {/* HEADER: row 1 cart/qty/GST + Clear; row 2 other actions */}
       <div style={styles.header}>
-        <div style={styles.headerTitle}>
-          <ShoppingCart size={18} />
-          <span>{tabMode && activeTab ? `Tab: ${activeTab.customer_name || 'Unnamed'}` : 'Cart'}</span>
-          <span style={styles.cartCount}>{cartItems.length}</span>
-        </div>
-        
-        {cartItems.length > 0 && (
-          <div style={styles.buttonGroup}>
-            {tabMode && activeTab && (
-              <button
-                onClick={handleSaveAndExit}
-                style={styles.saveExitButton}
-                title="Save items to tab and clear cart"
+        <div style={styles.headerTopRow}>
+          <div style={styles.headerTitle}>
+            <ShoppingCart size={18} aria-hidden />
+            <span>{tabMode && activeTab ? `Tab: ${activeTab.customer_name || 'Unnamed'}` : 'Cart'}</span>
+            <span style={styles.cartCount} title="Items in cart">
+              {cartItems.length}
+            </span>
+            {indianModeActive ? (
+              <span
+                title="Indian Status (GST only) is applied to this sale"
+                style={{
+                  marginLeft: TavariStyles.spacing.xs,
+                  padding: '3px 10px',
+                  borderRadius: TavariStyles.borderRadius.full,
+                  fontSize: '8px',
+                  fontWeight: TavariStyles.typography.fontWeight.bold,
+                  letterSpacing: '0.08em',
+                  backgroundColor: TavariStyles.colors.white,
+                  color: '#0f766e',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.15)'
+                }}
               >
-                Save & Exit
-              </button>
+                GST ONLY
+              </span>
+            ) : (
+              <span
+                title="Standard POS tax rules apply to this sale"
+                style={{
+                  marginLeft: TavariStyles.spacing.xs,
+                  padding: '3px 10px',
+                  borderRadius: TavariStyles.borderRadius.full,
+                  fontSize: '8px',
+                  fontWeight: TavariStyles.typography.fontWeight.semibold,
+                  letterSpacing: '0.06em',
+                  backgroundColor: 'rgba(255,255,255,0.22)',
+                  color: TavariStyles.colors.white,
+                  border: '1px solid rgba(255,255,255,0.35)'
+                }}
+              >
+                STANDARD TAX
+              </span>
             )}
-            <button
-              onClick={onClearCart}
-              style={styles.clearButton}
-              title="Clear cart"
-            >
-              Clear
-            </button>
+          </div>
+
+          {cartItems.length > 0 && onClearCart && (
+            <div style={styles.headerTopRowClear}>
+              <button
+                onClick={onClearCart}
+                disabled={sessionLocked}
+                style={{
+                  ...styles.clearButton,
+                  opacity: sessionLocked ? 0.5 : 1
+                }}
+                title="Clear cart"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+        </div>
+
+        {showHeaderButtonRow && (
+          <div style={styles.headerButtonRow}>
+            <div style={styles.buttonGroup}>
+              {!tabMode && onAddCustomItem && (
+                <button
+                  onClick={() => {
+                    setCustomItemName('');
+                    setCustomItemPrice('');
+                    setCustomItemTaxIncluded(true);
+                    setShowCustomItemModal(true);
+                  }}
+                  disabled={sessionLocked}
+                  style={{
+                    ...styles.clearButton,
+                    opacity: sessionLocked ? 0.5 : 1
+                  }}
+                  title="Add custom item (e.g. party balance)"
+                >
+                  Custom Item
+                </button>
+              )}
+              {!tabMode && onIndianStatusApply && (
+                <button
+                  onClick={() => {
+                    setIndianCertDraft((indianStatusCertificateNumber || '').trim());
+                    setShowIndianStatusModal(true);
+                  }}
+                  disabled={sessionLocked}
+                  style={{
+                    ...styles.clearButton,
+                    opacity: sessionLocked ? 0.5 : 1,
+                    ...(indianModeActive ? { backgroundColor: 'rgba(255,255,255,0.35)', fontWeight: 700 } : {})
+                  }}
+                  title="Indian Status — charge GST only (enter certificate number)"
+                >
+                  Indian Status (GST Only)
+                </button>
+              )}
+              {cartItems.length > 0 && tabMode && activeTab && (
+                <button
+                  onClick={handleSaveAndExit}
+                  style={styles.saveExitButton}
+                  title="Save items to tab and clear cart"
+                >
+                  Save & Exit
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
+
+      {indianModeActive && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: TavariStyles.spacing.md,
+            padding: `${TavariStyles.spacing.md} ${TavariStyles.spacing.lg}`,
+            background: 'linear-gradient(95deg, #0f766e 0%, #14b8a6 55%, #2dd4bf 100%)',
+            color: TavariStyles.colors.white,
+            borderBottom: `2px solid #0d9488`,
+            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.2)'
+          }}
+        >
+          <BadgeCheck size={26} strokeWidth={2.5} style={{ flexShrink: 0, marginTop: 2 }} aria-hidden />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                fontWeight: TavariStyles.typography.fontWeight.bold,
+                fontSize: TavariStyles.typography.fontSize.base
+              }}
+            >
+              Indian Status (GST only) — on this sale
+            </div>
+            <div
+              style={{
+                fontSize: TavariStyles.typography.fontSize.sm,
+                marginTop: TavariStyles.spacing.xs,
+                opacity: 0.96,
+                wordBreak: 'break-word'
+              }}
+            >
+              Status #:{' '}
+              <span style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 600 }}>
+                {(indianStatusCertificateNumber || '').trim()}
+              </span>
+            </div>
+            <div
+              style={{
+                fontSize: TavariStyles.typography.fontSize.xs,
+                marginTop: TavariStyles.spacing.sm,
+                opacity: 0.9,
+                lineHeight: 1.35
+              }}
+            >
+              Charging GST only at {(gstRateForIndian * 100).toFixed(2)}%. Tap &quot;Indian Status (GST Only)&quot;
+              above to change the number or remove.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CUSTOMER SECTION */}
       <div style={styles.customerSection}>
@@ -1067,26 +1451,42 @@ const POSCartPanel = ({
           <div style={styles.customerDetails}>
             {loyaltyCustomer ? (
               <>
-                <div style={styles.customerName}>
-                  {loyaltyCustomer.customer_name}
+                <div style={styles.customerNameRow}>
+                  <div style={styles.customerName}>
+                    {loyaltyCustomer.customer_name}
+                  </div>
+                  <div style={styles.statusBadge}>ATTACHED</div>
                 </div>
-                <div style={styles.customerBalance}>
-                  Balance: {getBalanceDisplay(loyaltyCustomer.balance || 0)}
+                <div style={styles.customerLoyaltyRow}>
+                  <div style={styles.customerBalance}>
+                    Loyalty: {formatLoyaltyAccountSummary(loyaltyCustomer)}
+                  </div>
+                  {canSwitchLoyaltyCustomer ? (
+                    <button
+                      type="button"
+                      style={styles.switchLoyaltyButton}
+                      disabled={sessionLocked || loyaltySwitchBusy}
+                      title="Choose which adult earns loyalty points on this sale"
+                      onClick={() => setShowLoyaltySwitchModal(true)}
+                    >
+                      Change
+                    </button>
+                  ) : null}
                 </div>
               </>
             ) : (
               <>
-                <div style={styles.customerName}>
-                  No Customer
+                <div style={styles.customerNameRow}>
+                  <div style={styles.customerName}>
+                    No Customer
+                  </div>
+                  <div style={styles.statusBadge}>NONE</div>
                 </div>
                 <div style={styles.customerSubtext}>
                   Scan QR code, Enter Name, Enter Phone Number, or Enter ID
                 </div>
               </>
             )}
-          </div>
-          <div style={styles.statusBadge}>
-            {loyaltyCustomer ? 'ATTACHED' : 'NONE'}
           </div>
         </div>
         
@@ -1244,7 +1644,7 @@ const POSCartPanel = ({
                   >
                     <div style={styles.resultName}>{customer.customer_name}</div>
                     <div style={styles.resultDetails}>
-                      {customer.customer_phone} • Balance: {getBalanceDisplay(customer.balance || 0)}
+                      {customer.customer_phone} • {formatLoyaltyAccountSummary(customer)}
                     </div>
                   </div>
                 ))}
@@ -1315,6 +1715,26 @@ const POSCartPanel = ({
                 </div>
                 
                 <div style={styles.quantityControls}>
+                  {item.is_custom && onUpdateCustomItem && (
+                    <button
+                      onClick={() => {
+                        setEditingCustomItem(item);
+                        setEditCustomName(item.name);
+                        setEditCustomPrice(String(item.price ?? ''));
+                        setEditCustomTaxIncluded(item.tax_included !== false);
+                      }}
+                      disabled={sessionLocked}
+                      style={{
+                        ...styles.quantityButton,
+                        opacity: sessionLocked ? 0.5 : 1,
+                        backgroundColor: TavariStyles.colors.primary,
+                        color: TavariStyles.colors.white
+                      }}
+                      title="Edit name and price"
+                    >
+                      <Pencil size={10} />
+                    </button>
+                  )}
                   <button
                     onClick={() => onUpdateQty(item.id, Math.max(1, item.quantity - 1))}
                     disabled={sessionLocked || item.quantity <= 1}
@@ -1356,6 +1776,181 @@ const POSCartPanel = ({
         )}
       </div>
 
+      {/* Add Custom Item Modal */}
+      {showCustomItemModal && onAddCustomItem && (
+        <div style={styles.modal} onClick={() => setShowCustomItemModal(false)}>
+          <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Add Custom Item</h3>
+              <button style={styles.closeButton} onClick={() => setShowCustomItemModal(false)}><X size={20} /></button>
+            </div>
+            <div style={styles.modalBody}>
+              <p style={{ fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray600, marginBottom: TavariStyles.spacing.sm }}>
+                For one-off amounts (e.g. birthday party balance). Name and price.
+              </p>
+              <label style={{ display: 'block', marginBottom: 4, fontWeight: 600, fontSize: TavariStyles.typography.fontSize.sm }}>Name</label>
+              <input
+                type="text"
+                value={customItemName}
+                onChange={(e) => setCustomItemName(e.target.value)}
+                placeholder="e.g. Birthday Party Balance"
+                style={styles.searchInput}
+                autoFocus
+              />
+              <label style={{ display: 'block', marginBottom: 4, marginTop: TavariStyles.spacing.sm, fontWeight: 600, fontSize: TavariStyles.typography.fontSize.sm }}>Price ($)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={customItemPrice}
+                onChange={(e) => setCustomItemPrice(e.target.value)}
+                placeholder="0.00"
+                style={styles.searchInput}
+              />
+              <div style={{ marginTop: TavariStyles.spacing.sm }}>
+                <TavariCheckbox
+                  id="custom-item-tax-included"
+                  checked={customItemTaxIncluded}
+                  onChange={(checked) => setCustomItemTaxIncluded(checked)}
+                  label="Tax included (price is total with tax)"
+                />
+              </div>
+              <div style={{ display: 'flex', gap: TavariStyles.spacing.sm, marginTop: TavariStyles.spacing.md }}>
+                <button style={{ ...styles.actionButton, ...styles.secondaryActionButton, flex: 1 }} onClick={() => setShowCustomItemModal(false)}>Cancel</button>
+                <button
+                  style={{ ...styles.actionButton, ...styles.primaryActionButton, flex: 1 }}
+                  onClick={() => {
+                    const name = customItemName.trim();
+                    const price = parseFloat(customItemPrice);
+                    if (!name) return;
+                    if (Number.isNaN(price) || price < 0) return;
+                    onAddCustomItem({ name, price, tax_included: customItemTaxIncluded });
+                    setShowCustomItemModal(false);
+                    setCustomItemName('');
+                    setCustomItemPrice('');
+                    setCustomItemTaxIncluded(true);
+                  }}
+                >
+                  Add to Cart
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Indian Status (GST only) — certificate required */}
+      {showIndianStatusModal && onIndianStatusApply && (
+        <div style={styles.modal} onClick={() => setShowIndianStatusModal(false)}>
+          <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Indian Status (GST Only)</h3>
+              <button style={styles.closeButton} onClick={() => setShowIndianStatusModal(false)}><X size={20} /></button>
+            </div>
+            <div style={styles.modalBody}>
+              <p style={{ fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray600, marginBottom: TavariStyles.spacing.sm }}>
+                Enter the certificate / registry number. Tax for this sale will use only the GST rate from POS Settings (Taxes).
+              </p>
+              <label style={{ display: 'block', marginBottom: 4, fontWeight: 600, fontSize: TavariStyles.typography.fontSize.sm }}>
+                Indian Status number
+              </label>
+              <input
+                type="text"
+                value={indianCertDraft}
+                onChange={(e) => setIndianCertDraft(e.target.value)}
+                placeholder="Required to apply"
+                style={styles.searchInput}
+                autoFocus
+              />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: TavariStyles.spacing.sm, marginTop: TavariStyles.spacing.md }}>
+                <button
+                  style={{ ...styles.actionButton, ...styles.primaryActionButton, width: '100%' }}
+                  onClick={() => {
+                    const cert = indianCertDraft.trim();
+                    if (!cert) return;
+                    onIndianStatusApply(cert);
+                    setShowIndianStatusModal(false);
+                  }}
+                >
+                  Apply to this sale
+                </button>
+                {indianStatusGstOnly && onIndianStatusClear && (
+                  <button
+                    style={{ ...styles.actionButton, ...styles.secondaryActionButton, width: '100%' }}
+                    onClick={() => {
+                      onIndianStatusClear();
+                      setIndianCertDraft('');
+                      setShowIndianStatusModal(false);
+                    }}
+                  >
+                    Remove Indian Status
+                  </button>
+                )}
+                <button
+                  style={{ ...styles.actionButton, ...styles.secondaryActionButton, width: '100%' }}
+                  onClick={() => setShowIndianStatusModal(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Custom Item Modal */}
+      {editingCustomItem && onUpdateCustomItem && (
+        <div style={styles.modal} onClick={() => setEditingCustomItem(null)}>
+          <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Edit Custom Item</h3>
+              <button style={styles.closeButton} onClick={() => setEditingCustomItem(null)}><X size={20} /></button>
+            </div>
+            <div style={styles.modalBody}>
+              <label style={{ display: 'block', marginBottom: 4, fontWeight: 600, fontSize: TavariStyles.typography.fontSize.sm }}>Name</label>
+              <input
+                type="text"
+                value={editCustomName}
+                onChange={(e) => setEditCustomName(e.target.value)}
+                style={styles.searchInput}
+              />
+              <label style={{ display: 'block', marginBottom: 4, marginTop: TavariStyles.spacing.sm, fontWeight: 600, fontSize: TavariStyles.typography.fontSize.sm }}>Price ($)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={editCustomPrice}
+                onChange={(e) => setEditCustomPrice(e.target.value)}
+                style={styles.searchInput}
+              />
+              <div style={{ marginTop: TavariStyles.spacing.sm }}>
+                <TavariCheckbox
+                  id="edit-custom-item-tax-included"
+                  checked={editCustomTaxIncluded}
+                  onChange={(checked) => setEditCustomTaxIncluded(checked)}
+                  label="Tax included (price is total with tax)"
+                />
+              </div>
+              <div style={{ display: 'flex', gap: TavariStyles.spacing.sm, marginTop: TavariStyles.spacing.md }}>
+                <button style={{ ...styles.actionButton, ...styles.secondaryActionButton, flex: 1 }} onClick={() => setEditingCustomItem(null)}>Cancel</button>
+                <button
+                  style={{ ...styles.actionButton, ...styles.primaryActionButton, flex: 1 }}
+                  onClick={() => {
+                    const name = editCustomName.trim();
+                    const price = parseFloat(editCustomPrice);
+                    if (!name || Number.isNaN(price) || price < 0) return;
+                    onUpdateCustomItem(editingCustomItem.id, { name, price, tax_included: editCustomTaxIncluded });
+                    setEditingCustomItem(null);
+                  }}
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* CHECKOUT SECTION */}
       {cartItems.length > 0 && (
         <div style={styles.checkoutSection}>
@@ -1363,6 +1958,15 @@ const POSCartPanel = ({
             <span style={styles.summaryLabel}>Subtotal:</span>
             <span style={styles.summaryValue}>${subtotal.toFixed(2)}</span>
           </div>
+
+          {indianModeActive && (
+            <div style={{ ...styles.summaryRow, fontSize: TavariStyles.typography.fontSize.sm }}>
+              <span style={styles.summaryLabel}>Indian Status:</span>
+              <span style={{ ...styles.summaryValue, fontWeight: 600 }}>
+                GST only ({(gstRateForIndian * 100).toFixed(2)}%)
+              </span>
+            </div>
+          )}
           
           {autoLoyaltyApplied > 0 && (
             <div style={styles.summaryRow}>
@@ -1394,7 +1998,16 @@ const POSCartPanel = ({
               discount_amount: 0,
               loyalty_redemption: autoLoyaltyApplied,
               aggregated_taxes: taxCalculation.aggregatedTaxes,
-              aggregated_rebates: taxCalculation.aggregatedRebates
+              aggregated_rebates: taxCalculation.aggregatedRebates,
+              itemTaxDetails: taxCalculation.itemTaxDetails || [],
+              indian_status_gst_only: indianModeActive,
+              indian_status_certificate_number: indianModeActive
+                ? (indianStatusCertificateNumber || '').trim()
+                : null,
+              indian_status_gst_rate: indianModeActive ? gstRateForIndian : null,
+              indian_status_tax_label: indianModeActive
+                ? ((indianStatusTaxLabel || 'GST (Indian Status)').trim() || 'GST (Indian Status)')
+                : null
             })}
             disabled={sessionLocked || cartItems.length === 0}
             style={{
@@ -1408,6 +2021,75 @@ const POSCartPanel = ({
           </button>
         </div>
       )}
+
+      {showLoyaltySwitchModal ? (
+        <div
+          style={styles.loyaltySwitchOverlay}
+          onClick={() => !loyaltySwitchBusy && setShowLoyaltySwitchModal(false)}
+          role="presentation"
+        >
+          <div
+            style={styles.loyaltySwitchModal}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="loyalty-switch-title"
+          >
+            <div style={styles.loyaltySwitchHeader}>
+              <h3 id="loyalty-switch-title" style={styles.loyaltySwitchTitle}>
+                Loyalty points to
+              </h3>
+              <button
+                type="button"
+                style={styles.loyaltySwitchClose}
+                aria-label="Close"
+                disabled={loyaltySwitchBusy}
+                onClick={() => setShowLoyaltySwitchModal(false)}
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <p style={styles.loyaltySwitchHint}>
+              Choose which adult on this sale should earn the loyalty points.
+            </p>
+            <div style={styles.loyaltySwitchList}>
+              {switchableLoyaltyCandidates.map((candidate) => {
+                const isActive =
+                  String(candidate.id) === String(loyaltyCustomer?.id || '');
+                return (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    disabled={loyaltySwitchBusy}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handlePickLoyaltyCandidate(candidate);
+                    }}
+                    style={{
+                      ...styles.loyaltySwitchOption,
+                      ...(isActive ? styles.loyaltySwitchOptionActive : {}),
+                    }}
+                  >
+                    <div style={styles.loyaltySwitchOptionName}>
+                      {candidate.customer_name || 'Loyalty account'}
+                      {isActive ? ' · Current' : ''}
+                    </div>
+                    <div style={styles.loyaltySwitchOptionMeta}>
+                      Loyalty: {formatLoyaltyAccountSummary(candidate)}
+                      {candidate.customer_phone
+                        ? ` · ${candidate.customer_phone}`
+                        : candidate.customer_email
+                          ? ` · ${candidate.customer_email}`
+                          : ''}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* LOYALTY HISTORY MODAL */}
       {showLoyaltyHistory && (

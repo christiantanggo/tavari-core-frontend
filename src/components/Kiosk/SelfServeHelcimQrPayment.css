@@ -1,0 +1,150 @@
+.self-serve-helcim {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+  background: linear-gradient(160deg, #0f172a 0%, #134e4a 45%, #0f766e 100%);
+  color: #f8fafc;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+.self-serve-helcim--success {
+  background: linear-gradient(160deg, #052e16 0%, #047857 50%, #0d9488 100%);
+}
+
+.self-serve-helcim__card {
+  width: 100%;
+  max-width: 420px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  padding: 28px 24px 32px;
+  backdrop-filter: blur(8px);
+}
+
+.self-serve-helcim__title {
+  margin: 0 0 8px;
+  font-size: 1.55rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.self-serve-helcim__subtitle {
+  margin: 0 0 22px;
+  font-size: 0.98rem;
+  line-height: 1.45;
+  opacity: 0.88;
+}
+
+.self-serve-helcim__checkout-summary {
+  margin: -8px 0 18px;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  opacity: 0.82;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.self-serve-helcim__amount {
+  margin: 0 0 16px;
+  font-size: 2rem;
+  font-weight: 700;
+  text-align: center;
+  color: #5eead4;
+}
+
+.self-serve-helcim__instructions {
+  margin: 0 0 20px;
+  text-align: center;
+  font-size: 1.05rem;
+  line-height: 1.45;
+}
+
+.self-serve-helcim__qr-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  background: #fff;
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+
+.self-serve-helcim__waiting {
+  margin: 0 0 16px;
+  text-align: center;
+  font-size: 0.95rem;
+  opacity: 0.85;
+}
+
+.self-serve-helcim__hint {
+  margin: 12px 0 0;
+  font-size: 0.9rem;
+  opacity: 0.85;
+  text-align: center;
+}
+
+.self-serve-helcim__label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.self-serve-helcim__input {
+  padding: 14px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(15, 23, 42, 0.65);
+  color: #f8fafc;
+  font-size: 1.15rem;
+}
+
+.self-serve-helcim__input::placeholder {
+  color: rgba(248, 250, 252, 0.45);
+}
+
+.self-serve-helcim__input:focus {
+  outline: 2px solid #2dd4bf;
+  outline-offset: 1px;
+}
+
+.self-serve-helcim__error {
+  color: #fecaca;
+  margin: 0 0 12px;
+  font-size: 0.92rem;
+}
+
+.self-serve-helcim__btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 16px 20px;
+  border: none;
+  border-radius: 12px;
+  font-size: 1.1rem;
+  font-weight: 700;
+  cursor: pointer;
+  background: linear-gradient(180deg, #14b8a6 0%, #0d9488 100%);
+  color: #042f2e;
+  box-shadow: 0 4px 14px rgba(13, 148, 136, 0.35);
+}
+
+.self-serve-helcim__btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.self-serve-helcim__btn--ghost {
+  margin-top: 12px;
+  background: transparent;
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: none;
+}
+
+.self-serve-helcim__btn--ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+}

@@ -3,7 +3,7 @@ import React from 'react';
 import { TavariStyles } from '../../../utils/TavariStyles';
 import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
 
-const EETRT_DataPreview = ({ calculatedData, generating, onGenerateReport }) => {
+const EETRT_DataPreview = ({ calculatedData, generating, onGenerateReport, onGenerateDeductionsReport }) => {
   const { formatTaxAmount } = useTaxCalculations();
   
   const PAYMENT_FREQUENCIES = {
@@ -110,7 +110,7 @@ const EETRT_DataPreview = ({ calculatedData, generating, onGenerateReport }) => 
         </div>
       </div>
 
-      <div style={{ marginTop: TavariStyles.spacing.lg }}>
+      <div style={{ marginTop: TavariStyles.spacing.lg, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <button
           style={{
             ...styles.button,
@@ -119,9 +119,27 @@ const EETRT_DataPreview = ({ calculatedData, generating, onGenerateReport }) => 
           onClick={onGenerateReport}
           disabled={generating || !calculatedData}
         >
-          {generating ? 'Generating Report...' : 'Generate Comprehensive Report'}
+          {generating ? 'Generating...' : 'Generate Comprehensive Report'}
         </button>
+        {onGenerateDeductionsReport && (
+          <button
+            style={{
+              ...styles.button,
+              backgroundColor: TavariStyles.colors.gray700 || '#374151',
+              ...(generating || !calculatedData ? styles.disabledButton : {})
+            }}
+            onClick={onGenerateDeductionsReport}
+            disabled={generating || !calculatedData}
+          >
+            {generating ? 'Generating...' : 'Generate Deductions Report'}
+          </button>
+        )}
       </div>
+      {onGenerateDeductionsReport && (
+        <p style={{ fontSize: 10, color: TavariStyles.colors.gray600 || '#6b7280', marginTop: 8 }}>
+          Deductions report shows federal tax, provincial tax, CPP, EI, and additional tax by pay period (same data as pay statements; separate from T4).
+        </p>
+      )}
     </div>
   );
 };

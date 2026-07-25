@@ -1,13 +1,14 @@
 // screens/Mail/MailSettings.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import { 
   FiMail, FiUser, FiMapPin, FiSave, FiRefreshCw, 
   FiCheckCircle, FiAlertCircle, FiClock, FiShield, FiSettings,
-  FiPause, FiPlay, FiAlertTriangle
+  FiPause, FiPlay, FiAlertTriangle, FiSend
 } from 'react-icons/fi';
+import CampaignWarmupSettingsTab from '../../components/Mail/CampaignWarmupSettingsTab';
 import { TbTestPipe } from 'react-icons/tb';
 
 // Permission System Imports
@@ -16,12 +17,26 @@ import PermissionGate from '../../components/Auth/PermissionGate';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MailModuleSubTabs } from '../../components/Mail/MailModuleNavigation';
 import toast from 'react-hot-toast';
+import ModuleDeactivationPanel from '../../components/Modules/ModuleDeactivationPanel';
 import emailSendingService from '../../helpers/Mail/emailSendingService';
+
+const SETTINGS_TABS = [
+  { id: 'controls', label: 'Sending Controls', icon: FiAlertTriangle },
+  { id: 'campaign-sending', label: 'Campaign sending', icon: FiSend },
+  { id: 'sender', label: 'Sender Profile', icon: FiMail },
+  { id: 'compliance', label: 'Compliance', icon: FiShield },
+  { id: 'system', label: 'System Rules', icon: FiClock }
+];
+
+const SETTINGS_TAB_IDS = new Set(SETTINGS_TABS.map((tab) => tab.id));
 
 const MailSettings = () => {
   const { business } = useBusiness();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   
   // Security context for settings management
   const {
@@ -89,7 +104,8 @@ const MailSettings = () => {
     },
     session_timeout: 300,
     auto_retry_failed: true,
-    max_retries: 3
+    max_retries: 3,
+    max_child_age_for_automations: 12
   });
   
   const [loading, setLoading] = useState(true);
@@ -98,8 +114,21 @@ const MailSettings = () => {
   const [errors, setErrors] = useState({});
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
+  const [appBusinessName, setAppBusinessName] = useState('');
+  const [activeSettingsTab, setActiveSettingsTab] = useState('controls');
 
-  const businessId = selectedBusinessId || business?.id;
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab && SETTINGS_TAB_IDS.has(tab)) {
+      setActiveSettingsTab(tab);
+    }
+  }, [searchParams]);
+
+  const businessId =
+    selectedBusinessId ||
+    localStorage.getItem('currentBusinessId') ||
+    business?.id ||
+    localStorage.getItem('businessId');
 
   // Permission checks - VERY STRICT for settings
   const canViewSettings = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
@@ -117,23 +146,46 @@ const MailSettings = () => {
         return;
       }
 
-      const { data, error } = await supabase
-        .from('mail_settings')
-        .select('*')
-        .eq('business_id', businessId)
-        .single();
+      const [{ data, error }, { data: businessRow, error: businessError }] = await Promise.all([
+        supabase
+          .from('mail_settings')
+          .select('*')
+          .eq('business_id', businessId)
+          .single(),
+        supabase
+          .from('businesses')
+          .select('name')
+          .eq('id', businessId)
+          .maybeSingle()
+      ]);
+
+      if (businessError) {
+        throw businessError;
+      }
+
+      const resolvedBusinessName =
+        businessRow?.name?.trim() ||
+        businessData?.name?.trim() ||
+        business?.name?.trim() ||
+        '';
+
+      setAppBusinessName(resolvedBusinessName);
 
       if (error && error.code !== 'PGRST116') {
         throw error;
       }
 
       if (!data) {
-        setSettings((prev) => ({ ...prev, business_id: businessId }));
+        setSettings((prev) => ({
+          ...prev,
+          business_id: businessId,
+          from_name: prev.from_name?.trim() || resolvedBusinessName
+        }));
         return;
       }
 
       setSettings({
-        from_name: data.from_name || '',
+        from_name: data.from_name?.trim() || resolvedBusinessName,
         from_email: data.from_email || '',
         reply_to: data.reply_to || '',
         business_address: data.business_address || '',
@@ -146,7 +198,8 @@ const MailSettings = () => {
         },
         session_timeout: data.session_timeout ?? 300,
         auto_retry_failed: data.auto_retry_failed ?? true,
-        max_retries: data.max_retries ?? 3
+        max_retries: data.max_retries ?? 3,
+        max_child_age_for_automations: data.max_child_age_for_automations ?? 12
       });
     } catch (error) {
       console.error('Error loading mail settings:', error);
@@ -154,7 +207,7 @@ const MailSettings = () => {
     } finally {
       setLoading(false);
     }
-  }, [businessId, canViewSettings, checkRateLimit]);
+  }, [businessId, canViewSettings, checkRateLimit, businessData?.name, business?.name]);
 
   // Check permissions on mount
   useEffect(() => {
@@ -338,7 +391,14 @@ const MailSettings = () => {
     }
 
     const errorsFound = {};
-    if (!settings.from_name?.trim()) {
+    const resolvedFromName =
+      settings.from_name?.trim() ||
+      appBusinessName?.trim() ||
+      businessData?.name?.trim() ||
+      business?.name?.trim() ||
+      '';
+
+    if (!resolvedFromName) {
       errorsFound.from_name = 'Business name is required';
     }
     if (!settings.from_email?.trim()) {
@@ -346,6 +406,13 @@ const MailSettings = () => {
     }
     if (!settings.business_address?.trim()) {
       errorsFound.business_address = 'Business address is required';
+    }
+    if (
+      !Number.isInteger(Number(settings.max_child_age_for_automations)) ||
+      Number(settings.max_child_age_for_automations) < 0 ||
+      Number(settings.max_child_age_for_automations) > 25
+    ) {
+      errorsFound.max_child_age_for_automations = 'Enter an age between 0 and 25';
     }
 
     if (Object.keys(errorsFound).length > 0) {
@@ -372,7 +439,9 @@ const MailSettings = () => {
 
       const payload = {
         business_id: businessId,
-        ...settings
+        ...settings,
+        from_name: resolvedFromName,
+        max_child_age_for_automations: Number(settings.max_child_age_for_automations)
       };
 
       const { error } = await supabase
@@ -435,6 +504,7 @@ const MailSettings = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <MailModuleHeader />
           <div style={styles.loading}>
             <FiRefreshCw style={styles.loadingIcon} />
             <div>Loading mail settings...</div>
@@ -448,6 +518,7 @@ const MailSettings = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <MailModuleHeader />
           <div style={styles.error}>
             <FiAlertCircle style={styles.errorIcon} />
             <h2>Authentication Error</h2>
@@ -462,6 +533,15 @@ const MailSettings = () => {
     <POSAuthWrapper>
       <SecurityWrapper>
         <div style={styles.container}>
+          <MailModuleHeader />
+
+          <MailModuleSubTabs
+            tabs={SETTINGS_TABS}
+            activeTab={activeSettingsTab}
+            onTabChange={setActiveSettingsTab}
+            ariaLabel="Mail settings navigation"
+          />
+
           {/* Header */}
           <div style={styles.header}>
             <h1 style={styles.title}>
@@ -494,13 +574,27 @@ const MailSettings = () => {
             </div>
           )}
 
-          <div style={styles.content}>
+          {activeSettingsTab === 'campaign-sending' && (
+            <CampaignWarmupSettingsTab
+              businessId={businessId}
+              businessName={appBusinessName}
+              canManage={canEditSettings}
+            />
+          )}
+
+          <div
+            style={{
+              ...styles.content,
+              display: activeSettingsTab === 'campaign-sending' ? 'none' : undefined,
+            }}
+          >
             {/* Emergency Email Controls */}
             <PermissionGate
               requireElevated
               fallback={
                 <div style={{
                   ...styles.section,
+                  display: activeSettingsTab === 'controls' ? undefined : 'none',
                   backgroundColor: emailSendingPaused ? '#ffebee' : '#e8f5e8',
                   border: emailSendingPaused ? '2px solid #f44336' : '2px solid #4caf50'
                 }}>
@@ -523,6 +617,7 @@ const MailSettings = () => {
             >
               <div style={{
                 ...styles.section,
+                display: activeSettingsTab === 'controls' ? undefined : 'none',
                 backgroundColor: emailSendingPaused ? '#ffebee' : '#e8f5e8',
                 border: emailSendingPaused ? '2px solid #f44336' : '2px solid #4caf50'
               }}>
@@ -621,7 +716,10 @@ const MailSettings = () => {
             </PermissionGate>
 
             {/* Email Configuration */}
-            <div style={styles.section}>
+            <div style={{
+              ...styles.section,
+              display: activeSettingsTab === 'sender' ? undefined : 'none'
+            }}>
               <h2 style={styles.sectionTitle}>
                 <FiMail style={styles.sectionIcon} />
                 Email Configuration
@@ -640,9 +738,9 @@ const MailSettings = () => {
                       ...(errors.from_name ? styles.inputError : {}),
                       ...(canEditSettings ? {} : styles.inputReadOnly)
                     }}
-                    value={settings.from_name}
+                    value={settings.from_name || appBusinessName || ''}
                     onChange={(e) => handleInputChange('from_name', e.target.value)}
-                    placeholder="Your Business Name"
+                    placeholder={appBusinessName || 'Your Business Name'}
                     disabled={!canEditSettings}
                   />
                   {errors.from_name && <span style={styles.errorText}>{errors.from_name}</span>}
@@ -726,7 +824,10 @@ const MailSettings = () => {
             </div>
 
             {/* CASL Compliance */}
-            <div style={styles.section}>
+            <div style={{
+              ...styles.section,
+              display: activeSettingsTab === 'compliance' ? undefined : 'none'
+            }}>
               <h2 style={styles.sectionTitle}>
                 <FiShield style={styles.sectionIcon} />
                 CASL Compliance
@@ -757,7 +858,10 @@ const MailSettings = () => {
             </div>
 
             {/* Social Media Links */}
-            <div style={styles.section}>
+            <div style={{
+              ...styles.section,
+              display: activeSettingsTab === 'compliance' ? undefined : 'none'
+            }}>
               <h2 style={styles.sectionTitle}>
                 <FiShield style={styles.sectionIcon} />
                 Social Media Links
@@ -789,7 +893,10 @@ const MailSettings = () => {
             </div>
 
             {/* System Settings */}
-            <div style={styles.section}>
+            <div style={{
+              ...styles.section,
+              display: activeSettingsTab === 'system' ? undefined : 'none'
+            }}>
               <h2 style={styles.sectionTitle}>
                 <FiClock style={styles.sectionIcon} />
                 System Settings
@@ -844,6 +951,29 @@ const MailSettings = () => {
               </div>
 
               <div style={styles.formGroup}>
+                <label style={styles.label}>
+                  Max Child Age for Age-Limited Automations
+                </label>
+                <input
+                  type="number"
+                  style={{
+                    ...styles.input,
+                    ...(errors.max_child_age_for_automations ? styles.inputError : {}),
+                    ...(canEditSettings ? {} : styles.inputReadOnly)
+                  }}
+                  value={settings.max_child_age_for_automations}
+                  onChange={(e) => handleInputChange('max_child_age_for_automations', parseInt(e.target.value, 10) || 0)}
+                  min={0}
+                  max={25}
+                  disabled={!canEditSettings}
+                />
+                {errors.max_child_age_for_automations && <span style={styles.errorText}>{errors.max_child_age_for_automations}</span>}
+                <div style={styles.helpText}>
+                  Automations that opt into the max age rule use this age limit. Birthday automations apply it to the birthday minor; broader child/family automations use it to limit eligible families.
+                </div>
+              </div>
+
+              <div style={styles.formGroup}>
                 <label style={styles.checkboxLabel}>
                   <input
                     type="checkbox"
@@ -862,6 +992,7 @@ const MailSettings = () => {
           </div>
 
           {/* Save Button */}
+          {activeSettingsTab !== 'campaign-sending' && (
           <PermissionGate
             requireElevated
             fallback={
@@ -884,6 +1015,9 @@ const MailSettings = () => {
               </button>
             </div>
           </PermissionGate>
+          )}
+
+          <ModuleDeactivationPanel moduleKey="mail" />
         </div>
       </SecurityWrapper>
     </POSAuthWrapper>

@@ -544,7 +544,11 @@ const EmployeeSetupTab = ({ selectedBusinessId, businessData, employees, loadDat
                         <strong>Hourly Wage:</strong> ${formatTaxAmount(parseFloat(selectedEmployee.wage || 0))}/hr
                       </div>
                       <div>
-                        <strong>Vacation %:</strong> {selectedEmployee.vacation_percent ? `${selectedEmployee.vacation_percent}%` : 'Business default'}
+                        <strong>Vacation %:</strong> {selectedEmployee.vacation_percent ? (() => {
+                          const percent = parseFloat(selectedEmployee.vacation_percent);
+                          // If stored as percentage (>= 1.0), display directly; if stored as decimal (< 1.0), multiply by 100
+                          return percent >= 1.0 ? `${percent.toFixed(1)}%` : `${(percent * 100).toFixed(1)}%`;
+                        })() : 'Business default'}
                       </div>
                       <div>
                         <strong>Hired:</strong> {selectedEmployee.hire_date ? new Date(selectedEmployee.hire_date).toLocaleDateString() : 'Not set'}

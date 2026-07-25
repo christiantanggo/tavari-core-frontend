@@ -1,0 +1,147 @@
+/* Shared responsive layout for public waiver steps (mobile / narrow viewports) */
+
+/* Kiosk fullscreen: lock document scroll, scroll inside #root / step shell */
+html.waiver-kiosk-fullscreen-root,
+html.waiver-kiosk-fullscreen-root body {
+  height: 100%;
+  overflow: hidden;
+}
+
+html.waiver-kiosk-fullscreen-root #root {
+  height: 100vh;
+  height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
+.public-waiver-flow {
+  overflow-x: hidden;
+  width: 100%;
+  max-width: 100vw;
+  box-sizing: border-box;
+}
+
+.public-waiver-shell {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+}
+
+.public-waiver-card {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.public-waiver-card > button {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.public-waiver-actions {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: stretch;
+  align-items: stretch;
+}
+
+.public-waiver-actions > button {
+  box-sizing: border-box;
+  flex: 1 1 8rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.public-waiver-review-field {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+}
+
+.public-waiver-review-value {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.public-waiver-review-value > span {
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.public-waiver-review-edit {
+  flex-shrink: 0;
+}
+
+.public-waiver-waiver-scroll {
+  overflow-x: hidden;
+  word-break: break-word;
+}
+
+.public-waiver-waiver-scroll img,
+.public-waiver-waiver-scroll table,
+.public-waiver-waiver-scroll iframe {
+  max-width: 100%;
+}
+
+@media (max-width: 640px) {
+  .public-waiver-shell {
+    padding: 0.75rem !important;
+  }
+
+  .public-waiver-card {
+    padding: 1rem !important;
+  }
+
+  .public-waiver-title {
+    font-size: 1.5rem !important;
+  }
+
+  .public-waiver-section {
+    padding: 1rem !important;
+  }
+
+  .public-waiver-actions {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    justify-content: stretch !important;
+    gap: 0.75rem !important;
+  }
+
+  .public-waiver-actions > button {
+    width: 100% !important;
+    min-width: 0 !important;
+    flex: none !important;
+    padding: 0.875rem 1rem !important;
+  }
+
+  .public-waiver-review-field {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 0.35rem !important;
+  }
+
+  .public-waiver-review-field > strong {
+    min-width: 0 !important;
+  }
+
+  .public-waiver-review-value {
+    width: 100% !important;
+    justify-content: space-between !important;
+  }
+
+  .public-waiver-agreement-section {
+    padding: 1rem !important;
+  }
+
+  .public-waiver-card > button {
+    width: 100% !important;
+  }
+}

@@ -28,16 +28,13 @@ self.addEventListener('activate', (event) => {
   return self.clients.claim(); // Take control immediately
 });
 
-// Fetch event - intercept network requests
+// Fetch event — only intercept Supabase public music-files (cache layer).
+// Do NOT wrap other requests in respondWith(fetch): a rejected fetch breaks navigations
+// (e.g. /portal/schedule) with "Failed to fetch" and uncaught promise rejections.
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  
-  // Only cache music files from Supabase storage
   if (url.hostname.includes('supabase') && url.pathname.includes('/storage/v1/object/public/music-files/')) {
     event.respondWith(handleMusicRequest(event.request));
-  } else {
-    // Let everything else pass through normally
-    event.respondWith(fetch(event.request));
   }
 });
 
@@ -55,8 +52,18 @@ async function handleMusicRequest(request) {
     console.log('[Service Worker] Fetching from network:', request.url);
     const networkResponse = await fetch(request);
 
-    // If successful, cache it for next time
+    // If successful, cache only real audio (avoid caching HTML error pages as "tracks")
     if (networkResponse.ok) {
+      const ct = (networkResponse.headers.get('content-type') || '').toLowerCase();
+      if (
+        !ct.includes('audio') &&
+        !ct.includes('octet-stream') &&
+        !ct.includes('mpeg') &&
+        !ct.includes('mp4')
+      ) {
+        console.warn('[Service Worker] Skipping cache — not audio:', ct, request.url);
+        return networkResponse;
+      }
       const cache = await caches.open(CACHE_NAME);
       
       // Check cache size and remove oldest if needed
@@ -84,8 +91,9 @@ async function handleMusicRequest(request) {
       return cachedResponse;
     }
     
-    // No cache available, return error
-    throw error;
+    // No cache — must return a Response; never reject respondWith()
+    console.warn('[Service Worker] No cache fallback for:', request.url);
+    return Response.error();
   }
 }
 

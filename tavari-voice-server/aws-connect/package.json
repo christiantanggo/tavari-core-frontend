@@ -1,0 +1,15 @@
+{
+  "name": "tavari-connect-setup",
+  "version": "1.0.0",
+  "description": "Scripts to set up Amazon Connect for Tavari Voice Agent",
+  "type": "module",
+  "main": "create-contact-flow.js",
+  "scripts": {
+    "create-flow": "node create-contact-flow.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-connect": "^3.0.0"
+  }
+}
+
+

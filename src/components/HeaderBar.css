@@ -51,6 +51,40 @@
 .hamburger {
   display: none;
   cursor: pointer;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Left nav trigger (dashboard); hidden on desktop */
+.header-mobile-left {
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.header-mobile-left-spacer {
+  display: none;
+  width: 48px;
+  flex-shrink: 0;
+}
+
+.nav-left-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: #333;
+  cursor: pointer;
+}
+
+.nav-left-btn:hover {
+  background-color: #f0f0f0;
 }
 
 /* Account Dropdown Container */
@@ -194,12 +228,43 @@
 
 /* 📱 Responsive Rules */
 @media screen and (max-width: 768px) {
+  .header {
+    display: grid;
+    grid-template-columns: 48px 1fr 48px;
+    align-items: center;
+    column-gap: 6px;
+  }
+
+  .header-mobile-left {
+    display: flex;
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: center;
+  }
+
+  .header-mobile-left-spacer {
+    display: block;
+  }
+
+  .logo {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: center;
+  }
+
+  .spacer {
+    display: none;
+  }
+
   .desktopIcons {
     display: none;
   }
 
   .hamburger {
-    display: block;
+    display: flex;
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
   }
 }
 

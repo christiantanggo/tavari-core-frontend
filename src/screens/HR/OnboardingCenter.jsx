@@ -857,7 +857,7 @@ const OnboardingCenter = () => {
         justifyContent: 'center',
         minHeight: '100vh',
         backgroundColor: '#f9fafb',
-        paddingTop: '60px',
+        paddingTop: '0px',
         paddingLeft: '20px',
         paddingRight: '20px',
         paddingBottom: '20px'
@@ -893,7 +893,7 @@ const OnboardingCenter = () => {
         justifyContent: 'center',
         minHeight: '100vh',
         backgroundColor: '#f9fafb',
-        paddingTop: '60px',
+        paddingTop: '0px',
         paddingLeft: '20px',
         paddingRight: '20px',
         paddingBottom: '20px'
@@ -951,7 +951,7 @@ const OnboardingCenter = () => {
         justifyContent: 'center',
         minHeight: '100vh',
         backgroundColor: '#f9fafb',
-        paddingTop: '60px',
+        paddingTop: '0px',
         paddingLeft: '20px',
         paddingRight: '20px',
         paddingBottom: '20px'
@@ -1011,7 +1011,7 @@ const OnboardingCenter = () => {
         <div style={{
           minHeight: '100vh',
           backgroundColor: '#f9fafb',
-          paddingTop: '60px',
+          paddingTop: '0px',
           paddingLeft: '20px',
           paddingRight: '20px',
           paddingBottom: '20px'

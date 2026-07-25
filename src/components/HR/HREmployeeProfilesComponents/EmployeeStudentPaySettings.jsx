@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { X, GraduationCap, AlertCircle, Save, Info, DollarSign, Clock } from 'lucide-react';
 import { supabase } from '../../../supabaseClient';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import PositionLabel from '../PositionLabel';
 
 const EmployeeStudentPaySettings = ({
   isOpen,
@@ -400,7 +401,8 @@ const EmployeeStudentPaySettings = ({
             <div style={styles.employeeName}>{employee.full_name}</div>
             <div style={styles.employeeDetails}>
               {employee.employee_number && `#${employee.employee_number} • `}
-              {employee.position || 'Employee'} • {employee.employment_status || 'Active'}
+              <PositionLabel businessId={businessId} value={employee.position} emptyFallback="Employee" />
+              {' '}• {employee.employment_status || 'Active'}
               <br />
               Age: {eligibility.age !== null ? `${eligibility.age} years old` : 'Not set'} • 
               Current Wage: ${wageImpact.currentWage.toFixed(2)}/hour

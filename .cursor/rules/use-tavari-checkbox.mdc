@@ -1,0 +1,43 @@
+---
+description: Always use TavariCheckbox for checkboxes in React UI — raw inputs are invisible
+alwaysApply: true
+---
+
+# Use TavariCheckbox for all checkboxes
+
+In this codebase, **plain `<input type="checkbox">` is often invisible** in the Tavari dashboard (global input styles, Electron/WebView, etc.).
+
+## React (dashboard, modules, settings)
+
+**Always** use `TavariCheckbox` from `src/components/UI/TavariCheckbox.jsx`.
+
+```jsx
+import TavariCheckbox from '../../components/UI/TavariCheckbox';
+
+<TavariCheckbox
+  id="unique-id"
+  checked={checked}
+  onChange={(next) => setChecked(next)}
+  label="Option label"
+/>
+```
+
+- Do **not** add raw `<input type="checkbox">` in React screens/components.
+- Prefer default `appearance="custom"` (styled teal box + checkmark).
+- Use `appearance="native"` only when a deliberate OS-native control is required.
+
+## Non-React surfaces (e.g. `public/task-manager-kiosk/`)
+
+Vanilla HTML cannot import the React component. Use the **same visual pattern**:
+
+- Hidden input: `class="tavari-checkbox-input …"`
+- Visible box: `<span class="tavari-checkbox-box">`
+- Wrapper: `<label class="tavari-checkbox">`
+- Helper: `renderTavariCheckboxHtml()` in `public/task-manager-kiosk/app.es5.js`
+- Styles live in `public/task-manager-kiosk/index.html` (`.tavari-checkbox*`)
+
+Do **not** rely on unstyled native checkboxes in kiosk HTML.
+
+## Global CSS
+
+Avoid `input { width: 100% }` without excluding checkboxes. Prefer `input:not([type="checkbox"]), textarea { … }`.

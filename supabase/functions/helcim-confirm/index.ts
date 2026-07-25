@@ -1,4 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { getHelcimCredentialsForBusiness } from "../_shared/helcimBusinessCredentials.ts";
 
 serve(async (req) => {
   try {
@@ -21,10 +23,25 @@ serve(async (req) => {
     }
 
     const authHeader = req.headers.get("Authorization") || "";
-    const token = authHeader.replace("Bearer ", "");
+    if (!authHeader) {
+      return new Response(JSON.stringify({ error: "Missing Authorization header" }), {
+        status: 401,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Content-Type": "application/json",
+        },
+      });
+    }
 
-    if (!token) {
-      return new Response("Unauthorized", {
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
         status: 401,
         headers: {
           "Access-Control-Allow-Origin": "*",
@@ -61,14 +78,52 @@ serve(async (req) => {
       });
     }
 
-    const helcimResponse = await fetch("https://api.helcim.com/v1/transaction/search", {
+    const supabaseService = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+    );
+
+    const helcimCreds = await getHelcimCredentialsForBusiness(supabaseService, String(businessId));
+    const HELCIM_API_TOKEN = helcimCreds?.apiToken;
+    if (!HELCIM_API_TOKEN) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Helcim is not configured for this business. Save the Helcim API token under POS → Settings → Payments.",
+        }),
+        {
+          status: 500,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Content-Type": "application/json",
+          },
+        },
+      );
+    }
+
+    const invoiceNumber = `SALE-${saleId}`;
+
+    // Prefer v2 search; fallback to v1 if needed.
+    let helcimResponse = await fetch("https://api.helcim.com/v2/transaction/search", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        token: "aa7V85IRKNT9kgLNZUWW6QNpsyEpTBC*zp!isDzkSFqXKjA@RBU_!LaUOUeiMaSz",
-        search: { description: `${businessId}-${saleId}` },
-      }),
+      headers: {
+        "Content-Type": "application/json",
+        "accept": "application/json",
+        "api-token": HELCIM_API_TOKEN,
+      },
+      body: JSON.stringify({ invoiceNumber }),
     });
+
+    if (!helcimResponse.ok && helcimResponse.status === 404) {
+      helcimResponse = await fetch("https://api.helcim.com/v1/transaction/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "accept": "application/json" },
+        body: JSON.stringify({
+          token: HELCIM_API_TOKEN,
+          search: { invoiceNumber },
+        }),
+      });
+    }
 
     const responseText = await helcimResponse.text();
 
@@ -86,13 +141,25 @@ serve(async (req) => {
       });
     }
 
-    const approved = helcimData.response?.transactions?.find(
-      (t: any) =>
-        t.description?.includes(`${businessId}-${saleId}`) &&
-        t.result === "APPROVED"
-    );
+    const transactions = helcimData.response?.transactions ||
+      helcimData.transactions ||
+      helcimData.data?.transactions ||
+      (Array.isArray(helcimData) ? helcimData : []);
 
-    return new Response(JSON.stringify({ approved: !!approved }), {
+    const approved = transactions.find((t: any) => {
+      const txInvoice = t.invoiceNumber || t.invoice?.number;
+      const matchesInvoice = txInvoice === invoiceNumber;
+      const result = (t.result || t.status || "").toString().toUpperCase();
+      return matchesInvoice && result.includes("APPROVED");
+    });
+
+    return new Response(JSON.stringify({
+      approved: !!approved,
+      invoiceNumber,
+      transactionId: approved?.transactionId || approved?.id || null,
+      approvalCode: approved?.approvalCode || approved?.authCode || approved?.approval || null,
+      transaction: approved || null
+    }), {
       status: 200,
       headers: {
         "Content-Type": "application/json",

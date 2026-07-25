@@ -100,10 +100,10 @@ const ComplianceTrackingModal = ({
     try {
       const { data, error } = await supabase
         .from('contract_files')
-        .select('id, file_name, created_at, is_current_version')
+        .select('id, file_name, uploaded_at, file_type, file_size, storage_path')
         .eq('business_id', businessId)
         .eq('employee_id', employee.id)
-        .order('created_at', { ascending: false });
+        .order('uploaded_at', { ascending: false });
 
       if (error) throw error;
 
@@ -220,7 +220,7 @@ const ComplianceTrackingModal = ({
 
     try {
       // Get the current contract file (if any)
-      const currentContract = contractFiles.find(f => f.is_current_version) || contractFiles[0];
+      const currentContract = contractFiles[0];
 
       // Special handling for probation period
       if (formData.complianceType === 'probation_period') {
@@ -385,7 +385,7 @@ const ComplianceTrackingModal = ({
             )}
             {contractFiles.length > 0 && (
               <p style={styles.contractDetails}>
-                Current Contract: {contractFiles.find(f => f.is_current_version)?.file_name || contractFiles[0]?.file_name}
+                Current Contract: {contractFiles[0]?.file_name}
               </p>
             )}
           </div>

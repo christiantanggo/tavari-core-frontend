@@ -52,3 +52,4 @@ SUPABASE_SERVICE_ROLE_KEY=...
 
 AWS SES credentials are not needed locally - they're handled by Supabase Edge Functions.
 
+

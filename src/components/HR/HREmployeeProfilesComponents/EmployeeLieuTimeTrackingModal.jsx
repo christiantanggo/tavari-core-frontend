@@ -1,6 +1,10 @@
 // components/HR/HREmployeeProfilesComponents/EmployeeLieuTimeTrackingModal.jsx - Fixed Lieu Time Modal
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '../../../supabaseClient';
+import {
+  attachLieuRunningBalances,
+  deriveCurrentLieuBalance
+} from '../../../helpers/Payroll/lieuTimeLedger';
 
 // Import all required consistency files
 import { SecurityWrapper } from '../../../Security';
@@ -65,6 +69,55 @@ const EmployeeLieuTimeTrackingModal = ({
   // Use effective business ID
   const effectiveBusinessId = businessId || selectedBusinessId;
 
+  /** Current balance from ledger (payroll snapshot + manuals since last payroll). */
+  const effectiveLieuBalance = useMemo(() => {
+    const fromLedger = deriveCurrentLieuBalance(transactions);
+    if (fromLedger !== null && !Number.isNaN(fromLedger)) return fromLedger;
+    return parseFloat(employeeSettings?.lieu_time_balance ?? employee?.lieu_time_balance ?? 0) || 0;
+  }, [transactions, employeeSettings?.lieu_time_balance, employee?.lieu_time_balance]);
+
+  const transactionsWithRunningBalance = useMemo(
+    () => attachLieuRunningBalances(transactions),
+    [transactions]
+  );
+
+  // Keep users.lieu_time_balance in sync with the ledger sum (payroll reads this column).
+  useEffect(() => {
+    if (!isOpen || loading || !employee?.id || !employeeSettings?.lieu_time_enabled) return;
+    const ledgerBalance = deriveCurrentLieuBalance(transactions);
+    if (ledgerBalance === null || Number.isNaN(ledgerBalance)) return;
+    const db = parseFloat(String(employeeSettings?.lieu_time_balance ?? '0'));
+    if (Math.abs(ledgerBalance - db) <= 0.02) return;
+
+    let cancelled = false;
+    (async () => {
+      const { error } = await supabase
+        .from('users')
+        .update({
+          lieu_time_balance: ledgerBalance,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', employee.id);
+      if (cancelled || error) {
+        if (error) console.warn('[LieuTime] Balance sync failed:', error.message);
+        return;
+      }
+      setEmployeeSettings((prev) => (prev ? { ...prev, lieu_time_balance: ledgerBalance } : prev));
+      if (onBalanceUpdate) onBalanceUpdate(ledgerBalance);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isOpen,
+    loading,
+    employee?.id,
+    employeeSettings?.lieu_time_enabled,
+    employeeSettings?.lieu_time_balance,
+    transactions,
+    onBalanceUpdate
+  ]);
+
   // Load data when modal opens
   useEffect(() => {
     if (isOpen && employee && effectiveBusinessId) {
@@ -124,110 +177,115 @@ const EmployeeLieuTimeTrackingModal = ({
     }
   };
 
-  const loadLieuTimeTransactions = async () => {
-    if (!employee?.id || !effectiveBusinessId) return;
+  const fetchLieuTimeTransactions = async () => {
+    if (!employee?.id || !effectiveBusinessId) return [];
 
-    try {
-      const [{ data: manualTransactions, error: transactionError }, { data: payrollEntries, error: payrollError }] = await Promise.all([
-        supabase
-          .from('hrpayroll_lieu_time_transactions')
-          .select('*')
-          .eq('user_id', employee.id)
-          .eq('business_id', effectiveBusinessId),
-        supabase
-          .from('hrpayroll_entries')
-          .select(`
+    const [{ data: manualTransactions, error: transactionError }, { data: payrollEntries, error: payrollError }] = await Promise.all([
+      supabase
+        .from('hrpayroll_lieu_time_transactions')
+        .select('*')
+        .eq('user_id', employee.id)
+        .eq('business_id', effectiveBusinessId),
+      supabase
+        .from('hrpayroll_entries')
+        .select(`
+          id,
+          user_id,
+          created_at,
+          lieu_earned,
+          lieu_hours,
+          lieu_balance_after,
+          payroll_run_id,
+          hrpayroll_runs!inner(
             id,
-            user_id,
-            created_at,
-            lieu_earned,
-            lieu_hours,
-            lieu_balance_after,
-            payroll_run_id,
-            hrpayroll_runs!inner(
-              id,
-              business_id,
-              pay_period_start,
-              pay_period_end,
-              pay_date
-            )
-          `)
-          .eq('user_id', employee.id)
-          .eq('hrpayroll_runs.business_id', effectiveBusinessId)
-      ]);
+            business_id,
+            pay_period_start,
+            pay_period_end,
+            pay_date
+          )
+        `)
+        .eq('user_id', employee.id)
+        .eq('hrpayroll_runs.business_id', effectiveBusinessId)
+    ]);
 
-      if (transactionError) throw transactionError;
-      if (payrollError) throw payrollError;
+    if (transactionError) throw transactionError;
+    if (payrollError) throw payrollError;
 
-      const payrollTransactions = [];
+    const payrollTransactions = [];
 
-      (payrollEntries || []).forEach(entry => {
-        const payDate = entry?.hrpayroll_runs?.pay_date || entry.created_at;
-        const payPeriodStart = entry?.hrpayroll_runs?.pay_period_start;
-        const payPeriodEnd = entry?.hrpayroll_runs?.pay_period_end;
-        const periodLabel = payPeriodStart && payPeriodEnd
-          ? `${payPeriodStart} to ${payPeriodEnd}`
-          : 'Payroll Run';
+    (payrollEntries || []).forEach(entry => {
+      const payDate = entry?.hrpayroll_runs?.pay_date || entry.created_at;
+      const payPeriodStart = entry?.hrpayroll_runs?.pay_period_start;
+      const payPeriodEnd = entry?.hrpayroll_runs?.pay_period_end;
+      const periodLabel = payPeriodStart && payPeriodEnd
+        ? `${payPeriodStart} to ${payPeriodEnd}`
+        : 'Payroll Run';
 
-        if (entry.lieu_earned && entry.lieu_earned > 0) {
-          payrollTransactions.push({
-            id: `payroll-${entry.id}-earned`,
-            business_id: effectiveBusinessId,
-            user_id: employee.id,
-            transaction_type: 'earned',
-            hours_amount: Number(entry.lieu_earned),
-            premium_rate: 0,
-            premium_name: null,
-            premium_type: null,
-            regular_wage_rate: null,
-            effective_wage_rate: null,
-            transaction_date: payDate,
-            created_at: entry.created_at,
-            balance_after: entry.lieu_balance_after || null,
-            source: 'payroll',
-            description: `Lieu time earned during payroll period ${periodLabel}`,
-            payroll_run_id: entry.payroll_run_id
-          });
-        }
+      if (entry.lieu_earned && entry.lieu_earned > 0) {
+        payrollTransactions.push({
+          id: `payroll-${entry.id}-earned`,
+          business_id: effectiveBusinessId,
+          user_id: employee.id,
+          transaction_type: 'earned',
+          hours_amount: Number(entry.lieu_earned),
+          premium_rate: 0,
+          premium_name: null,
+          premium_type: null,
+          regular_wage_rate: null,
+          effective_wage_rate: null,
+          transaction_date: payDate,
+          created_at: entry.created_at,
+          balance_after: entry.lieu_balance_after || null,
+          source: 'payroll',
+          description: `Lieu time earned during payroll period ${periodLabel}`,
+          payroll_run_id: entry.payroll_run_id
+        });
+      }
 
-        if (entry.lieu_hours && entry.lieu_hours > 0) {
-          payrollTransactions.push({
-            id: `payroll-${entry.id}-used`,
-            business_id: effectiveBusinessId,
-            user_id: employee.id,
-            transaction_type: 'used',
-            hours_amount: -Math.abs(Number(entry.lieu_hours)),
-            premium_rate: 0,
-            premium_name: null,
-            premium_type: null,
-            regular_wage_rate: null,
-            effective_wage_rate: null,
-            transaction_date: payDate,
-            created_at: entry.created_at,
-            balance_after: entry.lieu_balance_after || null,
-            source: 'payroll',
-            description: `Lieu time used/payout during payroll period ${periodLabel}`,
-            payroll_run_id: entry.payroll_run_id
-          });
-        }
-      });
+      if (entry.lieu_hours && entry.lieu_hours > 0) {
+        payrollTransactions.push({
+          id: `payroll-${entry.id}-used`,
+          business_id: effectiveBusinessId,
+          user_id: employee.id,
+          transaction_type: 'used',
+          hours_amount: -Math.abs(Number(entry.lieu_hours)),
+          premium_rate: 0,
+          premium_name: null,
+          premium_type: null,
+          regular_wage_rate: null,
+          effective_wage_rate: null,
+          transaction_date: payDate,
+          created_at: entry.created_at,
+          balance_after: entry.lieu_balance_after || null,
+          source: 'payroll',
+          description: `Lieu time used/payout during payroll period ${periodLabel}`,
+          payroll_run_id: entry.payroll_run_id
+        });
+      }
+    });
 
-      const combined = [
-        ...(manualTransactions || []).map(tx => ({ ...tx, source: tx.source || 'manual' })),
-        ...payrollTransactions
-      ];
+    const combined = [
+      ...(manualTransactions || []).map(tx => ({ ...tx, source: tx.source || 'manual' })),
+      ...payrollTransactions
+    ];
 
-      combined.sort((a, b) => {
-        const dateA = new Date(a.transaction_date || a.created_at).getTime();
-        const dateB = new Date(b.transaction_date || b.created_at).getTime();
-        if (dateA === dateB) {
-          return new Date(b.created_at || b.transaction_date).getTime() - new Date(a.created_at || a.transaction_date).getTime();
-        }
-        return dateB - dateA;
-      });
+    combined.sort((a, b) => {
+      const dateA = new Date(a.transaction_date || a.created_at).getTime();
+      const dateB = new Date(b.transaction_date || b.created_at).getTime();
+      if (dateA === dateB) {
+        return new Date(b.created_at || b.transaction_date).getTime() - new Date(a.created_at || a.transaction_date).getTime();
+      }
+      return dateB - dateA;
+    });
 
+    return combined;
+  };
+
+  const loadLieuTimeTransactions = async () => {
+    try {
+      const combined = await fetchLieuTimeTransactions();
       setTransactions(combined);
-
+      return combined;
     } catch (error) {
       console.error('Error loading lieu time transactions:', error);
       throw new Error('Failed to load lieu time transactions: ' + error.message);
@@ -235,7 +293,7 @@ const EmployeeLieuTimeTrackingModal = ({
   };
 
   const handlePrintTransactions = useCallback(async () => {
-    if (!transactions || transactions.length === 0) {
+    if (!transactionsWithRunningBalance || transactionsWithRunningBalance.length === 0) {
       alert('No lieu time transactions are available to print.');
       return;
     }
@@ -262,7 +320,7 @@ const EmployeeLieuTimeTrackingModal = ({
       await logSecurityEvent('lieu_time_transactions_print', {
         business_id: effectiveBusinessId,
         employee_id: employee?.id,
-        transaction_count: transactions.length,
+        transaction_count: transactionsWithRunningBalance.length,
         generated_at: formattedGeneratedAt
       }, 'medium');
 
@@ -295,7 +353,7 @@ const EmployeeLieuTimeTrackingModal = ({
         }
       };
 
-      const htmlRows = transactions.map((transaction, index) => `
+      const htmlRows = transactionsWithRunningBalance.map((transaction, index) => `
         <tr>
           <td>${index + 1}</td>
           <td>${formatDate(transaction.transaction_date || transaction.created_at)}</td>
@@ -319,84 +377,117 @@ const EmployeeLieuTimeTrackingModal = ({
               body {
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 margin: 16px;
-                color: #1f2937;
+                color: #000;
                 font-size: 6px;
+                line-height: 1.4;
               }
               h1, h2, h3 {
                 margin: 0;
                 padding: 0;
               }
-              .header {
-                text-align: center;
-                margin-bottom: 12px;
-              }
-              .company-name {
+              .header h2 {
                 font-size: 12px;
                 font-weight: 700;
-                color: ${TavariStyles.colors.primary};
+                color: #000;
+                margin-top: 6px;
+              }
+              .header {
+                text-align: center;
+                margin-bottom: 16px;
+              }
+              .company-name {
+                font-size: 6px;
+                font-weight: 700;
+                color: #000;
               }
               .subtitle {
                 font-size: 6px;
-                color: #4b5563;
-                margin-top: 2px;
+                color: #000;
+                margin-top: 4px;
               }
               .info-grid {
                 display: grid;
                 grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-                gap: 6px;
-                margin-bottom: 12px;
-                padding: 8px;
-                border: 1px solid #e5e7eb;
+                gap: 8px;
+                margin-bottom: 16px;
+                padding: 12px;
+                border: 1px solid #333;
                 border-radius: 6px;
-                background-color: ${TavariStyles.colors.gray50};
+                background-color: #f5f5f5;
               }
               .info-grid div {
-                line-height: 1.3;
+                line-height: 1.4;
                 font-size: 6px;
+                color: #000;
               }
               .info-grid strong {
-                color: #111827;
+                color: #000;
               }
               table {
                 width: 100%;
                 border-collapse: collapse;
-                margin-bottom: 12px;
-              }
-              th, td {
-                border: 1px solid #e5e7eb;
-                padding: 5px;
-                text-align: left;
-                font-size: 6px;
-              }
-              th {
-                background-color: #f3f4f6;
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: 0.3px;
+                margin-bottom: 16px;
                 font-size: 5px;
               }
+              th, td {
+                border: 1px solid #333;
+                padding: 8px 10px;
+                text-align: left;
+                font-size: 6px;
+                color: #000;
+              }
+              th {
+                background-color: #e5e5e5;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.3px;
+                font-size: 6px;
+                color: #000;
+              }
               tr:nth-child(even) {
-                background-color: #f9fafb;
+                background-color: #f5f5f5;
               }
               .footer {
-                font-size: 6px;
-                color: #6b7280;
+                font-size: 10px;
+                color: #000;
                 text-align: center;
-                border-top: 1px solid #e5e7eb;
-                padding-top: 6px;
+                border-top: 1px solid #333;
+                padding-top: 8px;
               }
               .note {
                 font-style: italic;
-                color: #6b7280;
-                margin-bottom: 8px;
-                font-size: 6px;
+                color: #000;
+                margin-bottom: 12px;
+                font-size: 10px;
               }
               @media print {
                 body {
                   margin: 10mm;
+                  font-size: 10px;
+                  color: #000 !important;
+                  -webkit-print-color-adjust: exact;
+                  print-color-adjust: exact;
                 }
-                .note {
-                  color: #4b5563;
+                .company-name,
+                .subtitle,
+                .info-grid div,
+                .info-grid strong,
+                th,
+                td,
+                .footer,
+                .note,
+                .header h2 {
+                  color: #000 !important;
+                }
+                th {
+                  background-color: #e5e5e5 !important;
+                  -webkit-print-color-adjust: exact;
+                  print-color-adjust: exact;
+                }
+                tr:nth-child(even) {
+                  background-color: #f5f5f5 !important;
+                  -webkit-print-color-adjust: exact;
+                  print-color-adjust: exact;
                 }
               }
             </style>
@@ -416,11 +507,11 @@ const EmployeeLieuTimeTrackingModal = ({
               </div>
               <div>
                 <strong>Current Balance:</strong><br/>
-                ${formatTaxAmount(employeeSettings?.lieu_time_balance ?? employee?.lieu_time_balance ?? 0)} hrs
+                ${formatTaxAmount(effectiveLieuBalance)} hrs
               </div>
               <div>
                 <strong>Total Transactions:</strong><br/>
-                ${transactions.length}
+                ${transactionsWithRunningBalance.length}
               </div>
               <div>
                 <strong>Business ID:</strong><br/>
@@ -512,7 +603,7 @@ const EmployeeLieuTimeTrackingModal = ({
       setPrinting(false);
     }
   }, [
-    transactions,
+    transactionsWithRunningBalance,
     checkRateLimit,
     employee?.id,
     businessData?.timezone,
@@ -522,7 +613,7 @@ const EmployeeLieuTimeTrackingModal = ({
     employee?.first_name,
     employee?.last_name,
     employee?.email,
-    employeeSettings?.lieu_time_balance,
+    effectiveLieuBalance,
     formatTaxAmount,
     authUser?.email,
     businessData?.name
@@ -571,13 +662,6 @@ const EmployeeLieuTimeTrackingModal = ({
       }, 'high');
 
       const hoursAmount = parseFloat(transaction.hours_amount) || 0;
-      const currentBalance = parseFloat(
-        employeeSettings?.lieu_time_balance ??
-        employee?.lieu_time_balance ??
-        0
-      );
-      const newBalance = currentBalance - hoursAmount;
-      const nowIso = new Date().toISOString();
 
       const { error: deleteError } = await supabase
         .from('hrpayroll_lieu_time_transactions')
@@ -589,10 +673,14 @@ const EmployeeLieuTimeTrackingModal = ({
         throw deleteError;
       }
 
+      const combined = await loadLieuTimeTransactions();
+      const syncedBalance = deriveCurrentLieuBalance(combined) ?? (effectiveLieuBalance - hoursAmount);
+      const nowIso = new Date().toISOString();
+
       const { data: updatedUser, error: balanceError } = await supabase
         .from('users')
         .update({
-          lieu_time_balance: newBalance,
+          lieu_time_balance: syncedBalance,
           updated_at: nowIso
         })
         .eq('id', employee.id)
@@ -608,7 +696,7 @@ const EmployeeLieuTimeTrackingModal = ({
         employee_id: employee.id,
         transaction_id: transaction.id,
         hours_amount: transaction.hours_amount,
-        new_balance: updatedUser?.lieu_time_balance ?? newBalance,
+        new_balance: updatedUser?.lieu_time_balance ?? syncedBalance,
         deleted_by: authUser?.id
       }, 'critical');
 
@@ -620,16 +708,13 @@ const EmployeeLieuTimeTrackingModal = ({
         console.warn('Failed to record lieu_time_transaction_delete success action:', actionError);
       }
 
-      const latestBalance = updatedUser?.lieu_time_balance ?? newBalance;
+      const latestBalance = updatedUser?.lieu_time_balance ?? syncedBalance;
       setEmployeeSettings(prev => prev ? { ...prev, lieu_time_balance: latestBalance } : prev);
       if (onBalanceUpdate) {
         onBalanceUpdate(latestBalance);
       }
 
-      await Promise.all([
-        loadLieuTimeTransactions(),
-        loadEmployeeSettings()
-      ]);
+      await loadEmployeeSettings();
 
     } catch (error) {
       console.error('Error deleting lieu time transaction:', error);
@@ -662,7 +747,7 @@ const EmployeeLieuTimeTrackingModal = ({
     checkRateLimit,
     effectiveBusinessId,
     employee,
-    employeeSettings?.lieu_time_balance,
+    effectiveLieuBalance,
     loadEmployeeSettings,
     loadLieuTimeTransactions,
     logSecurityEvent,
@@ -745,7 +830,7 @@ const EmployeeLieuTimeTrackingModal = ({
       setError(null);
 
       const hoursAmount = parseFloat(manualEntry.hours_amount);
-      const currentBalance = employeeSettings?.lieu_time_balance || 0;
+      const currentBalance = effectiveLieuBalance;
       const newBalance = currentBalance + hoursAmount;
 
       // FIXED: Allow negative balances for payouts and adjustments
@@ -772,7 +857,7 @@ const EmployeeLieuTimeTrackingModal = ({
         created_by: authUser?.id
       };
 
-      const { data: newTransaction, error: transactionError } = await supabase
+      const { error: transactionError } = await supabase
         .from('hrpayroll_lieu_time_transactions')
         .insert(transactionData)
         .select()
@@ -780,10 +865,12 @@ const EmployeeLieuTimeTrackingModal = ({
 
       if (transactionError) throw transactionError;
 
-      // Update employee balance in users table
+      const combined = await loadLieuTimeTransactions();
+      const syncedBalance = deriveCurrentLieuBalance(combined) ?? newBalance;
+
       const { error: updateError } = await supabase
         .from('users')
-        .update({ lieu_time_balance: newBalance })
+        .update({ lieu_time_balance: syncedBalance })
         .eq('id', employee.id);
 
       if (updateError) throw updateError;
@@ -794,7 +881,7 @@ const EmployeeLieuTimeTrackingModal = ({
         employee_name: `${employee.first_name} ${employee.last_name}`,
         transaction_type: manualEntry.transaction_type,
         hours_amount: hoursAmount,
-        new_balance: newBalance,
+        new_balance: syncedBalance,
         description: manualEntry.description,
         business_id: effectiveBusinessId,
         created_by: authUser?.id
@@ -802,13 +889,10 @@ const EmployeeLieuTimeTrackingModal = ({
 
       await recordAction('lieu_time_manual_entry_success', true);
 
-      // Update local state
-      setEmployeeSettings(prev => ({ ...prev, lieu_time_balance: newBalance }));
-      setTransactions(prev => [newTransaction, ...prev]);
+      setEmployeeSettings(prev => ({ ...prev, lieu_time_balance: syncedBalance }));
 
-      // Notify parent of balance update
       if (onBalanceUpdate) {
-        onBalanceUpdate(newBalance);
+        onBalanceUpdate(syncedBalance);
       }
 
       // Reset form
@@ -830,7 +914,7 @@ const EmployeeLieuTimeTrackingModal = ({
   };
 
   const getBalanceStatus = () => {
-    const balance = employeeSettings?.lieu_time_balance || 0;
+    const balance = effectiveLieuBalance;
     if (balance >= 40) return 'WARNING';
     if (balance > 0) return 'POSITIVE';
     if (balance < 0) return 'NEGATIVE';
@@ -1178,7 +1262,7 @@ const EmployeeLieuTimeTrackingModal = ({
                         color: getBalanceColor()
                       }}
                     >
-                      {formatHoursDisplay(employeeSettings?.lieu_time_balance || 0)} hours
+                      {formatHoursDisplay(effectiveLieuBalance)} hours
                     </div>
                     <div style={styles.balanceLabel}>
                       Max Paid Hours: {formatTaxAmount(employeeSettings?.max_paid_hours_per_period || 0)} per period
@@ -1316,7 +1400,7 @@ const EmployeeLieuTimeTrackingModal = ({
                           <span>Description</span>
                           <span>Actions</span>
                         </div>
-                        {transactions.map((transaction, index) => (
+                        {transactionsWithRunningBalance.map((transaction, index) => (
                           <div key={transaction.id || index} style={styles.transactionItem}>
                             <span>{transaction.transaction_date ? new Date(transaction.transaction_date).toLocaleDateString() : '—'}</span>
                             <span 

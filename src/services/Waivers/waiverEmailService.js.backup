@@ -1,0 +1,384 @@
+// src/services/Waivers/WaiverEmailService.js
+// Email Service for Waivers
+// Sends waiver PDFs, links, and expiry reminders using existing mail system
+
+import { supabase } from '../../supabaseClient';
+import html2pdf from 'html2pdf.js';
+import waiverPDFService from './WaiverPDFService';
+import { emailSendingService } from '../../helpers/Mail/emailSendingService';
+
+class WaiverEmailService {
+  /**
+   * Send waiver PDF to customer after signing
+   * @param {string} waiverId - Waiver signature ID
+   * @param {object} options - Email options
+   * @returns {Promise<{success: boolean, messageId?: string}>}
+   */
+  async sendWaiverPDF(waiverId, options = {}) {
+    try {
+      // Load waiver data
+      const { data: waiver, error } = await supabase
+        .from('waiver_signatures')
+        .select(`
+          *,
+          waiver_templates:template_id (*),
+          businesses:business_id (name, business_email)
+        `)
+        .eq('id', waiverId)
+        .single();
+
+      if (error) throw error;
+      if (!waiver.email) {
+        throw new Error('No email address found for waiver');
+      }
+
+      // Generate PDF
+      const pdfResult = await waiverPDFService.generateWaiverPDF(waiverId);
+      
+      // Upload PDF to storage
+      const pdfUrl = await waiverPDFService.uploadPDFToStorage(waiverId, pdfResult.blob);
+
+      // Get business name
+      const businessName = waiver.businesses?.name || waiver.businesses?.business_name || 'Business';
+      const businessEmail = waiver.businesses?.business_email || 'noreply@tavari.com';
+
+      // Prepare email content
+      const firstName = waiver.first_name || 'Customer';
+      const subject = options.subject || `Your Waiver - ${businessName}`;
+      const htmlBody = this.generateWaiverEmailHTML(firstName, businessName, pdfUrl, waiver);
+      const textBody = this.generateWaiverEmailText(firstName, businessName, pdfUrl);
+
+      // Get or create contact
+      let contactId = await this.getOrCreateContact(waiver.business_id, {
+        email: waiver.email,
+        firstName: waiver.first_name,
+        lastName: waiver.last_name,
+        phone: waiver.phone_number
+      });
+
+      // Send email via mail system
+      // Use Supabase Edge Function for email with attachment
+      const { data: emailResult, error: emailError } = await supabase.functions.invoke('mail-send', {
+        body: {
+          to: waiver.email,
+          from: businessEmail,
+          fromName: businessName,
+          subject: subject,
+          html: htmlBody,
+          text: textBody,
+          attachments: [
+            {
+              filename: pdfResult.filename,
+              content: pdfResult.base64,
+              contentType: 'application/pdf'
+            }
+          ],
+          campaignId: null, // Single email, not a campaign
+          contactId: contactId
+        }
+      });
+
+      if (emailError) throw emailError;
+
+      // Log communication
+      if (contactId) {
+        await supabase.from('mail_contact_communications').insert({
+          contact_id: contactId,
+          communication_type: 'email',
+          direction: 'outbound',
+          subject: subject,
+          content: textBody,
+          status: 'sent'
+        });
+      }
+
+      return {
+        success: true,
+        messageId: emailResult?.messageId
+      };
+    } catch (error) {
+      console.error('[WaiverEmailService] Error sending waiver PDF:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Send waiver expiry reminder (30 days before expiry)
+   * @param {string} waiverId - Waiver signature ID
+   * @returns {Promise<{success: boolean}>}
+   */
+  async sendExpiryReminder(waiverId) {
+    try {
+      const { data: waiver, error } = await supabase
+        .from('waiver_signatures')
+        .select(`
+          *,
+          waiver_templates:template_id (*),
+          businesses:business_id (name, business_email)
+        `)
+        .eq('id', waiverId)
+        .single();
+
+      if (error) throw error;
+      if (!waiver.email || !waiver.expires_at) return { success: false, reason: 'No email or expiry date' };
+
+      const expiryDate = new Date(waiver.expires_at);
+      const businessName = waiver.businesses?.name || 'Business';
+      const businessEmail = waiver.businesses?.business_email || 'noreply@tavari.com';
+      const firstName = waiver.first_name || 'Customer';
+
+      const subject = `Waiver Expiry Reminder - ${businessName}`;
+      const htmlBody = this.generateExpiryReminderHTML(firstName, businessName, expiryDate, waiver);
+      const textBody = this.generateExpiryReminderText(firstName, businessName, expiryDate);
+
+      // Get or create contact
+      const contactId = await this.getOrCreateContact(waiver.business_id, {
+        email: waiver.email,
+        firstName: waiver.first_name,
+        lastName: waiver.last_name
+      });
+
+      // Send email
+      const { data: emailResult, error: emailError } = await supabase.functions.invoke('mail-send', {
+        body: {
+          to: waiver.email,
+          from: businessEmail,
+          fromName: businessName,
+          subject: subject,
+          html: htmlBody,
+          text: textBody,
+          contactId: contactId
+        }
+      });
+
+      if (emailError) throw emailError;
+
+      return { success: true };
+    } catch (error) {
+      console.error('[WaiverEmailService] Error sending expiry reminder:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Send waiver expiry notification (on expiry date)
+   * @param {string} waiverId - Waiver signature ID
+   * @returns {Promise<{success: boolean}>}
+   */
+  async sendExpiryNotification(waiverId) {
+    try {
+      const { data: waiver, error } = await supabase
+        .from('waiver_signatures')
+        .select(`
+          *,
+          businesses:business_id (name, business_email)
+        `)
+        .eq('id', waiverId)
+        .single();
+
+      if (error) throw error;
+      if (!waiver.email) return { success: false, reason: 'No email' };
+
+      const businessName = waiver.businesses?.name || 'Business';
+      const businessEmail = waiver.businesses?.business_email || 'noreply@tavari.com';
+      const firstName = waiver.first_name || 'Customer';
+
+      const subject = `Your Waiver Has Expired - ${businessName}`;
+      const htmlBody = this.generateExpiryNotificationHTML(firstName, businessName, waiver);
+      const textBody = this.generateExpiryNotificationText(firstName, businessName);
+
+      const contactId = await this.getOrCreateContact(waiver.business_id, {
+        email: waiver.email,
+        firstName: waiver.first_name,
+        lastName: waiver.last_name
+      });
+
+      const { data: emailResult, error: emailError } = await supabase.functions.invoke('mail-send', {
+        body: {
+          to: waiver.email,
+          from: businessEmail,
+          fromName: businessName,
+          subject: subject,
+          html: htmlBody,
+          text: textBody,
+          contactId: contactId
+        }
+      });
+
+      if (emailError) throw emailError;
+
+      return { success: true };
+    } catch (error) {
+      console.error('[WaiverEmailService] Error sending expiry notification:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get or create contact in mail_contacts
+   * @param {string} businessId
+   * @param {object} contactData
+   * @returns {Promise<string>} Contact ID
+   */
+  async getOrCreateContact(businessId, contactData) {
+    try {
+      // Try to find existing contact
+      const { data: existing } = await supabase
+        .from('mail_contacts')
+        .select('id')
+        .eq('business_id', businessId)
+        .eq('email', contactData.email)
+        .single();
+
+      if (existing) return existing.id;
+
+      // Create new contact
+      const { data: newContact, error } = await supabase
+        .from('mail_contacts')
+        .insert({
+          business_id: businessId,
+          email: contactData.email,
+          first_name: contactData.firstName,
+          last_name: contactData.lastName,
+          phone: contactData.phone,
+          subscribed: true
+        })
+        .select('id')
+        .single();
+
+      if (error) throw error;
+      return newContact.id;
+    } catch (error) {
+      console.error('[WaiverEmailService] Error getting/creating contact:', error);
+      return null;
+    }
+  }
+
+  generateWaiverEmailHTML(firstName, businessName, pdfUrl, waiver) {
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+    .button { display: inline-block; padding: 12px 24px; background-color: #4F46E5; color: white; text-decoration: none; border-radius: 6px; margin: 20px 0; }
+    .footer { margin-top: 30px; font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Your Waiver</h1>
+    <p>Dear ${firstName},</p>
+    <p>Thank you for signing your waiver with ${businessName}. A copy of your signed waiver is attached to this email.</p>
+    <p>You can also view your waiver online by clicking the link below:</p>
+    <a href="${pdfUrl}" class="button">View Waiver PDF</a>
+    <p>If you have any questions about your waiver, please contact ${businessName}.</p>
+    <div class="footer">
+      <p>This email was sent automatically. Please do not reply to this email.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+  }
+
+  generateWaiverEmailText(firstName, businessName, pdfUrl) {
+    return `Dear ${firstName},
+
+Thank you for signing your waiver with ${businessName}. A copy of your signed waiver is attached to this email.
+
+You can also view your waiver online at: ${pdfUrl}
+
+If you have any questions about your waiver, please contact ${businessName}.
+
+This email was sent automatically. Please do not reply to this email.`;
+  }
+
+  generateExpiryReminderHTML(firstName, businessName, expiryDate, waiver) {
+    const formattedDate = expiryDate.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+    .warning { background-color: #FEF3C7; border: 1px solid #FCD34D; padding: 15px; border-radius: 6px; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Waiver Expiry Reminder</h1>
+    <p>Dear ${firstName},</p>
+    <div class="warning">
+      <p><strong>Your waiver with ${businessName} will expire on ${formattedDate}.</strong></p>
+      <p>You will need to sign a new waiver after this date to continue participating.</p>
+    </div>
+    <p>If you have any questions, please contact ${businessName}.</p>
+  </div>
+</body>
+</html>`;
+  }
+
+  generateExpiryReminderText(firstName, businessName, expiryDate) {
+    const formattedDate = expiryDate.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+
+    return `Dear ${firstName},
+
+Your waiver with ${businessName} will expire on ${formattedDate}.
+
+You will need to sign a new waiver after this date to continue participating.
+
+If you have any questions, please contact ${businessName}.`;
+  }
+
+  generateExpiryNotificationHTML(firstName, businessName, waiver) {
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+    .warning { background-color: #FEE2E2; border: 1px solid #FCA5A5; padding: 15px; border-radius: 6px; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Waiver Expired</h1>
+    <p>Dear ${firstName},</p>
+    <div class="warning">
+      <p><strong>Your waiver with ${businessName} has expired.</strong></p>
+      <p>You will need to sign a new waiver before participating again.</p>
+    </div>
+    <p>If you have any questions, please contact ${businessName}.</p>
+  </div>
+</body>
+</html>`;
+  }
+
+  generateExpiryNotificationText(firstName, businessName) {
+    return `Dear ${firstName},
+
+Your waiver with ${businessName} has expired.
+
+You will need to sign a new waiver before participating again.
+
+If you have any questions, please contact ${businessName}.`;
+  }
+}
+
+export const waiverEmailService = new WaiverEmailService();
+export default waiverEmailService;

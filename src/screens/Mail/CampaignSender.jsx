@@ -1,6 +1,6 @@
 // screens/Mail/CampaignSender.jsx - WITH PERMISSION SYSTEM
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
   FiMail, FiUsers, FiSend, FiCheck, FiX, FiAlertTriangle, 
   FiRefreshCw, FiEye, FiSettings, FiBarChart2, FiClock,
@@ -9,7 +9,22 @@ import {
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import emailSendingService from '../../helpers/Mail/emailSendingService';
+import {
+  DEFAULT_GRADUAL_THROTTLE,
+  estimateGradualSendDays,
+  getTodayInTimeZone,
+  mergeThrottleFromSettings,
+  resolveRatePerMinute,
+  isWithinGradualSendWindow,
+  getGradualQueueScheduledFor,
+} from '../../helpers/Mail/campaignSendThrottle';
+import { getCampaignQueueHealth, CAMPAIGN_QUEUE_STALL_DAYS } from '../../helpers/Mail/campaignQueueHealth';
+import GradualSendWarningModal from '../../components/Mail/GradualSendWarningModal';
 import EmailPauseBanner, { blockEmailSendIfPaused } from '../../components/EmailPauseBanner';
+import TavariCheckbox from '../../components/UI/TavariCheckbox';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MailModuleTabs } from '../../components/Mail/MailModuleNavigation';
+import sessionPersistence from '../../services/SessionPersistence';
 
 // Permission System Imports
 import { usePermissions } from '../../hooks/usePermissions';
@@ -66,16 +81,25 @@ const CampaignSender = () => {
   const [campaign, setCampaign] = useState(null);
   const [contacts, setContacts] = useState([]);
   const [systemStatus, setSystemStatus] = useState({
-    sesQuota: { status: 'success', data: { canSend: true, sendQuota: 50000, sent24Hour: 0 } },
-    ipReputation: { status: 'success', data: { reputation: 'good', score: 90 } },
-    domainAuth: { status: 'success', data: { authenticated: true, canSend: true } },
-    compliance: { status: 'success', data: { canSend: true, complianceScore: 95 } }
+    loading: true,
+    senderProfile: null,
+    billing: null,
+    businessTimezone: 'America/Toronto',
+    campaignThrottle: null,
+    error: null
   });
+  const [queueHealth, setQueueHealth] = useState(null);
+  const [gradualResendModal, setGradualResendModal] = useState(null);
   const [testEmail, setTestEmail] = useState('');
   const [recipientSelection, setRecipientSelection] = useState('all');
   const [customContacts, setCustomContacts] = useState([]);
   const [sendingProgress, setSendingProgress] = useState(null);
   const [sendComplete, setSendComplete] = useState(false);
+  const [rolloutLoading, setRolloutLoading] = useState(false);
+  const [rolloutActionLoading, setRolloutActionLoading] = useState(false);
+  const [rolloutReportEmail, setRolloutReportEmail] = useState('');
+  const [activeRollout, setActiveRollout] = useState(null);
+  const [rolloutBatches, setRolloutBatches] = useState([]);
   
   // Refs to prevent infinite loops
   const campaignLoadedRef = useRef(false);
@@ -83,6 +107,8 @@ const CampaignSender = () => {
 
   // Get business ID consistently
   const getBusinessId = () => {
+    if (selectedBusinessId) return selectedBusinessId;
+    if (businessData?.id) return businessData.id;
     if (business?.id) return business.id;
     const stored = localStorage.getItem('businessId');
     if (stored) return stored;
@@ -95,6 +121,55 @@ const CampaignSender = () => {
   const canViewCampaigns = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
   const canSendCampaigns = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
   const canSendTestEmails = hasPermission('mail.campaigns.send') || hasElevatedPrivileges();
+  const hasRecordedMarketingConsent = (contact) =>
+    Boolean(contact?.consent_method && contact?.consent_timestamp);
+
+  const segmentScopedContacts = campaign?.target_segment
+    ? contacts.filter((contact) => Array.isArray(contact.segment_ids) && contact.segment_ids.includes(campaign.target_segment))
+    : contacts;
+
+  const selectedAudienceCount = recipientSelection === 'all'
+    ? segmentScopedContacts.length
+    : customContacts.length;
+
+  const getEligibleContactsForCurrentSelection = () => {
+    let targetContacts = segmentScopedContacts;
+    if (recipientSelection === 'custom') {
+      targetContacts = segmentScopedContacts.filter((contact) => customContacts.includes(contact.id));
+    }
+
+    const consentedContacts = targetContacts.filter(hasRecordedMarketingConsent);
+    const missingConsentCount = targetContacts.length - consentedContacts.length;
+    const filteredContacts = consentedContacts.filter(
+      (contact) => isSafeRecipient(contact.email) || isMailboxSimulator(contact.email)
+    );
+    const skippedCount = consentedContacts.length - filteredContacts.length;
+
+    return {
+      targetContacts,
+      consentedContacts,
+      filteredContacts,
+      missingConsentCount,
+      skippedCount,
+      eligibleRecipientCount: filteredContacts.length
+    };
+  };
+
+  useEffect(() => {
+    campaignLoadedRef.current = false;
+    contactsLoadedRef.current = false;
+    setCampaign(null);
+    setContacts([]);
+    setCustomContacts([]);
+    setSendComplete(false);
+    setSendingProgress(null);
+    setSystemStatus({
+      loading: true,
+      senderProfile: null,
+      billing: null,
+      error: null
+    });
+  }, [businessId, campaignId]);
 
   // Check permissions on mount
   useEffect(() => {
@@ -122,6 +197,35 @@ const CampaignSender = () => {
     if (!email || !email.includes('@')) return false;
     if (TEST_PATTERNS.some((p) => p.test(email))) return false;
     return true;
+  };
+
+  const isSessionNetworkError = (error) => {
+    const message = String(error?.message || error || '');
+    return (
+      message.includes('Failed to fetch') ||
+      message.includes('ERR_CONNECTION_CLOSED') ||
+      message.includes('refresh_token')
+    );
+  };
+
+  const ensureActiveSession = async () => {
+    try {
+      const { data: { session }, error } = await supabase.auth.getSession();
+      if (!error && session?.user) {
+        return session;
+      }
+    } catch (error) {
+      console.warn('Session check failed before campaign send:', error);
+    }
+
+    if (sessionPersistence.isPersistenceEnabled()) {
+      const restoreResult = await sessionPersistence.restoreSession();
+      if (restoreResult.restored && restoreResult.session?.user) {
+        return restoreResult.session;
+      }
+    }
+
+    throw new Error('Your session expired or lost connection. Please unlock or sign in again, then retry.');
   };
 
   // Load campaign data once
@@ -182,17 +286,60 @@ const CampaignSender = () => {
       console.log('Loading contacts for business:', businessId);
       
       try {
-        const { data, error } = await supabase
-          .from('mail_contacts')
-          .select('*')
-          .eq('business_id', businessId)
-          .eq('subscribed', true)
-          .order('created_at', { ascending: false });
+        const allContacts = [];
+        const pageSize = 1000;
+        let from = 0;
 
-        if (error) throw error;
-        
-        console.log('Contacts loaded:', data?.length || 0);
-        setContacts(data || []);
+        while (true) {
+          const { data, error } = await supabase
+            .from('mail_contacts')
+            .select(`
+              *,
+              segments:mail_contact_segment_memberships(segment_id)
+            `)
+            .eq('business_id', businessId)
+            .eq('subscribed', true)
+            .order('created_at', { ascending: false })
+            .order('id', { ascending: false })
+            .range(from, from + pageSize - 1);
+
+          if (error) throw error;
+
+          const batch = data || [];
+          allContacts.push(...batch);
+
+          if (batch.length < pageSize) {
+            break;
+          }
+
+          from += pageSize;
+        }
+
+        const uniqueContacts = [];
+        const seenContactIds = new Set();
+
+        for (const contact of allContacts) {
+          if (!contact?.id || seenContactIds.has(contact.id)) {
+            continue;
+          }
+
+          seenContactIds.add(contact.id);
+          uniqueContacts.push({
+            ...contact,
+            segment_ids: Array.isArray(contact.segments)
+              ? contact.segments.map((membership) => membership.segment_id).filter(Boolean)
+              : []
+          });
+        }
+
+        if (uniqueContacts.length !== allContacts.length) {
+          console.warn(
+            `Removed ${allContacts.length - uniqueContacts.length} duplicate contact row(s) while loading recipients.`
+          );
+        }
+
+        console.log('Contacts loaded:', uniqueContacts.length);
+        setContacts(uniqueContacts);
         contactsLoadedRef.current = true;
       } catch (error) {
         console.error('Error loading contacts:', error);
@@ -204,6 +351,167 @@ const CampaignSender = () => {
       loadContacts();
     }
   }, [businessId, authLoading, permissionsLoading, canViewCampaigns]);
+
+  useEffect(() => {
+    const loadSystemStatus = async () => {
+      if (!businessId || !canViewCampaigns) {
+        return;
+      }
+
+      setSystemStatus((prev) => ({
+        ...prev,
+        loading: true,
+        error: null
+      }));
+
+      try {
+        const [
+          { data: mailSettings, error: mailSettingsError },
+          { data: billing, error: billingError },
+          { data: businessRow, error: businessError },
+        ] = await Promise.all([
+          supabase
+            .from('mail_settings')
+            .select(
+              'from_name, from_email, business_address, daily_digest_timezone, campaign_throttle_window_start_hour, campaign_throttle_window_end_hour, campaign_throttle_initial_rate_per_minute, campaign_throttle_daily_increment, campaign_throttle_max_rate_per_minute',
+            )
+            .eq('business_id', businessId)
+            .maybeSingle(),
+          supabase
+            .from('mail_billing')
+            .select('status, emails_used, included_emails, overage_emails, billing_period_start, billing_period_end')
+            .eq('business_id', businessId)
+            .order('billing_period_start', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+          supabase
+            .from('businesses')
+            .select('timezone')
+            .eq('id', businessId)
+            .maybeSingle(),
+        ]);
+
+        if (businessError) {
+          console.warn('Business timezone could not be loaded:', businessError);
+        }
+
+        if (mailSettingsError) {
+          throw mailSettingsError;
+        }
+
+        if (billingError) {
+          console.warn('Billing status could not be loaded:', billingError);
+        }
+
+        const businessTimezone =
+          mailSettings?.daily_digest_timezone ||
+          businessRow?.timezone ||
+          'America/Toronto';
+
+        setSystemStatus({
+          loading: false,
+          senderProfile: mailSettings || null,
+          billing: billing || null,
+          businessTimezone,
+          campaignThrottle: mailSettings || null,
+          error: billingError?.message || null
+        });
+      } catch (error) {
+        console.error('Error loading sender system status:', error);
+        setSystemStatus({
+          loading: false,
+          senderProfile: null,
+          billing: null,
+          businessTimezone: 'America/Toronto',
+          error: error.message || 'Failed to load sender status'
+        });
+      }
+    };
+
+    if (!authLoading && !permissionsLoading) {
+      loadSystemStatus();
+    }
+  }, [businessId, authLoading, permissionsLoading, canViewCampaigns]);
+
+  useEffect(() => {
+    if (authUser?.email && !rolloutReportEmail) {
+      setRolloutReportEmail(authUser.email);
+    }
+  }, [authUser?.email, rolloutReportEmail]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshQueueHealth = async () => {
+      if (!campaign?.id || !['sending', 'scheduled'].includes(campaign?.status)) {
+        if (!cancelled) setQueueHealth(null);
+        return;
+      }
+      try {
+        const health = await getCampaignQueueHealth(campaign.id);
+        if (!cancelled) setQueueHealth(health);
+      } catch (error) {
+        console.warn('Queue health check failed:', error);
+      }
+    };
+    refreshQueueHealth();
+    const intervalId = window.setInterval(refreshQueueHealth, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [campaign?.id, campaign?.status]);
+
+  useEffect(() => {
+    const visibleContactIds = new Set(segmentScopedContacts.map((contact) => contact.id));
+    setCustomContacts((prev) => prev.filter((contactId) => visibleContactIds.has(contactId)));
+  }, [segmentScopedContacts]);
+
+  const loadRolloutState = async () => {
+    if (!businessId || !campaignId || !canViewCampaigns) {
+      return;
+    }
+
+    setRolloutLoading(true);
+    try {
+      const { data: rollout, error: rolloutError } = await supabase
+        .from('mail_campaign_rollouts')
+        .select('*')
+        .eq('business_id', businessId)
+        .eq('campaign_id', campaignId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (rolloutError) throw rolloutError;
+
+      setActiveRollout(rollout || null);
+
+      if (rollout?.id) {
+        const { data: batches, error: batchesError } = await supabase
+          .from('mail_campaign_rollout_batches')
+          .select('*')
+          .eq('rollout_id', rollout.id)
+          .order('batch_number', { ascending: false });
+
+        if (batchesError) throw batchesError;
+        setRolloutBatches(batches || []);
+      } else {
+        setRolloutBatches([]);
+      }
+    } catch (error) {
+      console.error('Error loading rollout state:', error);
+      setActiveRollout(null);
+      setRolloutBatches([]);
+    } finally {
+      setRolloutLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!authLoading && !permissionsLoading) {
+      loadRolloutState();
+    }
+  }, [businessId, campaignId, authLoading, permissionsLoading, canViewCampaigns]);
 
   // Send test email - WITH PAUSE PROTECTION & PERMISSIONS
   const handleSendTestEmail = async () => {
@@ -243,7 +551,7 @@ const CampaignSender = () => {
       }, 'medium');
 
       const testContact = {
-        id: 'test-contact',
+        id: null,
         email: testEmail,
         first_name: 'Test',
         last_name: 'User',
@@ -252,11 +560,12 @@ const CampaignSender = () => {
 
       const queueItem = {
         campaign_id: campaign.id,
-        contact_id: testContact.id,
+        contact_id: null,
         email_address: testContact.email,
         campaign: campaign,
         contact: testContact,
-        business_id: businessId
+        business_id: businessId,
+        emailType: 'transactional'
       };
 
       const result = await emailSendingService.sendSingleEmail(queueItem);
@@ -278,8 +587,41 @@ const CampaignSender = () => {
     }
   };
 
+  const requestGradualSend = async () => {
+    if (!canSendCampaigns || !campaign || !businessId) return;
+    if (blockEmailSendIfPaused('Gradual campaign send')) return;
+
+    const alreadyActive =
+      campaign.status === 'sending' ||
+      campaign.status === 'scheduled' ||
+      Boolean(campaign.send_throttle_enabled);
+
+    if (alreadyActive) {
+      try {
+        const health = await getCampaignQueueHealth(campaign.id);
+        const { data: sentRows, error: sentError } = await supabase
+          .from('mail_campaign_sends')
+          .select('contact_id')
+          .eq('campaign_id', campaign.id)
+          .eq('status', 'sent');
+        if (sentError) throw sentError;
+        const sentIds = new Set((sentRows || []).map((row) => row.contact_id).filter(Boolean));
+        const { filteredContacts } = getEligibleContactsForCurrentSelection();
+        const unsentCount = filteredContacts.filter((contact) => !sentIds.has(contact.id)).length;
+        setGradualResendModal({ health, unsentCount });
+        return;
+      } catch (error) {
+        console.error('Gradual resend precheck failed:', error);
+        toast.error('Could not verify send progress. Try again in a moment.');
+        return;
+      }
+    }
+
+    handleSendCampaign({ gradualThrottle: true });
+  };
+
   // Send campaign - WITH PAUSE PROTECTION & PERMISSIONS
-  const handleSendCampaign = async () => {
+  const handleSendCampaign = async (options = {}) => {
     // Permission check
     if (!canSendCampaigns) {
       toast.error('You do not have permission to send campaigns');
@@ -300,8 +642,15 @@ const CampaignSender = () => {
     // Determine recipients
     let selectedContactIds = [];
     let recipientCount = 0;
+    const overrideContactIds = Array.isArray(options.overrideContactIds)
+      ? options.overrideContactIds
+      : null;
+    const recipientModeLabel = options.recipientModeLabel || recipientSelection;
 
-    if (recipientSelection === 'all') {
+    if (overrideContactIds && overrideContactIds.length > 0) {
+      recipientCount = overrideContactIds.length;
+      selectedContactIds = overrideContactIds;
+    } else if (recipientSelection === 'all') {
       recipientCount = contacts.length;
       selectedContactIds = null; // Send to all
     } else {
@@ -314,57 +663,162 @@ const CampaignSender = () => {
       return;
     }
 
+    let {
+      targetContacts,
+      consentedContacts,
+      filteredContacts,
+      missingConsentCount,
+      skippedCount,
+      eligibleRecipientCount
+    } = overrideContactIds && overrideContactIds.length > 0
+      ? (() => {
+          const targetContacts = contacts.filter((contact) => overrideContactIds.includes(contact.id));
+          const consentedContacts = targetContacts.filter(hasRecordedMarketingConsent);
+          const filteredContacts = consentedContacts.filter(
+            (contact) => isSafeRecipient(contact.email) || isMailboxSimulator(contact.email)
+          );
+          return {
+            targetContacts,
+            consentedContacts,
+            filteredContacts,
+            missingConsentCount: targetContacts.length - consentedContacts.length,
+            skippedCount: consentedContacts.length - filteredContacts.length,
+            eligibleRecipientCount: filteredContacts.length
+          };
+        })()
+      : getEligibleContactsForCurrentSelection();
+
+    const gradualThrottle = options.gradualThrottle === true;
+    const sendTimezone = systemStatus.businessTimezone || 'America/Toronto';
+    const throttleProfile = mergeThrottleFromSettings(
+      systemStatus.campaignThrottle,
+      campaign,
+      sendTimezone,
+    );
+
+    if (gradualThrottle && options.forceRequeue) {
+      const { data: sentRows, error: sentError } = await supabase
+        .from('mail_campaign_sends')
+        .select('contact_id')
+        .eq('campaign_id', campaign.id)
+        .eq('status', 'sent');
+      if (sentError) throw sentError;
+      const sentIds = new Set((sentRows || []).map((row) => row.contact_id).filter(Boolean));
+      filteredContacts = filteredContacts.filter((contact) => !sentIds.has(contact.id));
+      eligibleRecipientCount = filteredContacts.length;
+      if (eligibleRecipientCount === 0) {
+        toast.error('All eligible contacts have already been sent this campaign.');
+        setGradualResendModal(null);
+        return;
+      }
+    }
+
+    if (eligibleRecipientCount === 0) {
+      toast.error('No recipients remain after consent and deliverability checks');
+      return;
+    }
+
+    const todayRate = gradualThrottle
+      ? resolveRatePerMinute(
+          {
+            ...throttleProfile,
+            send_throttle_started_on:
+              campaign.send_throttle_started_on || getTodayInTimeZone(sendTimezone),
+          },
+          new Date(),
+          sendTimezone,
+        )
+      : null;
+    const gradualEstimate = gradualThrottle
+      ? estimateGradualSendDays(eligibleRecipientCount, sendTimezone)
+      : null;
+
     const confirmSend = window.confirm(
-      `Send "${campaign.name}" to ${recipientCount} recipients?\n\n` +
-      `This will cost approximately $${(recipientCount * 0.0025).toFixed(4)} ` +
-      `and cannot be undone.`
+      gradualThrottle
+        ? `Start gradual send for "${campaign.name}"?\n\n` +
+          `Eligible recipients: ${eligibleRecipientCount}\n` +
+          `Day 1 rate: ${todayRate}/min (${DEFAULT_GRADUAL_THROTTLE.windowStartHour}:00–${DEFAULT_GRADUAL_THROTTLE.windowEndHour}:00 ${sendTimezone})\n` +
+          `Then +${DEFAULT_GRADUAL_THROTTLE.dailyIncrement}/min each day (up to ${DEFAULT_GRADUAL_THROTTLE.maxRatePerMinute}/min).\n` +
+          `Estimated ~${gradualEstimate?.days || '?'} day(s) to finish.\n` +
+          `${missingConsentCount > 0 ? `${missingConsentCount} skipped (no consent).\n` : ''}` +
+          `${skippedCount > 0 ? `${skippedCount} skipped (invalid/test).\n` : ''}` +
+          `Automations and transactional mail are not throttled.`
+        : `Send "${campaign.name}" to ${eligibleRecipientCount} eligible recipients${recipientModeLabel === 'ses_simulator' ? ' (SES simulators)' : ''}?\n\n` +
+          `${missingConsentCount > 0 ? `${missingConsentCount} contact(s) will be skipped for missing consent.\n` : ''}` +
+          `${skippedCount > 0 ? `${skippedCount} contact(s) will be skipped for invalid/test addresses.\n\n` : '\n'}` +
+          `This will cost approximately $${(eligibleRecipientCount * 0.0025).toFixed(4)} ` +
+          `and cannot be undone.`
     );
 
     if (!confirmSend) return;
 
     setLoading(true);
-    setSendingProgress({ sent: 0, total: recipientCount, errors: [] });
+    setSendingProgress({ sent: 0, total: eligibleRecipientCount, errors: [] });
 
     try {
+      await ensureActiveSession();
       console.log('Starting campaign send...');
 
       await logSecurityEvent('campaign_send_initiated', {
         action: 'send_campaign',
         campaign_id: campaign.id,
         campaign_name: campaign.name,
-        recipient_count: recipientCount,
-        recipient_selection: recipientSelection,
+        recipient_count: eligibleRecipientCount,
+        recipient_selection: recipientModeLabel,
         business_id: businessId,
         user_id: authUser?.id,
-        estimated_cost: (recipientCount * 0.0025).toFixed(4)
+        estimated_cost: (eligibleRecipientCount * 0.0025).toFixed(4)
       }, 'critical');
 
       // Update campaign with recipient count
-      await supabase
-        .from('mail_campaigns')
-        .update({
-          total_recipients: recipientCount,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', campaign.id)
-        .eq('business_id', businessId);
+      const updateCampaignRecipientCount = async () => {
+        const { error } = await supabase
+          .from('mail_campaigns')
+          .update({
+            total_recipients: eligibleRecipientCount,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', campaign.id)
+          .eq('business_id', businessId);
+
+        if (error) throw error;
+      };
+
+      try {
+        await updateCampaignRecipientCount();
+      } catch (error) {
+        if (!isSessionNetworkError(error)) throw error;
+        await ensureActiveSession();
+        await updateCampaignRecipientCount();
+      }
 
       // Queue campaign for sending - WITH EMAIL FILTERING
       console.log('Queueing campaign for sending...');
-      
-      // Get contacts to send to
-      let targetContacts = contacts;
-      if (selectedContactIds && selectedContactIds.length > 0) {
-        targetContacts = contacts.filter(c => selectedContactIds.includes(c.id));
+
+      if (missingConsentCount > 0) {
+        console.warn(`Skipping ${missingConsentCount} contact(s) with no recorded marketing consent.`);
+        toast(`Skipped ${missingConsentCount} contact(s) missing recorded consent`, { icon: '⚠️' });
       }
 
       // Filter out unsafe/test/invalid emails; allow SES mailbox simulator for testing
-      const filteredContacts = targetContacts.filter(c => isSafeRecipient(c.email) || isMailboxSimulator(c.email));
-      const skippedCount = targetContacts.length - filteredContacts.length;
       if (skippedCount > 0) {
         console.warn(`Skipping ${skippedCount} contact(s) due to invalid/test emails to protect SES reputation.`);
-        toast.warning(`Skipped ${skippedCount} invalid/test email addresses`);
+        toast(`Skipped ${skippedCount} invalid/test email addresses`, { icon: '⚠️' });
       }
+
+      if (filteredContacts.length === 0) {
+        throw new Error('No recipients remain after consent and deliverability checks');
+      }
+
+      await supabase
+        .from('mail_sending_queue')
+        .delete()
+        .eq('campaign_id', campaign.id)
+        .in('status', ['queued', 'processing']);
+
+      const queueScheduledFor = gradualThrottle
+        ? getGradualQueueScheduledFor(throttleProfile)
+        : new Date().toISOString();
 
       // Create queue items directly
       const queueItems = filteredContacts.map(contact => ({
@@ -373,92 +827,128 @@ const CampaignSender = () => {
         email_address: contact.email,
         status: 'queued',
         priority: 5,
-        scheduled_for: new Date().toISOString(),
-        business_id: businessId
+        scheduled_for: queueScheduledFor,
+        business_id: businessId,
+        personalized_content: emailSendingService.personalizeEmailContent(campaign.content_html || '', contact, businessId)
       }));
 
-      // Insert queue items directly
-      const { data: queuedItems, error: queueError } = await supabase
-        .from('mail_sending_queue')
-        .insert(queueItems)
-        .select();
+      // Insert queue items in chunks so large sends do not blow up the request
+      const queuedItems = [];
+      const queueInsertBatchSize = 1000;
+      for (let i = 0; i < queueItems.length; i += queueInsertBatchSize) {
+        const batch = queueItems.slice(i, i + queueInsertBatchSize);
+        const insertQueueBatch = async () => {
+          const { data: queuedBatch, error: queueError } = await supabase
+            .from('mail_sending_queue')
+            .insert(batch)
+            .select();
 
-      if (queueError) throw queueError;
+          if (queueError) throw queueError;
+          return queuedBatch || [];
+        };
 
-      // Update campaign status
-      await supabase
-        .from('mail_campaigns')
-        .update({
-          status: 'sending',
-          sent_at: new Date().toISOString()
-        })
-        .eq('id', campaign.id)
-        .eq('business_id', businessId);
-
-      // Process the sending queue
-      let totalProcessed = 0;
-      let totalSent = 0;
-      let totalErrors = [];
-
-      while (totalProcessed < filteredContacts.length) {
-        console.log('Processing send queue...');
-        
-        const batchResult = await emailSendingService.processSendingQueue(5);
-        
-        totalProcessed += batchResult.processed;
-        totalSent += batchResult.sent;
-        totalErrors.push(...(batchResult.errors || []));
-
-        setSendingProgress({
-          sent: totalSent,
-          total: filteredContacts.length,
-          processed: totalProcessed,
-          errors: totalErrors
-        });
-
-        // Break if no more items to process
-        if (batchResult.processed === 0) {
-          console.log('No more items to process');
-          break;
+        try {
+          const queuedBatch = await insertQueueBatch();
+          queuedItems.push(...queuedBatch);
+        } catch (error) {
+          if (!isSessionNetworkError(error)) throw error;
+          await ensureActiveSession();
+          const queuedBatch = await insertQueueBatch();
+          queuedItems.push(...queuedBatch);
         }
-
-        // Small delay between batches
-        await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
-      console.log(`Campaign send complete: ${totalSent}/${filteredContacts.length} sent`);
-      
-      setSendComplete(true);
+      // Update campaign status
+      const throttleFields = gradualThrottle
+        ? {
+            send_throttle_enabled: true,
+            send_throttle_started_on:
+              campaign.send_throttle_started_on || getTodayInTimeZone(sendTimezone),
+            send_throttle_timezone: sendTimezone,
+          }
+        : { send_throttle_enabled: false };
+
+      const markCampaignSending = async () => {
+        const { error } = await supabase
+          .from('mail_campaigns')
+          .update({
+            status: 'sending',
+            total_recipients: filteredContacts.length,
+            updated_at: new Date().toISOString(),
+            ...throttleFields,
+          })
+          .eq('id', campaign.id)
+          .eq('business_id', businessId);
+
+        if (error) throw error;
+      };
+
+      try {
+        await markCampaignSending();
+      } catch (error) {
+        if (!isSessionNetworkError(error)) throw error;
+        await ensureActiveSession();
+        await markCampaignSending();
+      }
+
+      // Kick off one backend pass only inside the gradual send window (7am–7pm local by default).
+      let kickoffResult = { sent: 0, processed: 0, failed: 0, errors: [] };
+      const inGradualWindow = !gradualThrottle || isWithinGradualSendWindow(throttleProfile);
+      if (inGradualWindow) {
+        try {
+          kickoffResult = await emailSendingService.processSendingQueue(50, businessId);
+        } catch (error) {
+          if (!isSessionNetworkError(error)) throw error;
+          await ensureActiveSession();
+          kickoffResult = await emailSendingService.processSendingQueue(50, businessId);
+        }
+      } else if (gradualThrottle) {
+        toast(
+          `Queued for gradual send. Delivery starts at ${throttleProfile.send_throttle_window_start_hour}:00 ${sendTimezone} (outside the send window right now).`,
+          { icon: 'ℹ️', duration: 8000 },
+        );
+      }
+
       setSendingProgress({
-        sent: totalSent,
+        sent: kickoffResult.sent || 0,
         total: filteredContacts.length,
-        processed: totalProcessed,
-        errors: totalErrors,
+        processed: kickoffResult.processed || 0,
+        queued: queueItems.length,
+        errors: kickoffResult.errors || [],
+        background: true,
         complete: true
       });
+      setSendComplete((kickoffResult.failed || 0) === 0);
 
-      // Update campaign status
-      await supabase
-        .from('mail_campaigns')
-        .update({
-          status: 'sent',
-          emails_sent: totalSent,
-          sent_at: new Date().toISOString()
-        })
-        .eq('id', campaign.id)
-        .eq('business_id', businessId);
+      if ((kickoffResult.sent || 0) === 0 && (kickoffResult.failed || 0) > 0) {
+        throw new Error(kickoffResult.errors?.[0] || 'Initial queue processing failed for all recipients');
+      }
 
       await logSecurityEvent('campaign_send_completed', {
-        action: 'campaign_sent',
+        action: 'campaign_queued_for_background_send',
         campaign_id: campaign.id,
-        total_sent: totalSent,
-        total_failed: totalErrors.length,
+        queued_count: queueItems.length,
+        initial_processed: kickoffResult.processed || 0,
+        initial_sent: kickoffResult.sent || 0,
+        initial_failed: kickoffResult.failed || 0,
         business_id: businessId,
         user_id: authUser?.id
       }, 'high');
 
-      toast.success(`Campaign sent successfully to ${totalSent} recipients!`);
-      await recordAction('campaign_sent', true, campaign.id);
+      if ((kickoffResult.failed || 0) > 0) {
+        toast.error(`Campaign queued with issues: ${kickoffResult.sent || 0} sent, ${kickoffResult.failed || 0} failed in the initial pass.`);
+        await recordAction('campaign_sent', false, campaign.id);
+      } else if (gradualThrottle) {
+        setGradualResendModal(null);
+        toast.success(
+          `Gradual send: ${filteredContacts.length} queued at ${todayRate}/min today (${throttleProfile.send_throttle_window_start_hour}:00–${throttleProfile.send_throttle_window_end_hour}:00).`,
+        );
+        await recordAction('campaign_sent', true, campaign.id);
+        setCampaign((current) => (current ? { ...current, ...throttleFields, status: 'sending' } : current));
+      } else {
+        toast.success(`Campaign queued for delivery to ${filteredContacts.length} recipients.`);
+        await recordAction('campaign_sent', true, campaign.id);
+      }
 
     } catch (error) {
       console.error('Campaign send error:', error);
@@ -479,6 +969,156 @@ const CampaignSender = () => {
     }
   };
 
+  const handleStartRollout = async () => {
+    if (!canSendCampaigns || !campaign || !businessId) {
+      toast.error('You do not have permission to start a rollout');
+      return;
+    }
+
+    if (blockEmailSendIfPaused('Staged rollout')) return;
+
+    const reportEmail = rolloutReportEmail.trim().toLowerCase();
+    if (!reportEmail) {
+      toast.error('Enter the report email that should receive batch approvals');
+      return;
+    }
+
+    const validation = await validateInput(reportEmail, 'email', 'campaign_rollout_report_email');
+    if (!validation.valid) {
+      toast.error(validation.error || 'Invalid report email');
+      return;
+    }
+
+    const {
+      filteredContacts,
+      missingConsentCount,
+      skippedCount,
+      eligibleRecipientCount
+    } = getEligibleContactsForCurrentSelection();
+
+    if (eligibleRecipientCount === 0) {
+      toast.error('No recipients remain after consent and deliverability checks');
+      return;
+    }
+
+    const confirmStart = window.confirm(
+      `Start staged rollout for "${campaign.name}"?\n\n` +
+      `Batch plan: 50, 150, 300, 600 then doubling after approval.\n` +
+      `Eligible recipients available: ${eligibleRecipientCount}\n` +
+      `${missingConsentCount > 0 ? `Missing consent skipped: ${missingConsentCount}\n` : ''}` +
+      `${skippedCount > 0 ? `Invalid/test skipped: ${skippedCount}\n` : ''}` +
+      `A report will be emailed to ${reportEmail} after each 60 minute review window.`
+    );
+
+    if (!confirmStart) return;
+
+    setRolloutActionLoading(true);
+    try {
+      await ensureActiveSession();
+      const { data, error } = await supabase.functions.invoke('mail-rollout-manager', {
+        body: {
+          action: 'start',
+          businessId,
+          campaignId: campaign.id,
+          reportEmail,
+          waitMinutes: 60,
+          batchSizes: [50, 150, 300, 600],
+          contactIds: filteredContacts.map((contact) => contact.id)
+        }
+      });
+
+      if (error || data?.ok === false) {
+        throw error || new Error(data?.error || 'Failed to start staged rollout');
+      }
+
+      toast.success('Staged rollout started. Batch 1 has been queued.');
+      setSendComplete(false);
+      setSendingProgress(null);
+      await loadRolloutState();
+    } catch (error) {
+      console.error('Error starting staged rollout:', error);
+      toast.error(error.message || 'Failed to start staged rollout');
+    } finally {
+      setRolloutActionLoading(false);
+    }
+  };
+
+  const handleApproveNextBatch = async () => {
+    if (!activeRollout?.id || !campaign || !businessId) {
+      toast.error('No rollout is waiting for approval');
+      return;
+    }
+
+    const confirmApprove = window.confirm(
+      `Approve the next staged batch for "${campaign.name}"?`
+    );
+
+    if (!confirmApprove) return;
+
+    setRolloutActionLoading(true);
+    try {
+      await ensureActiveSession();
+      const { data, error } = await supabase.functions.invoke('mail-rollout-manager', {
+        body: {
+          action: 'approve_next_batch',
+          rolloutId: activeRollout.id,
+          campaignId: campaign.id,
+          businessId
+        }
+      });
+
+      if (error || data?.ok === false) {
+        throw error || new Error(data?.error || 'Failed to approve the next batch');
+      }
+
+      toast.success(data?.completed ? 'Rollout is complete.' : 'Next batch approved and queued.');
+      await loadRolloutState();
+    } catch (error) {
+      console.error('Error approving rollout batch:', error);
+      toast.error(error.message || 'Failed to approve the next batch');
+    } finally {
+      setRolloutActionLoading(false);
+    }
+  };
+
+  const handleStopRollout = async () => {
+    if (!activeRollout?.id || !businessId) {
+      toast.error('No active rollout to stop');
+      return;
+    }
+
+    const confirmStop = window.confirm(
+      'Stop this staged rollout? No further batches will be sent until you start a new rollout.'
+    );
+
+    if (!confirmStop) return;
+
+    setRolloutActionLoading(true);
+    try {
+      await ensureActiveSession();
+      const { data, error } = await supabase.functions.invoke('mail-rollout-manager', {
+        body: {
+          action: 'stop',
+          rolloutId: activeRollout.id,
+          businessId,
+          stopReason: 'Stopped from campaign sender'
+        }
+      });
+
+      if (error || data?.ok === false) {
+        throw error || new Error(data?.error || 'Failed to stop staged rollout');
+      }
+
+      toast.success('Staged rollout stopped.');
+      await loadRolloutState();
+    } catch (error) {
+      console.error('Error stopping staged rollout:', error);
+      toast.error(error.message || 'Failed to stop staged rollout');
+    } finally {
+      setRolloutActionLoading(false);
+    }
+  };
+
   // Handle custom contact selection
   const handleCustomContactToggle = (contactId) => {
     setCustomContacts(prev => 
@@ -490,25 +1130,76 @@ const CampaignSender = () => {
 
   // Calculate estimated cost
   const getEstimatedCost = () => {
-    const count = recipientSelection === 'all' ? contacts.length : customContacts.length;
+    const count = selectedAudienceCount;
     return (count * 0.0025).toFixed(4);
   };
 
   // Get status icon
-  const getStatusIcon = (status, data) => {
-    return <FiCheck style={{ color: '#4caf50' }} />; // Always success
+  const getStatusIcon = (status) => {
+    if (status === 'success') {
+      return <FiCheck style={{ color: '#4caf50' }} />;
+    }
+    if (status === 'warning') {
+      return <FiAlertTriangle style={{ color: '#ff9800' }} />;
+    }
+    if (status === 'loading') {
+      return <FiRefreshCw style={{ color: '#2196f3' }} />;
+    }
+    return <FiX style={{ color: '#f44336' }} />;
   };
 
   // Get status text
-  const getStatusText = (status, data) => {
-    return 'Ready'; // Always ready
+  const getStatusText = (status) => {
+    if (status === 'success') return 'Ready';
+    if (status === 'warning') return 'Needs Attention';
+    if (status === 'loading') return 'Loading';
+    return 'Blocked';
   };
+
+  const senderDisplayName =
+    systemStatus.senderProfile?.from_name?.trim() ||
+    businessData?.name?.trim() ||
+    business?.name?.trim() ||
+    '';
+
+  const senderProfileStatus = systemStatus.loading
+    ? 'loading'
+    : systemStatus.senderProfile?.from_email && senderDisplayName
+      ? 'success'
+      : 'warning';
+
+  const billingStatus = systemStatus.loading
+    ? 'loading'
+    : !systemStatus.billing
+      ? 'warning'
+      : systemStatus.billing.status === 'active'
+        ? 'success'
+        : 'error';
+
+  const complianceStatus = systemStatus.loading
+    ? 'loading'
+    : systemStatus.senderProfile?.business_address
+      ? 'success'
+      : 'warning';
+
+  const audienceStatus = segmentScopedContacts.length > 0 ? 'success' : 'warning';
+  const isResendFlow =
+    campaign?.status === 'sent' ||
+    campaign?.status === 'failed' ||
+    campaign?.status === 'partial_failure';
+  const senderPageTitle = isResendFlow ? 'Send Campaign Again' : 'Send Campaign';
+  const senderPageSubtitle = isResendFlow
+    ? 'Review recipients and resend this campaign'
+    : 'Configure and send your email campaign';
+  const sendNowLabel = isResendFlow ? 'Send Campaign Again' : 'Send Campaign Now';
 
   if (authLoading || permissionsLoading) {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.loadingState}>
             <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
             <p>Loading campaign sender...</p>
@@ -523,6 +1214,8 @@ const CampaignSender = () => {
       <POSAuthWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.errorState}>
             <FiAlertCircle style={styles.errorIcon} />
             <h2>Authentication Error</h2>
@@ -538,15 +1231,17 @@ const CampaignSender = () => {
       <POSAuthWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.errorState}>
             <FiX style={styles.errorIcon} />
             <h2>Campaign Not Found</h2>
             <p>The requested campaign could not be found or you don't have access to it.</p>
             <button 
               style={styles.backButton}
-              onClick={() => navigate('/dashboard/mail')}
+              onClick={() => navigate('/dashboard/mail/campaigns')}
             >
-              Back to Mail Dashboard
+              Back to Campaigns
             </button>
           </div>
         </div>
@@ -559,6 +1254,8 @@ const CampaignSender = () => {
       <POSAuthWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.loadingState}>
             <FiRefreshCw style={{ ...styles.loadingIcon, animation: 'spin 1s linear infinite' }} />
             <p>Loading campaign...</p>
@@ -571,17 +1268,54 @@ const CampaignSender = () => {
   // Permission-based sending capability
   const canSend = campaign && businessId && canSendCampaigns;
   const canSendTest = campaign && businessId && testEmail.trim() && canSendTestEmails;
+  const latestRolloutBatch = rolloutBatches[0] || null;
+  const rolloutEligibleSummary = getEligibleContactsForCurrentSelection();
+  const rolloutIsActive =
+    activeRollout && ['waiting_for_report', 'awaiting_approval'].includes(activeRollout.status);
+  const showApproveButton =
+    rolloutIsActive &&
+    activeRollout?.status === 'awaiting_approval' &&
+    latestRolloutBatch?.status === 'awaiting_approval';
+  const sendTimezone = systemStatus.businessTimezone || 'America/Toronto';
+  const throttleProfile = mergeThrottleFromSettings(
+    systemStatus.campaignThrottle,
+    campaign,
+    sendTimezone,
+  );
+  const gradualEligibleCount = rolloutEligibleSummary.eligibleRecipientCount;
+  const gradualDayEstimate = estimateGradualSendDays(gradualEligibleCount, sendTimezone);
+  const campaignThrottleActive =
+    Boolean(campaign?.send_throttle_enabled) &&
+    (campaign?.status === 'sending' || campaign?.status === 'scheduled');
+  const currentThrottleRate = campaignThrottleActive
+    ? resolveRatePerMinute(throttleProfile, new Date(), sendTimezone)
+    : throttleProfile.send_throttle_initial_rate_per_minute;
+  const queueStalled = Boolean(queueHealth?.stalled);
 
   return (
     <POSAuthWrapper>
       <SecurityWrapper>
         <div style={styles.container}>
           <EmailPauseBanner />
+          <MailModuleHeader />
+          <MailModuleTabs />
+
+          {queueStalled && (
+            <div style={styles.stallBanner} role="alert">
+              <FiAlertTriangle style={styles.warningIcon} />
+              <div>
+                <strong>Send pipeline stalled</strong> — no queue activity for {CAMPAIGN_QUEUE_STALL_DAYS}+ days
+                but {queueHealth.pending} email(s) are still waiting ({queueHealth.sent} sent so far).
+                Check Mail settings (pause/test mode), SES limits, and Email History. The campaign stays{' '}
+                <em>sending</em> until the queue finishes; it will not show as Sent until then.
+              </div>
+            </div>
+          )}
           
           <div style={styles.header}>
             <div style={styles.titleSection}>
-              <h1 style={styles.title}>Send Campaign: {campaign.name}</h1>
-              <p style={styles.subtitle}>Configure and send your email campaign</p>
+              <h1 style={styles.title}>{senderPageTitle}: {campaign.name}</h1>
+              <p style={styles.subtitle}>{senderPageSubtitle}</p>
             </div>
             <button 
               style={styles.previewButton}
@@ -603,7 +1337,7 @@ const CampaignSender = () => {
             </div>
           )}
 
-          {/* System Status - Always Show Success */}
+          {/* System Status */}
           <div style={styles.statusSection}>
             <h2 style={styles.sectionTitle}>
               <FiSettings style={styles.sectionIcon} />
@@ -612,40 +1346,62 @@ const CampaignSender = () => {
             <div style={styles.statusGrid}>
               <div style={styles.statusCard}>
                 <div style={styles.statusHeader}>
-                  {getStatusIcon('success')}
-                  <span style={styles.statusTitle}>SES Quota</span>
+                  {getStatusIcon(senderProfileStatus)}
+                  <span style={styles.statusTitle}>Sender Profile</span>
                 </div>
-                <div style={styles.statusText}>Ready</div>
+                <div style={styles.statusText}>{getStatusText(senderProfileStatus)}</div>
                 <div style={styles.statusDetails}>
-                  {systemStatus.sesQuota.data.sent24Hour || 0}/{systemStatus.sesQuota.data.sendQuota || 50000} sent today
+                  {systemStatus.loading
+                    ? 'Loading sender settings...'
+                    : systemStatus.senderProfile?.from_email
+                      ? `${senderDisplayName || 'Mailer'} <${systemStatus.senderProfile.from_email}>`
+                      : 'Missing from name or from email in mail settings'}
                 </div>
               </div>
 
               <div style={styles.statusCard}>
                 <div style={styles.statusHeader}>
-                  {getStatusIcon('success')}
-                  <span style={styles.statusTitle}>IP Reputation</span>
+                  {getStatusIcon(billingStatus)}
+                  <span style={styles.statusTitle}>Billing</span>
                 </div>
-                <div style={styles.statusText}>Ready</div>
-                <div style={styles.statusDetails}>Good reputation</div>
+                <div style={styles.statusText}>{getStatusText(billingStatus)}</div>
+                <div style={styles.statusDetails}>
+                  {systemStatus.loading
+                    ? 'Loading billing status...'
+                    : systemStatus.billing
+                      ? `${systemStatus.billing.status} · ${systemStatus.billing.emails_used || 0}/${systemStatus.billing.included_emails || 0} used`
+                      : 'Billing record will be created automatically on first send'}
+                </div>
               </div>
 
               <div style={styles.statusCard}>
                 <div style={styles.statusHeader}>
-                  {getStatusIcon('success')}
-                  <span style={styles.statusTitle}>Domain Auth</span>
-                </div>
-                <div style={styles.statusText}>Ready</div>
-                <div style={styles.statusDetails}>Verified</div>
-              </div>
-
-              <div style={styles.statusCard}>
-                <div style={styles.statusHeader}>
-                  {getStatusIcon('success')}
+                  {getStatusIcon(complianceStatus)}
                   <span style={styles.statusTitle}>Compliance</span>
                 </div>
-                <div style={styles.statusText}>Ready</div>
-                <div style={styles.statusDetails}>95%</div>
+                <div style={styles.statusText}>{getStatusText(complianceStatus)}</div>
+                <div style={styles.statusDetails}>
+                  {systemStatus.loading
+                    ? 'Checking campaign footer and sender address...'
+                    : systemStatus.senderProfile?.business_address
+                      ? 'Business address present and unsubscribe footer is injected automatically'
+                      : 'Missing business address in mail settings'}
+                </div>
+              </div>
+
+              <div style={styles.statusCard}>
+                <div style={styles.statusHeader}>
+                  {getStatusIcon(audienceStatus)}
+                  <span style={styles.statusTitle}>Audience</span>
+                </div>
+                <div style={styles.statusText}>{getStatusText(audienceStatus)}</div>
+                <div style={styles.statusDetails}>
+                  {contacts.length > 0
+                    ? campaign?.target_segment
+                      ? `${segmentScopedContacts.length} saved-list contact${segmentScopedContacts.length === 1 ? '' : 's'} available`
+                      : `${contacts.length} subscribed contact${contacts.length === 1 ? '' : 's'} available`
+                    : 'No subscribed contacts available to send'}
+                </div>
               </div>
             </div>
           </div>
@@ -660,13 +1416,15 @@ const CampaignSender = () => {
               <div style={styles.billingItem}>
                 <span style={styles.billingLabel}>Current period usage:</span>
                 <span style={styles.billingValue}>
-                  {systemStatus.sesQuota.data?.sent24Hour || 0} / {systemStatus.sesQuota.data?.sendQuota || 50000}
+                  {systemStatus.billing
+                    ? `${systemStatus.billing.emails_used || 0} / ${systemStatus.billing.included_emails || 0}`
+                    : 'Unavailable'}
                 </span>
               </div>
               <div style={styles.billingItem}>
                 <span style={styles.billingLabel}>Target recipients:</span>
                 <span style={styles.billingValue}>
-                  {recipientSelection === 'all' ? contacts.length : customContacts.length}
+                  {selectedAudienceCount}
                 </span>
               </div>
               <div style={styles.billingItem}>
@@ -732,6 +1490,11 @@ const CampaignSender = () => {
             </h3>
             
             <div style={styles.recipientOptions}>
+              {campaign?.target_segment && (
+                <div style={styles.segmentTargetNotice}>
+                  This campaign is limited to its saved send list. "All" means all contacts in that list, and custom selection is limited to the same list.
+                </div>
+              )}
               <label style={styles.recipientOption}>
                 <input
                   type="radio"
@@ -743,9 +1506,13 @@ const CampaignSender = () => {
                   disabled={!canSendCampaigns}
                 />
                 <div style={styles.recipientContent}>
-                  <div style={styles.recipientTitle}>All Subscribed Contacts</div>
+                  <div style={styles.recipientTitle}>
+                    {campaign?.target_segment ? 'All Contacts In Saved List' : 'All Subscribed Contacts'}
+                  </div>
                   <div style={styles.recipientDescription}>
-                    Send to all {contacts.length} subscribed contacts
+                    {campaign?.target_segment
+                      ? `Send to all ${segmentScopedContacts.length} contacts in this campaign's saved list`
+                      : `Send to all ${contacts.length} subscribed contacts`}
                   </div>
                 </div>
               </label>
@@ -763,7 +1530,9 @@ const CampaignSender = () => {
                 <div style={styles.recipientContent}>
                   <div style={styles.recipientTitle}>Custom Selection</div>
                   <div style={styles.recipientDescription}>
-                    Choose specific contacts ({customContacts.length} selected)
+                    {campaign?.target_segment
+                      ? `Choose specific contacts from this saved list (${customContacts.length} selected)`
+                      : `Choose specific contacts (${customContacts.length} selected)`}
                   </div>
                 </div>
               </label>
@@ -776,7 +1545,7 @@ const CampaignSender = () => {
                   <div>
                     <button 
                       style={styles.selectAllButton}
-                      onClick={() => setCustomContacts(contacts.map(c => c.id))}
+                      onClick={() => setCustomContacts(segmentScopedContacts.map(c => c.id))}
                       disabled={!canSendCampaigns}
                     >
                       Select All
@@ -791,14 +1560,21 @@ const CampaignSender = () => {
                   </div>
                 </div>
                 <div style={styles.contactsGrid}>
-                  {contacts.map(contact => (
-                    <label key={contact.id} style={styles.contactItem}>
-                      <input
-                        type="checkbox"
+                  {segmentScopedContacts.map(contact => (
+                    <div
+                      key={contact.id}
+                      style={{
+                        ...styles.contactItem,
+                        ...(customContacts.includes(contact.id) ? styles.contactItemSelected : {})
+                      }}
+                    >
+                      <TavariCheckbox
                         checked={customContacts.includes(contact.id)}
                         onChange={() => handleCustomContactToggle(contact.id)}
-                        style={styles.contactCheckbox}
                         disabled={!canSendCampaigns}
+                        appearance="custom"
+                        size="md"
+                        style={styles.contactCheckboxContainer}
                       />
                       <div style={styles.contactInfo}>
                         <div style={styles.contactEmail}>{contact.email}</div>
@@ -809,9 +1585,138 @@ const CampaignSender = () => {
                           }
                         </div>
                       </div>
-                    </label>
+                    </div>
                   ))}
                 </div>
+              </div>
+            )}
+          </div>
+
+          <div style={styles.rolloutSection}>
+            <h3 style={styles.sectionTitle}>
+              <FiClock style={styles.sectionIcon} />
+              Staged Rollout
+            </h3>
+            <p style={styles.rolloutDescription}>
+              Send this campaign in controlled batches of 50, 150, 300, 600, then double each approved batch. The system waits 60 minutes, emails a report, and never reuses a recipient already included in the rollout.
+            </p>
+
+            <div style={styles.rolloutControls}>
+              <div style={styles.rolloutField}>
+                <label style={styles.rolloutLabel}>Report Email</label>
+                <input
+                  type="email"
+                  style={styles.rolloutInput}
+                  value={rolloutReportEmail}
+                  onChange={(e) => setRolloutReportEmail(e.target.value)}
+                  placeholder="Enter approval report email"
+                  disabled={rolloutActionLoading || rolloutIsActive}
+                />
+              </div>
+              <div style={styles.rolloutSummaryBox}>
+                <div style={styles.rolloutSummaryLabel}>Eligible recipients</div>
+                <div style={styles.rolloutSummaryValue}>{rolloutEligibleSummary.eligibleRecipientCount}</div>
+                <div style={styles.rolloutSummaryMeta}>
+                  {rolloutEligibleSummary.missingConsentCount} missing consent skipped · {rolloutEligibleSummary.skippedCount} invalid/test skipped
+                </div>
+              </div>
+            </div>
+
+            {rolloutLoading ? (
+              <div style={styles.rolloutStatusNote}>Loading rollout status...</div>
+            ) : rolloutIsActive ? (
+              <div style={styles.rolloutActiveCard}>
+                <div style={styles.rolloutActiveHeader}>
+                  <div>
+                    <div style={styles.rolloutStatusPill}>{String(activeRollout.status || 'unknown').replace(/_/g, ' ')}</div>
+                    <h4 style={styles.rolloutActiveTitle}>Current rollout</h4>
+                    <p style={styles.rolloutActiveMeta}>
+                      Report email: {activeRollout.report_email || 'Not set'} · Total pool: {activeRollout.total_candidate_recipients || 0}
+                    </p>
+                  </div>
+                  <div style={styles.rolloutActionGroup}>
+                    <button
+                      style={styles.secondaryActionButton}
+                      onClick={loadRolloutState}
+                      disabled={rolloutActionLoading}
+                    >
+                      Refresh
+                    </button>
+                    {showApproveButton && (
+                      <button
+                        style={styles.approveRolloutButton}
+                        onClick={handleApproveNextBatch}
+                        disabled={rolloutActionLoading}
+                      >
+                        {rolloutActionLoading ? 'Approving...' : 'Approve Next Batch'}
+                      </button>
+                    )}
+                    {['waiting_for_report', 'awaiting_approval'].includes(activeRollout.status) && (
+                      <button
+                        style={styles.stopRolloutButton}
+                        onClick={handleStopRollout}
+                        disabled={rolloutActionLoading}
+                      >
+                        Stop Rollout
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {latestRolloutBatch && (
+                  <div style={styles.rolloutBatchCard}>
+                    <div style={styles.rolloutBatchTitle}>Latest batch</div>
+                    <div style={styles.rolloutBatchGrid}>
+                      <div><strong>Batch #</strong><br />{latestRolloutBatch.batch_number}</div>
+                      <div><strong>Requested</strong><br />{latestRolloutBatch.requested_size}</div>
+                      <div><strong>Actual</strong><br />{latestRolloutBatch.actual_size}</div>
+                      <div><strong>Status</strong><br />{String(latestRolloutBatch.status || '').replace(/_/g, ' ')}</div>
+                      <div><strong>Delivery success</strong><br />{latestRolloutBatch.delivery_success_count || 0}</div>
+                      <div><strong>Bounces</strong><br />{latestRolloutBatch.bounced_count || 0}</div>
+                      <div><strong>Complaints</strong><br />{latestRolloutBatch.complaint_count || 0}</div>
+                      <div><strong>Unsubscribes</strong><br />{latestRolloutBatch.unsubscribe_count || 0}</div>
+                      <div><strong>Opens</strong><br />{latestRolloutBatch.opened_count || 0}</div>
+                      <div><strong>Clicks</strong><br />{latestRolloutBatch.clicked_count || 0}</div>
+                    </div>
+                    {latestRolloutBatch.scheduled_report_at && latestRolloutBatch.status === 'awaiting_report' && (
+                      <div style={styles.rolloutStatusNote}>
+                        Waiting for the 60 minute report window to finish before approval is available.
+                      </div>
+                    )}
+                    {latestRolloutBatch.report_error && (
+                      <div style={styles.rolloutErrorNote}>
+                        Report email issue: {latestRolloutBatch.report_error}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={styles.rolloutInactiveCard}>
+                <p style={styles.rolloutStatusNote}>
+                  {activeRollout
+                    ? `Latest rollout status: ${String(activeRollout.status || 'unknown').replace(/_/g, ' ')}.`
+                    : 'No staged rollout is active for this campaign.'}
+                </p>
+                {latestRolloutBatch && !rolloutIsActive && (
+                  <div style={{ ...styles.rolloutBatchGrid, marginBottom: '16px', textAlign: 'left' }}>
+                    <div><strong>Last batch</strong><br />#{latestRolloutBatch.batch_number}</div>
+                    <div><strong>Delivery success</strong><br />{latestRolloutBatch.delivery_success_count || 0}</div>
+                    <div><strong>Bounces</strong><br />{latestRolloutBatch.bounced_count || 0}</div>
+                    <div><strong>Complaints</strong><br />{latestRolloutBatch.complaint_count || 0}</div>
+                  </div>
+                )}
+                <button
+                  style={{
+                    ...styles.startRolloutButton,
+                    opacity: canSend && !rolloutActionLoading ? 1 : 0.5,
+                    cursor: canSend && !rolloutActionLoading ? 'pointer' : 'not-allowed'
+                  }}
+                  onClick={handleStartRollout}
+                  disabled={!canSend || rolloutActionLoading || rolloutEligibleSummary.eligibleRecipientCount === 0}
+                >
+                  {rolloutActionLoading ? 'Starting rollout...' : 'Start Staged Rollout'}
+                </button>
               </div>
             )}
           </div>
@@ -832,9 +1737,9 @@ const CampaignSender = () => {
                 />
               </div>
               <div style={styles.progressStats}>
-                <span>{sendingProgress.sent} / {sendingProgress.total} sent</span>
+                <span>{sendingProgress.sent} / {sendingProgress.total} sent so far</span>
                 <span>{sendingProgress.errors?.length || 0} errors</span>
-                {sendingProgress.complete && <span style={{ color: '#4caf50' }}>Complete</span>}
+                {sendingProgress.complete && <span style={{ color: '#4caf50' }}>{sendingProgress.background ? 'Background processing active' : 'Complete'}</span>}
               </div>
               {sendingProgress.errors?.length > 0 && (
                 <div style={styles.errorsList}>
@@ -854,8 +1759,52 @@ const CampaignSender = () => {
             </div>
           )}
 
-          {/* Send Campaign Button */}
-          <PermissionGate 
+          <PermissionGate
+            permission="mail.campaigns.send"
+            fallback={null}
+          >
+            <div style={styles.gradualSection}>
+              <h3 style={styles.sectionTitle}>
+                <FiClock style={styles.sectionIcon} />
+                Gradual warmup send
+              </h3>
+              <p style={styles.rolloutDescription}>
+                Spread this campaign with a daily ramp: {throttleProfile.send_throttle_initial_rate_per_minute}/min today, +{throttleProfile.send_throttle_daily_increment}/min per day up to {throttleProfile.send_throttle_max_rate_per_minute}/min ({throttleProfile.send_throttle_window_start_hour}:00–{throttleProfile.send_throttle_window_end_hour}:00 {sendTimezone}).{' '}
+                <Link to="/dashboard/mail/settings?tab=campaign-sending" style={styles.settingsLink}>
+                  Edit rates in Mail Settings → Campaign sending
+                </Link>
+              </p>
+              {campaignThrottleActive && (
+                <div style={styles.gradualActiveCard}>
+                  <div style={styles.rolloutStatusPill}>gradual send active</div>
+                  <p style={styles.rolloutActiveMeta}>
+                    Today: <strong>{currentThrottleRate}/min</strong> · Started {campaign.send_throttle_started_on || 'today'}
+                  </p>
+                </div>
+              )}
+              {!campaignThrottleActive && !rolloutIsActive && gradualEligibleCount > 0 && (
+                <p style={styles.rolloutStatusNote}>
+                  ~{gradualDayEstimate.days} day(s) for {gradualEligibleCount} eligible recipients.
+                </p>
+              )}
+              {!campaignThrottleActive && (
+                <button
+                  type="button"
+                  style={{
+                    ...styles.gradualSendButton,
+                    opacity: canSend && !loading && !rolloutIsActive && gradualEligibleCount > 0 ? 1 : 0.5,
+                  }}
+                  onClick={requestGradualSend}
+                  disabled={!canSend || loading || rolloutIsActive || gradualEligibleCount === 0}
+                >
+                  {loading ? <FiRefreshCw style={styles.spinningIcon} /> : <FiClock style={styles.buttonIcon} />}
+                  Start gradual send ({throttleProfile.send_throttle_initial_rate_per_minute}/min today)
+                </button>
+              )}
+            </div>
+          </PermissionGate>
+
+          <PermissionGate
             permission="mail.campaigns.send"
             fallback={
               <div style={styles.sendSection}>
@@ -872,12 +1821,22 @@ const CampaignSender = () => {
                 <div style={styles.sendSummary}>
                   <h3>Ready to Send</h3>
                   <p>
-                    This campaign will be sent to {recipientSelection === 'all' ? contacts.length : customContacts.length} recipients.
+                    This campaign will be sent to {selectedAudienceCount} recipients.
                     <br />
                     Estimated cost: <strong>${getEstimatedCost()}</strong>
                   </p>
+                  {rolloutIsActive && (
+                    <p style={styles.rolloutErrorNote}>
+                      A staged rollout is already active for this campaign. Finish or stop it before using the full-send path.
+                    </p>
+                  )}
+                  {campaignThrottleActive && (
+                    <p style={styles.rolloutErrorNote}>
+                      Gradual send is active for this campaign. Use Send Campaign Now only if you intend to disable the ramp (not recommended mid-send).
+                    </p>
+                  )}
                   <p style={styles.sendWarning}>
-                    This action cannot be undone. The campaign will be sent immediately.
+                    This action cannot be undone. The campaign will be queued immediately and continue sending in the background (up to 100/min, not throttled).
                   </p>
                 </div>
                 
@@ -887,7 +1846,13 @@ const CampaignSender = () => {
                     opacity: canSend && !loading ? 1 : 0.5
                   }}
                   onClick={handleSendCampaign}
-                  disabled={!canSend || loading || (recipientSelection === 'custom' && customContacts.length === 0)}
+                  disabled={
+                    !canSend ||
+                    loading ||
+                    (recipientSelection === 'custom' && customContacts.length === 0) ||
+                    rolloutIsActive ||
+                    campaignThrottleActive
+                  }
                 >
                   {loading ? (
                     <>
@@ -897,7 +1862,7 @@ const CampaignSender = () => {
                   ) : (
                     <>
                       <FiPlay style={styles.buttonIcon} />
-                      Send Campaign Now
+                      {sendNowLabel}
                     </>
                   )}
                 </button>
@@ -909,9 +1874,10 @@ const CampaignSender = () => {
           {sendComplete && sendingProgress && (
             <div style={styles.completeSection}>
               <FiCheck style={styles.completeIcon} />
-              <h2>Campaign Sent Successfully!</h2>
+              <h2>Campaign Queued Successfully!</h2>
               <p>
-                Your campaign "{campaign.name}" has been sent to {sendingProgress.sent} recipients.
+                Your campaign "{campaign.name}" has been queued for {sendingProgress.total} recipients.
+                {sendingProgress.sent > 0 ? ` ${sendingProgress.sent} email(s) were already processed in the initial backend pass.` : ''}
               </p>
               <div style={styles.completeActions}>
                 <button 
@@ -923,14 +1889,27 @@ const CampaignSender = () => {
                 </button>
                 <button 
                   style={styles.backToDashboardButton}
-                  onClick={() => navigate('/dashboard/mail')}
+                  onClick={() => navigate('/dashboard/mail/campaigns')}
                 >
-                  Back to Mail Dashboard
+                  Back to Campaigns
                 </button>
               </div>
             </div>
           )}
+
         </div>
+
+        <GradualSendWarningModal
+          open={Boolean(gradualResendModal)}
+          campaignName={campaign?.name}
+          queueHealth={gradualResendModal?.health}
+          remainingToQueue={gradualResendModal?.unsentCount ?? 0}
+          onCancel={() => setGradualResendModal(null)}
+          onConfirm={() => {
+            setGradualResendModal(null);
+            handleSendCampaign({ gradualThrottle: true, forceRequeue: true });
+          }}
+        />
       </SecurityWrapper>
     </POSAuthWrapper>
   );
@@ -1209,11 +2188,15 @@ const styles = {
     border: '1px solid #eee',
     borderRadius: '6px',
     cursor: 'pointer',
+    backgroundColor: '#fff',
     transition: 'background-color 0.2s ease',
   },
-  contactCheckbox: {
-    width: '16px',
-    height: '16px',
+  contactItemSelected: {
+    backgroundColor: '#f0f8f8',
+    border: '1px solid #80cbc4',
+  },
+  contactCheckboxContainer: {
+    flexShrink: 0,
   },
   contactInfo: {
     flex: 1,
@@ -1226,6 +2209,229 @@ const styles = {
   contactName: {
     fontSize: '12px',
     color: '#666',
+  },
+  rolloutSection: {
+    backgroundColor: '#f8f8ff',
+    border: '1px solid #d7d9ff',
+    borderRadius: '12px',
+    padding: '25px',
+    marginBottom: '30px',
+  },
+  stallBanner: {
+    display: 'flex',
+    gap: '12px',
+    alignItems: 'flex-start',
+    padding: '16px 20px',
+    margin: '0 0 20px',
+    borderRadius: '10px',
+    backgroundColor: '#fef2f2',
+    border: '1px solid #fecaca',
+    color: '#991b1b',
+    fontSize: '14px',
+    lineHeight: 1.5,
+  },
+  gradualSection: {
+    backgroundColor: '#f0fdf9',
+    border: '1px solid #99f6e4',
+    borderRadius: '12px',
+    padding: '25px',
+    marginBottom: '30px',
+  },
+  gradualActiveCard: {
+    backgroundColor: 'white',
+    border: '1px solid #5eead4',
+    borderRadius: '10px',
+    padding: '16px',
+    marginBottom: '16px',
+  },
+  gradualSendButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '12px 20px',
+    borderRadius: '8px',
+    border: 'none',
+    backgroundColor: '#0d9488',
+    color: 'white',
+    fontWeight: 700,
+    fontSize: '13px',
+    cursor: 'pointer',
+  },
+  rolloutDescription: {
+    fontSize: '13px',
+    color: '#4b5563',
+    marginTop: 0,
+    marginBottom: '20px',
+    lineHeight: 1.6,
+  },
+  settingsLink: {
+    color: '#0d9488',
+    fontWeight: 600,
+    textDecoration: 'underline',
+  },
+  rolloutControls: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(260px, 1.5fr) minmax(220px, 1fr)',
+    gap: '16px',
+    marginBottom: '20px',
+  },
+  rolloutField: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  rolloutLabel: {
+    fontSize: '14px',
+    fontWeight: 'bold',
+    color: '#374151',
+  },
+  rolloutInput: {
+    padding: '12px 14px',
+    borderRadius: '8px',
+    border: '1px solid #cbd5e1',
+    fontSize: '18px',
+    width: '100%',
+    boxSizing: 'border-box',
+  },
+  rolloutSummaryBox: {
+    backgroundColor: 'white',
+    border: '1px solid #dbeafe',
+    borderRadius: '10px',
+    padding: '16px',
+  },
+  rolloutSummaryLabel: {
+    fontSize: '48px',
+    color: '#6b7280',
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    marginBottom: '6px',
+  },
+  rolloutSummaryValue: {
+    fontSize: '14px',
+    fontWeight: 'bold',
+    color: '#111827',
+    marginBottom: '6px',
+  },
+  rolloutSummaryMeta: {
+    fontSize: '14px',
+    color: '#6b7280',
+  },
+  rolloutActiveCard: {
+    backgroundColor: 'white',
+    border: '1px solid #d1d5db',
+    borderRadius: '12px',
+    padding: '20px',
+  },
+  rolloutInactiveCard: {
+    backgroundColor: 'white',
+    border: '1px dashed #cbd5e1',
+    borderRadius: '12px',
+    padding: '20px',
+    textAlign: 'center',
+  },
+  rolloutActiveHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: '16px',
+    alignItems: 'flex-start',
+    marginBottom: '18px',
+  },
+  rolloutActiveTitle: {
+    margin: '8px 0 4px',
+    fontSize: '16px',
+    color: '#111827',
+  },
+  rolloutActiveMeta: {
+    margin: 0,
+    fontSize: '48px',
+    color: '#6b7280',
+  },
+  rolloutStatusPill: {
+    display: 'inline-block',
+    padding: '4px 10px',
+    borderRadius: '999px',
+    backgroundColor: '#ede9fe',
+    color: '#5b21b6',
+    fontSize: '48px',
+    fontWeight: 'bold',
+    textTransform: 'capitalize',
+  },
+  rolloutActionGroup: {
+    display: 'flex',
+    gap: '10px',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+  },
+  secondaryActionButton: {
+    backgroundColor: 'white',
+    color: '#374151',
+    border: '1px solid #d1d5db',
+    borderRadius: '8px',
+    padding: '10px 14px',
+    fontSize: '14px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+  },
+  approveRolloutButton: {
+    backgroundColor: '#111827',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    padding: '10px 16px',
+    fontSize: '10px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+  },
+  stopRolloutButton: {
+    backgroundColor: '#fee2e2',
+    color: '#991b1b',
+    border: '1px solid #fecaca',
+    borderRadius: '8px',
+    padding: '10px 16px',
+    fontSize: '10px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+  },
+  startRolloutButton: {
+    backgroundColor: '#111827',
+    color: 'white',
+    border: 'none',
+    borderRadius: '10px',
+    padding: '14px 22px',
+    fontSize: '12px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+  },
+  rolloutBatchCard: {
+    borderTop: '1px solid #e5e7eb',
+    paddingTop: '18px',
+  },
+  rolloutBatchTitle: {
+    fontSize: '12px',
+    fontWeight: 'bold',
+    color: '#111827',
+    marginBottom: '12px',
+  },
+  rolloutBatchGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+    gap: '12px',
+    fontSize: '10px',
+    color: '#374151',
+  },
+  rolloutStatusNote: {
+    marginTop: '14px',
+    fontSize: '10px',
+    color: '#6b7280',
+  },
+  rolloutErrorNote: {
+    marginTop: '14px',
+    fontSize: '10px',
+    color: '#b91c1c',
+    backgroundColor: '#fef2f2',
+    border: '1px solid #fecaca',
+    borderRadius: '8px',
+    padding: '10px 12px',
   },
   progressSection: {
     backgroundColor: '#f0f8f8',
@@ -1251,7 +2457,7 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: 'bold',
     color: '#333',
   },
@@ -1263,12 +2469,12 @@ const styles = {
     borderRadius: '8px',
   },
   errorItem: {
-    fontSize: '13px',
+    fontSize: '10px',
     color: '#d32f2f',
     marginBottom: '5px',
   },
   moreErrors: {
-    fontSize: '13px',
+    fontSize: '10px',
     color: '#666',
     fontStyle: 'italic',
   },
@@ -1285,7 +2491,7 @@ const styles = {
   },
   sendWarning: {
     color: '#f57c00',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: 'bold',
   },
   sendButton: {
@@ -1294,7 +2500,7 @@ const styles = {
     border: 'none',
     borderRadius: '12px',
     padding: '20px 40px',
-    fontSize: '18px',
+    fontSize: '14px',
     fontWeight: 'bold',
     cursor: 'pointer',
     display: 'flex',
@@ -1313,7 +2519,7 @@ const styles = {
     marginBottom: '30px',
   },
   completeIcon: {
-    fontSize: '48px',
+    fontSize: '38px',
     color: '#4caf50',
     marginBottom: '20px',
   },
@@ -1329,7 +2535,7 @@ const styles = {
     border: 'none',
     borderRadius: '8px',
     padding: '12px 24px',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: 'bold',
     cursor: 'pointer',
     display: 'flex',
@@ -1342,12 +2548,12 @@ const styles = {
     border: '2px solid #ddd',
     borderRadius: '8px',
     padding: '12px 24px',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: 'bold',
     cursor: 'pointer',
   },
   spinningIcon: {
-    fontSize: '16px',
+    fontSize: '13px',
     animation: 'spin 1s linear infinite',
   },
   loadingState: {
@@ -1359,7 +2565,7 @@ const styles = {
     color: '#666',
   },
   loadingIcon: {
-    fontSize: '48px',
+    fontSize: '38px',
     marginBottom: '20px',
     color: 'teal',
   },
@@ -1372,7 +2578,7 @@ const styles = {
     textAlign: 'center',
   },
   errorIcon: {
-    fontSize: '48px',
+    fontSize: '38px',
     color: '#f44336',
     marginBottom: '20px',
   },
@@ -1382,7 +2588,7 @@ const styles = {
     border: 'none',
     borderRadius: '8px',
     padding: '12px 24px',
-    fontSize: '14px',
+    fontSize: '11px',
     fontWeight: 'bold',
     cursor: 'pointer',
     marginTop: '20px',
@@ -1390,3 +2596,4 @@ const styles = {
 };
 
 export default CampaignSender;
+

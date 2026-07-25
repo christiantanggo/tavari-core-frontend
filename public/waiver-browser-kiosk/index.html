@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Waiver Kiosk · Tavari</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    html.pw-kiosk-fullscreen,
+    html.pw-kiosk-fullscreen body {
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #111827;
+      background: #f8f9fa;
+      -webkit-font-smoothing: antialiased;
+    }
+    .pw-container {
+      min-height: 100vh;
+      min-height: 100dvh;
+      height: 100vh;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 1.5rem;
+      padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+      overflow-x: hidden;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-y: contain;
+    }
+    .pw-card {
+      width: 100%;
+      max-width: 760px;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 12px;
+      box-shadow: 0 0 0 1px #e5e7eb, 0 10px 30px rgba(17, 24, 39, 0.08);
+      padding: 1.5rem;
+      flex-shrink: 0;
+      margin: auto 0;
+    }
+    .pw-card--compact { max-width: 520px; }
+    .pw-header { text-align: center; margin-bottom: 1.25rem; }
+    .pw-logo {
+      display: block;
+      margin: 0 auto 1rem;
+      max-width: 220px;
+      max-height: 120px;
+      object-fit: contain;
+    }
+    .pw-logo-button {
+      cursor: pointer;
+    }
+    .pw-title {
+      margin: 0 0 0.5rem;
+      font-size: 2rem;
+      line-height: 1.2;
+    }
+    .pw-subtitle {
+      margin: 0;
+      color: #4b5563;
+      line-height: 1.45;
+      font-size: 1rem;
+    }
+    .pw-body { width: 100%; }
+    .pw-form { display: flex; flex-direction: column; gap: 1rem; }
+    .pw-grid {
+      display: flex;
+      flex-wrap: wrap;
+      margin: -0.5rem;
+    }
+    .pw-grid > div {
+      width: calc(50% - 1rem);
+      margin: 0.5rem;
+    }
+    .pw-field-full {
+      width: calc(100% - 1rem) !important;
+    }
+    .pw-label {
+      display: block;
+      margin-bottom: 0.45rem;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #111827;
+    }
+    .pw-input, .pw-select, .pw-textarea {
+      width: 100%;
+      padding: 0.9rem;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 1rem;
+      background: #fff;
+      color: #111827;
+      -webkit-appearance: none;
+    }
+    .pw-textarea { min-height: 110px; resize: vertical; }
+    .pw-input:focus, .pw-select:focus, .pw-textarea:focus, .pw-otp:focus {
+      outline: none;
+      border-color: #008080;
+      box-shadow: 0 0 0 3px rgba(0, 128, 128, 0.15);
+    }
+    .pw-otp {
+      width: 100%;
+      padding: 1rem;
+      border: 2px solid #008080;
+      border-radius: 8px;
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: 0.45rem;
+      text-align: center;
+    }
+    .pw-note, .pw-soft, .pw-success, .pw-error, .pw-warning {
+      border-radius: 8px;
+      padding: 0.9rem 1rem;
+      line-height: 1.45;
+      font-size: 0.95rem;
+    }
+    .pw-note { background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb; }
+    .pw-soft { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+    .pw-success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .pw-warning { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+    .pw-error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+    .pw-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      justify-content: flex-end;
+      margin-top: 0.25rem;
+    }
+    /* Template select: always stack activity buttons (kiosk / wide screens included) */
+    .pw-template-select-list {
+      display: flex !important;
+      flex-direction: column !important;
+      flex-wrap: nowrap !important;
+      align-items: stretch !important;
+      justify-content: flex-start !important;
+      gap: 12px !important;
+      margin-top: 0.25rem;
+    }
+    .pw-template-select-list > .pw-template-option,
+    .pw-template-select-list > .pw-btn-secondary {
+      width: 100% !important;
+      min-width: 0 !important;
+      box-sizing: border-box;
+    }
+    .pw-btn, .pw-btn-secondary, .pw-btn-danger {
+      min-width: 120px;
+      border: none;
+      border-radius: 8px;
+      padding: 0.95rem 1.15rem;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .pw-btn { background: #008080; color: #fff; }
+    .pw-btn-secondary { background: #e5e7eb; color: #111827; }
+    .pw-btn-danger { background: #ef4444; color: #fff; }
+    .pw-btn[disabled], .pw-btn-secondary[disabled], .pw-btn-danger[disabled], .pw-btn-outline[disabled] {
+      opacity: 0.65;
+      cursor: not-allowed;
+    }
+    .pw-sign-new-hint {
+      margin: 0.75rem 0 0;
+      font-size: 0.9rem;
+      color: #4b5563;
+      line-height: 1.45;
+      text-align: center;
+    }
+    .pw-actions.pw-actions--full {
+      justify-content: stretch;
+      flex-direction: column;
+      align-items: stretch;
+      margin-top: 0.35rem;
+    }
+    .pw-btn-outline {
+      width: 100%;
+      box-sizing: border-box;
+      min-width: 0 !important;
+      border: 2px solid #008080;
+      border-radius: 8px;
+      padding: 0.875rem 1rem;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      background: #fff;
+      color: #008080;
+    }
+    .pw-section {
+      padding: 1rem;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      background: #fff;
+    }
+    .pw-section + .pw-section { margin-top: 1rem; }
+    .pw-section-title {
+      margin: 0 0 0.75rem;
+      font-size: 1.1rem;
+    }
+    .pw-meta {
+      display: flex;
+      flex-wrap: wrap;
+      margin: -0.5rem;
+    }
+    .pw-meta div {
+      width: calc(50% - 1rem);
+      margin: 0.5rem;
+      padding: 0.75rem;
+      border-radius: 8px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+    }
+    .pw-meta strong {
+      display: block;
+      font-size: 0.82rem;
+      color: #6b7280;
+      margin-bottom: 0.2rem;
+    }
+    .pw-check {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: 1rem;
+      cursor: pointer;
+      padding: 0.5rem 0;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    /* ~2× prior visual size (was scale(1.25)); larger hit area for kiosk taps */
+    .pw-check input[type="checkbox"] {
+      margin: 0;
+      flex-shrink: 0;
+      cursor: pointer;
+      transform: scale(2.5);
+      transform-origin: left center;
+      /* transform does not change layout box — reserve width so label text sits beside, not under, the scaled control */
+      margin-right: 2.35rem;
+    }
+    .pw-check span {
+      flex: 1;
+      min-width: 0;
+      line-height: 1.45;
+    }
+    .pw-hr { height: 1px; background: #e5e7eb; margin: 1rem 0; }
+    .pw-waiver {
+      max-height: 280px;
+      overflow: auto;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 1rem;
+      background: #fafafa;
+      white-space: break-spaces;
+      word-break: break-word;
+    }
+    .pw-list {
+      margin: 0;
+      padding-left: 1.2rem;
+      color: #374151;
+      line-height: 1.5;
+    }
+    .pw-choice-grid {
+      display: flex;
+      flex-wrap: wrap;
+      margin: -0.5rem;
+      align-items: stretch;
+    }
+    .pw-choice {
+      width: calc(50% - 1rem);
+      margin: 0.5rem;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      padding: 1rem;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 220px;
+    }
+    .pw-choice h3 {
+      margin: 0 0 0.5rem;
+      font-size: 1rem;
+    }
+    .pw-choice p {
+      margin: 0 0 1rem;
+      color: #4b5563;
+      line-height: 1.45;
+    }
+    .pw-choice button {
+      margin-top: auto;
+      align-self: flex-start;
+    }
+    .pw-canvas-wrap {
+      border: 2px dashed #9ca3af;
+      border-radius: 10px;
+      background: #fff;
+      padding: 0.5rem;
+    }
+    .pw-canvas {
+      display: block;
+      width: 100%;
+      height: 220px;
+      background: #fff;
+      border-radius: 8px;
+      touch-action: none;
+    }
+    .pw-summary-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.9rem;
+      padding: 1rem 0;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .pw-summary-row:last-child { border-bottom: none; }
+    .pw-summary-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: flex-start;
+    }
+    .pw-summary-name {
+      margin: 0;
+      font-size: 1.05rem;
+      line-height: 1.35;
+    }
+    .pw-chip {
+      display: inline-block;
+      background: #eef2ff;
+      color: #4338ca;
+      border: 1px solid #c7d2fe;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      padding: 0.2rem 0.6rem;
+      margin-bottom: 0.4rem;
+    }
+    .pw-review-meta {
+      display: flex;
+      flex-wrap: wrap;
+      margin: -0.5rem;
+    }
+    .pw-review-meta-item {
+      width: calc(50% - 1rem);
+      margin: 0.5rem;
+      padding: 0.75rem;
+      border-radius: 8px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+    }
+    .pw-review-meta-item strong {
+      display: block;
+      font-size: 0.82rem;
+      color: #6b7280;
+      margin-bottom: 0.2rem;
+    }
+    .pw-link {
+      background: none;
+      border: none;
+      color: #008080;
+      text-decoration: underline;
+      cursor: pointer;
+      padding: 0;
+      font-size: 0.95rem;
+    }
+    .pw-center { text-align: center; }
+    .pw-hidden { display: none; }
+    .pw-modal-backdrop {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      background: rgba(17, 24, 39, 0.55);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      z-index: 9999;
+    }
+    .pw-modal {
+      width: 100%;
+      max-width: 460px;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 12px;
+      box-shadow: 0 24px 48px rgba(17, 24, 39, 0.24);
+      padding: 1.25rem;
+    }
+    .pw-modal--wide { max-width: 760px; max-height: 90vh; overflow-y: auto; }
+    /* Full-screen–style notice: kiosk customers must see validation before continuing */
+    .pw-modal--alert {
+      max-width: min(520px, 100%);
+      padding: 1.75rem 1.5rem;
+      text-align: center;
+    }
+    .pw-modal--alert h2 {
+      margin: 0 0 1rem 0;
+      font-size: 1.65rem;
+      line-height: 1.25;
+      color: #111827;
+      text-align: center;
+    }
+    .pw-modal-alert-body {
+      margin: 0 0 1.5rem 0;
+      font-size: 1.2rem;
+      line-height: 1.55;
+      color: #374151;
+      text-align: center;
+    }
+    .pw-modal-alert-actions {
+      justify-content: center !important;
+      margin-top: 0.25rem;
+    }
+    .pw-btn--alert-ok {
+      min-width: 240px;
+      font-size: 1.15rem;
+      padding: 1rem 1.75rem;
+    }
+    .pw-progress-wrap {
+      margin: 1rem 0 1.25rem;
+    }
+    .pw-progress-track {
+      width: 100%;
+      height: 12px;
+      border-radius: 999px;
+      background: #e5e7eb;
+      overflow: hidden;
+    }
+    .pw-progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: #f59e0b;
+      transition: width 0.9s linear;
+    }
+    .pw-progress-label {
+      margin-top: 0.65rem;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #4b5563;
+      text-align: center;
+    }
+    .pw-summary-line {
+      padding: 0.75rem 0.9rem;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #f9fafb;
+      margin-top: 0.75rem;
+      line-height: 1.45;
+    }
+    .pw-summary-line strong { color: #008080; }
+    @media (max-width: 720px) {
+      .pw-grid > div, .pw-choice, .pw-meta div, .pw-review-meta-item, .pw-field-full {
+        width: calc(100% - 1rem) !important;
+      }
+      .pw-card { padding: 1rem; }
+      .pw-title { font-size: 1.6rem; }
+      .pw-actions > * { width: 100%; }
+      .pw-summary-header { flex-direction: column; align-items: stretch; }
+    }
+    .waiver-kiosk-fullscreen-prompt {
+      position: fixed;
+      bottom: 1rem;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 0.65rem 1.25rem;
+      background-color: rgba(15, 23, 42, 0.92);
+      color: #fff;
+      border: 1px solid #475569;
+      border-radius: 999px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      z-index: 100000;
+      font-family: inherit;
+    }
+    .waiver-kiosk-fullscreen-prompt:active {
+      opacity: 0.9;
+    }
+  </style>
+  <script src="/waiver-browser-kiosk/config.js?v=20260408a"></script>
+</head>
+<body>
+  <div id="app" class="pw-container"></div>
+  <script src="/waiver-browser-kiosk/app.es5.js?v=202606171a"></script>
+</body>
+</html>

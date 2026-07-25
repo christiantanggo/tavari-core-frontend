@@ -9,6 +9,7 @@ import { usePOSAuth } from '../hooks/usePOSAuth';
 import { usePermissions } from '../hooks/usePermissions';
 import { SecurityWrapper, useSecurityContext } from '../Security';
 import toast from 'react-hot-toast';
+import { getPublicUserId } from '../utils/getPublicUserId';
 
 const ChangePin = () => {
   const [currentPin, setCurrentPin] = useState('');
@@ -39,7 +40,7 @@ const ChangePin = () => {
     authLoading,
     authError
   } = usePOSAuth({
-    requiredRoles: ['employee', 'cashier', 'manager', 'owner', 'admin'],
+    requiredRoles: ['employee', 'manager', 'owner', 'admin'],
     requireBusiness: false,
     componentName: 'ChangePin'
   });
@@ -69,10 +70,12 @@ const ChangePin = () => {
     try {
       await recordAction('pin_change_page_access', authUser.id, true);
 
+      const publicUserId = (await getPublicUserId(authUser.email)) || authUser.id;
+
       const { data: user, error } = await supabase
         .from('users')
         .select('*')
-        .eq('id', authUser.id)
+        .eq('id', publicUserId)
         .single();
 
       if (error) {
@@ -174,10 +177,12 @@ const ChangePin = () => {
     try {
       await recordAction('pin_change_attempt', authUser.id, true);
 
+      const publicUserId = (await getPublicUserId(authUser.email)) || authUser.id;
+
       const { data, error } = await supabase
         .from('users')
         .select('pin')
-        .eq('id', authUser.id)
+        .eq('id', publicUserId)
         .single();
 
       if (error || !data) {
@@ -207,7 +212,7 @@ const ChangePin = () => {
       const { error: updateError } = await supabase
         .from('users')
         .update({ pin: hashedPin })
-        .eq('id', authUser.id);
+        .eq('id', publicUserId);
 
       if (updateError) {
         await logSecurityEvent('pin_change_update_error', {
@@ -340,7 +345,7 @@ const ChangePin = () => {
 
   return (
     <POSAuthWrapper
-      requiredRoles={['employee', 'cashier', 'manager', 'owner', 'admin']}
+      requiredRoles={['employee', 'manager', 'owner', 'admin']}
       requireBusiness={false}
       componentName="ChangePin"
     >

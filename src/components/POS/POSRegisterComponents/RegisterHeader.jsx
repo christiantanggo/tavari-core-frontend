@@ -1,6 +1,5 @@
 // components/POS/POSRegisterComponents/RegisterHeader.jsx
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
 import { TavariStyles } from '../../../utils/TavariStyles';
 
 const RegisterHeader = ({
@@ -15,19 +14,24 @@ const RegisterHeader = ({
   registerLocked,
   onSaveCart,
   onDrawerManager,
+  onNavigateToWaivers,
   onNavigateToRefunds,
   onNavigateToSavedCarts,
-  onNavigateToTabs
+  onNavigateToTabs,
+  onSwitchUser,
+  showWaiverButton = false,
+  canAccessDrawer = true,
+  canSaveCart = true,
+  canViewRefunds = true,
+  canManageTabs = true,
 }) => {
-  const navigate = useNavigate();
-
   const styles = {
     header: {
       position: 'fixed',
-      top: '0',
-      left: '0',
+      top: '60px',
+      left: '240px',
       right: '0',
-      zIndex: 999,
+      zIndex: 998,
       backgroundColor: TavariStyles.colors.white,
       borderBottom: `1px solid ${TavariStyles.colors.gray200}`,
       padding: `${TavariStyles.spacing.md} ${TavariStyles.spacing.lg}`,
@@ -47,7 +51,19 @@ const RegisterHeader = ({
     headerSubtitle: {
       margin: 0,
       fontSize: TavariStyles.typography.fontSize.base,
-      color: TavariStyles.colors.gray600
+      color: TavariStyles.colors.gray600,
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '8px',
+    },
+
+    switchUserButton: {
+      ...TavariStyles.components.button.base,
+      ...TavariStyles.components.button.variants.secondary,
+      ...TavariStyles.components.button.sizes.sm,
+      marginLeft: '4px',
+      whiteSpace: 'nowrap',
     },
     
     headerActions: {
@@ -85,16 +101,30 @@ const RegisterHeader = ({
   };
 
   return (
-    <div style={styles.header}>
+    <div className="pos-register-header" style={styles.header}>
       <div>
         <h2 style={styles.headerTitle}>{businessName}</h2>
         <p style={styles.headerSubtitle}>
           Logged in as: {employeeName}
-          {currentUnlockingUser && currentUnlockingUser.id !== authUser?.id && (
+          {currentUnlockingUser && (
             <span style={{ marginLeft: '10px', color: TavariStyles.colors.warning }}>
-              (Register unlocked by: {currentUnlockingUser.name || currentUnlockingUser.full_name || currentUnlockingUser.email})
+              (Register unlocked by:{' '}
+              {currentUnlockingUser.name ||
+                currentUnlockingUser.full_name ||
+                currentUnlockingUser.email}
+              )
             </span>
           )}
+          {!isLocked && !registerLocked && typeof onSwitchUser === 'function' ? (
+            <button
+              type="button"
+              style={styles.switchUserButton}
+              onClick={onSwitchUser}
+              title="Enter a staff PIN to switch who is running the register"
+            >
+              Switch user
+            </button>
+          ) : null}
         </p>
       </div>
       <div style={styles.headerActions}>
@@ -106,6 +136,16 @@ const RegisterHeader = ({
             title="Save current cart for later"
           >
             Save Cart
+          </button>
+        )}
+        {showWaiverButton && (
+          <button
+            style={styles.actionButton}
+            onClick={onNavigateToWaivers}
+            disabled={isLocked || registerLocked}
+            title="Open waiver module overview"
+          >
+            Waiver
           </button>
         )}
         <button

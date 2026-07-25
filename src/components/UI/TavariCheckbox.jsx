@@ -17,6 +17,7 @@ import { TavariStyles } from '../../utils/TavariStyles';
  * @param {Object} props.labelStyle - Additional styles for label
  * @param {string} props.checkIcon - Custom check icon (default: '✓')
  * @param {string} props.testId - Test ID for testing
+ * @param {'custom'|'native'} props.appearance - 'native' = OS-visible checkbox (recommended where custom box is hard to see)
  * @returns {React.ReactNode} Checkbox component
  */
 const TavariCheckbox = ({
@@ -31,8 +32,13 @@ const TavariCheckbox = ({
   labelStyle = {},
   checkIcon = '✓',
   testId,
-  ...props
+  children,
+  appearance = 'custom',
+  ...restProps
 }) => {
+  // Don't forward children to input (void element); prevents stray content from rendering
+  const inputProps = { ...restProps };
+  if (children !== undefined) delete inputProps.children;
   // Define size configurations directly since TavariStyles doesn't have checkbox.sizes
   const sizeConfigs = {
     sm: {
@@ -53,6 +59,9 @@ const TavariCheckbox = ({
   };
   
   const sizeConfig = sizeConfigs[size] || sizeConfigs.md;
+
+  const nativeCheckboxPx =
+    size === 'lg' ? 22 : size === 'sm' ? 16 : 18;
   
   const handleChange = (e) => {
     if (!disabled) {
@@ -61,13 +70,72 @@ const TavariCheckbox = ({
   };
 
   const handleContainerClick = (e) => {
-    // Prevent double triggering when clicking the actual input
-    if (e.target.type === 'checkbox') return;
-    
+    // Controlled checkbox inside <label>: browser default toggles the native input and fights
+    // React’s `checked` prop — second tap often never delivers a reliable uncheck. We own the toggle.
+    e.preventDefault();
     if (!disabled) {
       onChange(!checked, { target: { checked: !checked, name, id } });
     }
   };
+
+  if (appearance === 'native') {
+    const nativeStyles = {
+      container: {
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: sizeConfig.gap,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.6 : 1,
+        userSelect: 'none',
+        color: TavariStyles.colors.gray800,
+        ...style
+      },
+      nativeInput: {
+        width: `${nativeCheckboxPx}px`,
+        height: `${nativeCheckboxPx}px`,
+        minWidth: `${nativeCheckboxPx}px`,
+        minHeight: `${nativeCheckboxPx}px`,
+        flexShrink: 0,
+        display: 'inline-block',
+        margin: 0,
+        marginTop: '2px',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: 1,
+        appearance: 'auto',
+        WebkitAppearance: 'checkbox',
+        MozAppearance: 'auto',
+        accentColor: TavariStyles.colors.primary
+      },
+      label: {
+        fontSize: sizeConfig.fontSize,
+        color: disabled ? TavariStyles.colors.gray400 : TavariStyles.colors.gray700,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        fontWeight: TavariStyles.typography.fontWeight.medium,
+        lineHeight: TavariStyles.typography.lineHeight.normal,
+        ...labelStyle
+      }
+    };
+
+    return (
+      <label
+        htmlFor={id}
+        style={nativeStyles.container}
+        data-testid={testId}
+      >
+        <input
+          type="checkbox"
+          id={id}
+          name={name}
+          checked={checked}
+          onChange={handleChange}
+          disabled={disabled}
+          style={nativeStyles.nativeInput}
+          {...inputProps}
+        />
+        {label ? <span style={nativeStyles.label}>{label}</span> : null}
+      </label>
+    );
+  }
 
   const styles = {
     container: {
@@ -77,12 +145,16 @@ const TavariCheckbox = ({
       cursor: disabled ? 'not-allowed' : 'pointer',
       opacity: disabled ? 0.6 : 1,
       userSelect: 'none',
+      color: TavariStyles.colors.gray800,
       ...style
     },
     
     checkboxWrapper: {
       position: 'relative',
-      display: 'inline-block'
+      display: 'inline-block',
+      flexShrink: 0,
+      flexGrow: 0,
+      lineHeight: 0
     },
     
     hiddenInput: {
@@ -91,19 +163,24 @@ const TavariCheckbox = ({
       width: 0,
       height: 0,
       margin: 0,
-      padding: 0
+      padding: 0,
+      pointerEvents: 'none'
     },
     
     customBox: {
       width: sizeConfig.checkboxSize,
       height: sizeConfig.checkboxSize,
+      minWidth: sizeConfig.checkboxSize,
+      minHeight: sizeConfig.checkboxSize,
+      boxSizing: 'border-box',
       border: `2px solid ${checked ? TavariStyles.colors.primary : TavariStyles.colors.gray300}`,
       borderRadius: TavariStyles.borderRadius.sm,
       backgroundColor: checked ? TavariStyles.colors.primary : TavariStyles.colors.white,
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      transition: TavariStyles.transitions.normal,
+      flexShrink: 0,
+      transition: `all ${TavariStyles.transitions.normal}`,
       cursor: disabled ? 'not-allowed' : 'pointer',
       fontSize: size === 'sm' ? '10px' : size === 'lg' ? '14px' : '12px',
       color: TavariStyles.colors.white,
@@ -135,7 +212,7 @@ const TavariCheckbox = ({
           style={styles.hiddenInput}
           id={id}
           name={name}
-          {...props}
+          {...inputProps}
         />
         
         <div style={styles.customBox}>

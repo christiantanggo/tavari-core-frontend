@@ -1,7 +1,7 @@
 // src/screens/Music/MusicAdManager.jsx - WITH PERMISSION SYSTEM INTEGRATION
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FiDollarSign, FiUpload, FiPlay, FiPause, FiSettings, FiBarChart, FiToggleLeft, FiToggleRight, FiAlertCircle, FiCheckCircle, FiTrash2, FiEdit, FiLock, FiEye } from 'react-icons/fi';
+import { FiDollarSign, FiUpload, FiPlay, FiPause, FiSettings, FiBarChart, FiToggleLeft, FiToggleRight, FiAlertCircle, FiCheckCircle, FiTrash2, FiEdit, FiLock, FiEye, FiZap, FiX, FiRadio } from 'react-icons/fi';
 
 // Tavari Build Standards - Required imports
 import { TavariStyles } from '../../utils/TavariStyles';
@@ -19,6 +19,7 @@ import toast from 'react-hot-toast';
 
 // Database connection
 import { supabase } from '../../supabaseClient';
+import { globalMusicService } from '../../services/GlobalMusicService';
 
 /**
  * Music Ad Manager - Manage advertisements and revenue
@@ -66,7 +67,9 @@ const MusicAdManager = () => {
     enabled: true,
     volume_adjustment: 0.8,
     networkAdsEnabled: true,
-    localAdsEnabled: true
+    localAdsEnabled: true,
+    ad_selection_mode: 'random',
+    ads_per_slot: 1
   });
   const [adStats, setAdStats] = useState({
     totalPlays: 0,
@@ -79,6 +82,16 @@ const MusicAdManager = () => {
   const [uploadingAd, setUploadingAd] = useState(false);
   const [errors, setErrors] = useState({});
   const [showRevenueDetails, setShowRevenueDetails] = useState(false);
+  const [showTtsModal, setShowTtsModal] = useState(false);
+  const [ttsText, setTtsText] = useState('');
+  const [ttsTitle, setTtsTitle] = useState('');
+  const [ttsVoice, setTtsVoice] = useState('alloy');
+  const [generatingTts, setGeneratingTts] = useState(false);
+  const testPlaybackAudioRef = useRef(null);
+  const localAdPlaybackUrlsRef = useRef({});
+  const [testPlaybackUrl, setTestPlaybackUrl] = useState(null);
+  const [adTestEveryOneSong, setAdTestEveryOneSong] = useState(false);
+  const [scheduleModalAd, setScheduleModalAd] = useState(null);
 
   // Permission checks based on permissionRegistry.js
   const canManageAds = hasPermission('music.ads.manage') || hasElevatedPrivileges();
@@ -101,6 +114,11 @@ const MusicAdManager = () => {
       loadAllData();
     }
   }, [auth.isReady, auth.selectedBusinessId, permissionsLoading]);
+
+  // Sync test mode "ad every 1 song" from global music service (e.g. when returning to this page)
+  useEffect(() => {
+    setAdTestEveryOneSong(globalMusicService.getAdTestModeEveryOneSong?.() ?? false);
+  }, []);
 
   /**
    * Load all ad-related data
@@ -158,18 +176,39 @@ const MusicAdManager = () => {
    * Load local business ads
    */
   const loadLocalAds = async () => {
+    if (!auth.selectedBusinessId) {
+      setLocalAds([]);
+      return;
+    }
     try {
       const { data, error } = await supabase
         .from('music_local_ads')
         .select('*')
         .eq('business_id', auth.selectedBusinessId)
-        .order('created_at', { ascending: false });
+        .order('uploaded_at', { ascending: false });
 
       if (error) throw error;
       setLocalAds(data || []);
-
+      setErrors(prev => ({ ...prev, localAds: null }));
+      localAdPlaybackUrlsRef.current = {};
+      if (data?.length) {
+        const expiresAt = Date.now() + 3500 * 1000;
+        for (const ad of data) {
+          if (ad.file_path) {
+            supabase.storage.from('music-files').createSignedUrl(ad.file_path, 3600).then(({ data: d, error: e }) => {
+              if (!e && d?.signedUrl) {
+                localAdPlaybackUrlsRef.current[ad.id] = { url: d.signedUrl, expiresAt };
+              }
+            });
+          }
+        }
+      }
     } catch (error) {
-      setErrors(prev => ({ ...prev, localAds: 'Failed to load local ads' }));
+      const message = error?.message || String(error);
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[MusicAdManager] loadLocalAds error:', message);
+      }
+      setErrors(prev => ({ ...prev, localAds: 'Failed to load local ads. Check console for details.' }));
     }
   };
 
@@ -180,17 +219,20 @@ const MusicAdManager = () => {
     try {
       const { data, error } = await supabase
         .from('music_settings')
-        .select('ad_frequency, ad_enabled, ad_volume_adjustment, network_ads_enabled, local_ads_enabled')
+        .select('ad_frequency, ad_enabled, ad_volume_adjustment, ad_selection_mode, ads_per_slot')
         .eq('business_id', auth.selectedBusinessId)
-        .single();
+        .limit(1)
+        .maybeSingle();
 
       if (data) {
         setAdSettings({
           frequency: data.ad_frequency || 5,
           enabled: data.ad_enabled !== false,
-          volume_adjustment: data.ad_volume_adjustment || 0.8,
+          volume_adjustment: data.ad_volume_adjustment ?? 0.8,
           networkAdsEnabled: data.network_ads_enabled !== false,
-          localAdsEnabled: data.local_ads_enabled !== false
+          localAdsEnabled: data.local_ads_enabled !== false,
+          ad_selection_mode: data.ad_selection_mode === 'round_robin' ? 'round_robin' : 'random',
+          ads_per_slot: Math.max(1, Math.min(10, parseInt(data.ads_per_slot, 10) || 1))
         });
       }
     } catch (error) {
@@ -222,11 +264,13 @@ const MusicAdManager = () => {
         .eq('business_id', auth.selectedBusinessId)
         .gte('played_at', `${today}T00:00:00.000Z`);
 
-      // Local ad plays
-      const { count: localCount } = await supabase
+      // Local ad plays (table may not exist in all projects)
+      let localCount = 0;
+      const { count: localCountResult } = await supabase
         .from('music_local_ad_plays')
         .select('*', { count: 'exact', head: true })
         .eq('business_id', auth.selectedBusinessId);
+      if (localCountResult != null) localCount = localCountResult;
 
       // Calculate revenue with tax considerations
       const baseRevenue = (totalCount || 0) * 0.01;
@@ -261,41 +305,43 @@ const MusicAdManager = () => {
       return;
     }
 
-    // Validate input
-    const validatedSettings = security.validateInput(newSettings, {
-      frequency: 'number',
-      enabled: 'boolean',
-      volume_adjustment: 'number',
-      networkAdsEnabled: 'boolean',
-      localAdsEnabled: 'boolean'
-    });
-
-    if (!validatedSettings.isValid) {
-      setErrors(prev => ({ ...prev, settings: 'Invalid settings data' }));
-      toast.error('Invalid settings data');
+    const frequency = typeof newSettings.frequency === 'number' ? newSettings.frequency : parseInt(newSettings.frequency, 10);
+    const volumeAdjustment = typeof newSettings.volume_adjustment === 'number' ? newSettings.volume_adjustment : parseFloat(newSettings.volume_adjustment);
+    if (Number.isNaN(frequency) || frequency < 1 || frequency > 20) {
+      setErrors(prev => ({ ...prev, settings: 'Ad frequency must be between 1 and 20' }));
+      toast.error('Ad frequency must be between 1 and 20');
+      return;
+    }
+    if (Number.isNaN(volumeAdjustment) || volumeAdjustment < 0.5 || volumeAdjustment > 2) {
+      setErrors(prev => ({ ...prev, settings: 'Volume adjustment must be between 50% and 200%' }));
+      toast.error('Volume adjustment must be between 50% and 200%');
       return;
     }
 
+    const adsPerSlot = Math.max(1, Math.min(10, parseInt(newSettings.ads_per_slot, 10) || 1));
+    const adSelectionMode = newSettings.ad_selection_mode === 'round_robin' ? 'round_robin' : 'random';
     try {
+      const payload = {
+        business_id: auth.selectedBusinessId,
+        ad_frequency: frequency,
+        ad_enabled: newSettings.enabled === true,
+        ad_volume_adjustment: volumeAdjustment,
+        ad_selection_mode: adSelectionMode,
+        ads_per_slot: adsPerSlot,
+        updated_at: new Date().toISOString()
+      };
       const { error } = await supabase
         .from('music_settings')
-        .upsert({
-          business_id: auth.selectedBusinessId,
-          ad_frequency: newSettings.frequency,
-          ad_enabled: newSettings.enabled,
-          ad_volume_adjustment: newSettings.volume_adjustment,
-          network_ads_enabled: newSettings.networkAdsEnabled,
-          local_ads_enabled: newSettings.localAdsEnabled,
-          updated_at: new Date().toISOString()
-        }, {
+        .upsert(payload, {
           onConflict: 'business_id'
         });
 
       if (error) throw error;
 
-      setAdSettings(newSettings);
+      setAdSettings({ ...newSettings, frequency, volume_adjustment: volumeAdjustment, ad_selection_mode: adSelectionMode, ads_per_slot: adsPerSlot });
       setErrors(prev => ({ ...prev, settings: null }));
-      toast.success('Ad settings updated successfully');
+      globalMusicService.clearAdEveryXSongsSettingsCache?.();
+      toast.success('Ad settings saved. Ads will play between songs when music is playing.');
 
       // Log settings change
       await security.logSecurityEvent('ad_settings_updated', {
@@ -434,12 +480,155 @@ const MusicAdManager = () => {
   };
 
   /**
-   * Simulate ad play with proper tracking
+   * Generate announcement audio with OpenAI TTS and save as local ad
+   */
+  const generateAnnouncementWithAI = async () => {
+    if (!canUploadAds) {
+      toast.error('You do not have permission to create advertisements');
+      return;
+    }
+    const text = (ttsText || '').trim();
+    const title = (ttsTitle || '').trim() || 'AI announcement';
+    if (!text) {
+      toast.error('Enter the announcement text to read aloud');
+      return;
+    }
+    setGeneratingTts(true);
+    setErrors(prev => ({ ...prev, tts: null }));
+    try {
+      const { data, error } = await supabase.functions.invoke('music-tts-announcement', {
+        body: {
+          business_id: auth.selectedBusinessId,
+          text,
+          title,
+          voice: ttsVoice
+        }
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+
+      const file_path = data?.file_path;
+      const duration = data?.duration_seconds || 30;
+      if (!file_path) throw new Error('No audio path returned');
+
+      const { error: dbError } = await supabase
+        .from('music_local_ads')
+        .insert({
+          business_id: auth.selectedBusinessId,
+          title: data.title || title,
+          file_path,
+          duration,
+          active: true,
+          play_frequency: 10,
+          uploaded_by: auth.authUser?.id
+        });
+
+      if (dbError) throw dbError;
+
+      await security.logSecurityEvent('local_ad_ai_generated', {
+        title: data.title || title,
+        text_length: text.length,
+        voice: ttsVoice
+      }, 'low');
+
+      toast.success('AI announcement created');
+      setShowTtsModal(false);
+      setTtsText('');
+      setTtsTitle('');
+      loadLocalAds();
+    } catch (err) {
+      const msg = err?.message || (typeof err === 'string' ? err : 'Failed to generate');
+      setErrors(prev => ({ ...prev, tts: msg }));
+      toast.error(msg);
+    } finally {
+      setGeneratingTts(false);
+    }
+  };
+
+  /**
+   * Play ad audio for testing (local ads: from storage; network ads: from file_path if present).
+   * Returns true if playback started, false otherwise.
+   */
+  const playAdAudio = async (ad, isLocal) => {
+    const path = ad?.file_path;
+    if (!path) {
+      toast.error('No audio file for this ad');
+      return false;
+    }
+
+    const cached = isLocal && localAdPlaybackUrlsRef.current[ad.id];
+    if (cached?.url && cached.expiresAt > Date.now()) {
+      setTestPlaybackUrl(cached.url);
+      toast.success('Use the player below — turn up volume if needed');
+      return true;
+    }
+
+    try {
+      let url = null;
+      const { data, error } = await supabase.storage
+        .from('music-files')
+        .createSignedUrl(path, 3600);
+      if (error) {
+        const { data: publicData } = supabase.storage.from('music-files').getPublicUrl(path);
+        url = publicData?.publicUrl;
+      } else {
+        url = data?.signedUrl;
+        if (isLocal && url) {
+          localAdPlaybackUrlsRef.current[ad.id] = { url, expiresAt: Date.now() + 3500 * 1000 };
+        }
+      }
+      if (!url) {
+        toast.error('Could not load ad audio');
+        return false;
+      }
+      setTestPlaybackUrl(url);
+      toast.success('Use the player below — turn up volume if needed');
+      return true;
+    } catch (e) {
+      toast.error('Could not play ad audio');
+      return false;
+    }
+  };
+
+  /**
+   * Test ad live: stop current song, play the ad, then resume the same song (or start music if none was playing).
+   */
+  const testAdLive = async (ad) => {
+    if (!ad?.file_path) {
+      toast.error('No audio file for this ad');
+      return;
+    }
+    if (!canManageAds) {
+      toast.error('You do not have permission to test ads');
+      return;
+    }
+    try {
+      await globalMusicService.playAnnouncementThenNext(
+        { file_path: ad.file_path },
+        { resumeSameTrack: true }
+      );
+      toast.success('Ad played. Music resumed.');
+    } catch (e) {
+      const msg = e?.message || String(e);
+      toast.error(msg.includes('Failed to get ad audio') ? 'Ad audio could not be loaded. Check storage and permissions.' : `Live test failed: ${msg}`);
+    }
+  };
+
+  /**
+   * Simulate ad play: play the audio, then log the play for tracking
    */
   const simulateAdPlay = async (ad, isLocal = false) => {
-    // Permission check
     if (!canManageAds) {
       toast.error('You do not have permission to test advertisements');
+      return;
+    }
+
+    // Play audio first (local ads have file_path in music-files; network ads may have file_path too)
+    if (ad?.file_path) {
+      const played = await playAdAudio(ad, isLocal);
+      if (!played && isLocal) return;
+    } else if (isLocal) {
+      toast.error('No audio file for this ad');
       return;
     }
 
@@ -452,20 +641,23 @@ const MusicAdManager = () => {
         return;
       }
 
+      // Log the ad play. Skip insert for local ads when table may not exist (avoids 404).
       const tableName = isLocal ? 'music_local_ad_plays' : 'music_ad_plays';
       const adIdField = isLocal ? 'local_ad_id' : 'ad_id';
+      let insertSucceeded = false;
 
-      // Log the ad play
-      const { error } = await supabase
-        .from(tableName)
-        .insert({
-          [adIdField]: ad.id,
-          business_id: auth.selectedBusinessId,
-          played_at: new Date().toISOString(),
-          test_play: true
-        });
-
-      if (error) throw error;
+      if (!isLocal) {
+        const { error } = await supabase
+          .from(tableName)
+          .insert({
+            [adIdField]: ad.id,
+            business_id: auth.selectedBusinessId,
+            played_at: new Date().toISOString(),
+            test_play: true
+          });
+        if (error) throw error;
+        insertSucceeded = true;
+      }
 
       // Log security event
       await security.logSecurityEvent('ad_test_play', {
@@ -474,9 +666,11 @@ const MusicAdManager = () => {
         ad_title: ad.title
       }, 'low');
 
-      toast.success('Test play recorded successfully');
-      if (canViewRevenue) {
-        loadAdStats(); // Refresh stats if user can view them
+      if (insertSucceeded) {
+        toast.success('Test play recorded successfully');
+        if (canViewRevenue) loadAdStats();
+      } else if (isLocal) {
+        toast.success('Playing ad');
       }
       setErrors(prev => ({ ...prev, play: null }));
 
@@ -521,6 +715,46 @@ const MusicAdManager = () => {
     } catch (error) {
       setErrors(prev => ({ ...prev, delete: 'Failed to delete ad' }));
       toast.error('Failed to delete ad');
+    }
+  };
+
+  /**
+   * Format schedule for display: "Always", "Mar 1 – Mar 31, 2025", "From Mar 1", "Until Mar 31"
+   */
+  const formatSchedule = (ad) => {
+    const d = (v) => (v ? new Date(v).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : null);
+    const start = d(ad.start_date);
+    const end = d(ad.end_date);
+    if (!start && !end) return 'Always';
+    if (start && end) return `${start} – ${end}`;
+    if (start) return `From ${start}`;
+    return `Until ${end}`;
+  };
+
+  /**
+   * Update an ad's start/end schedule dates
+   */
+  const updateLocalAdSchedule = async (adId, { start_date, end_date }) => {
+    if (!canManageAds) return;
+    try {
+      const payload = { start_date: start_date || null, end_date: end_date || null };
+      const { error } = await supabase
+        .from('music_local_ads')
+        .update(payload)
+        .eq('id', adId)
+        .eq('business_id', auth.selectedBusinessId);
+      if (error) throw error;
+      toast.success('Schedule updated');
+      setScheduleModalAd(null);
+      loadLocalAds();
+      globalMusicService.clearAdEveryXSongsSettingsCache?.();
+    } catch (e) {
+      const msg = e?.message || '';
+      if (msg.includes('end_date') || msg.includes('start_date') || msg.includes('schema cache')) {
+        toast.error('Schedule columns missing. Run the migration: see supabase/migrations/RUN_THIS_ADD_music_local_ads_schedule_columns.sql in the SQL Editor.');
+      } else {
+        toast.error(msg || 'Failed to update schedule');
+      }
     }
   };
 
@@ -1049,12 +1283,43 @@ const MusicAdManager = () => {
                   onChange={(e) => updateAdSettings({...adSettings, volume_adjustment: parseFloat(e.target.value)})}
                   disabled={!canEditSettings}
                 >
-                  <option value={0.6}>60% of music volume</option>
-                  <option value={0.7}>70% of music volume</option>
-                  <option value={0.8}>80% of music volume</option>
-                  <option value={0.9}>90% of music volume</option>
-                  <option value={1.0}>100% of music volume</option>
+                  <option value={0.6}>60% of music level</option>
+                  <option value={0.7}>70% of music level</option>
+                  <option value={0.8}>80% of music level</option>
+                  <option value={0.9}>90% of music level</option>
+                  <option value={1.0}>100% (same as music)</option>
+                  <option value={1.1}>110% (louder than music)</option>
+                  <option value={1.25}>125% (louder than music)</option>
+                  <option value={1.5}>150% (boosted)</option>
+                  <option value={1.75}>175% (boosted)</option>
+                  <option value={2}>200% (announcement level)</option>
                 </select>
+              </div>
+              <div style={styles.settingItem}>
+                <label style={styles.settingLabel}>Ad selection</label>
+                <select
+                  style={canEditSettings ? styles.settingSelect : styles.disabledSelect}
+                  value={adSettings.ad_selection_mode}
+                  onChange={(e) => updateAdSettings({...adSettings, ad_selection_mode: e.target.value})}
+                  disabled={!canEditSettings}
+                >
+                  <option value="random">Random (pick randomly each time)</option>
+                  <option value="round_robin">Round-robin (cycle through in order)</option>
+                </select>
+              </div>
+              <div style={styles.settingItem}>
+                <label style={styles.settingLabel}>Ads per slot</label>
+                <select
+                  style={canEditSettings ? styles.settingSelect : styles.disabledSelect}
+                  value={adSettings.ads_per_slot}
+                  onChange={(e) => updateAdSettings({...adSettings, ads_per_slot: parseInt(e.target.value, 10)})}
+                  disabled={!canEditSettings}
+                >
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                    <option key={n} value={n}>{n} ad{n > 1 ? 's' : ''} back-to-back</option>
+                  ))}
+                </select>
+                <p style={{ margin: '4px 0 0', fontSize: 10, color: TavariStyles.colors.gray600 }}>Play this many ads in a row before the next song</p>
               </div>
             </div>
 
@@ -1087,6 +1352,22 @@ const MusicAdManager = () => {
                 disabled={!canEditSettings}
               />
             </div>
+
+            <div style={{ ...styles.checkboxContainer, marginTop: 16, padding: 12, background: '#fefce8', borderRadius: 8, border: '1px solid #facc15' }}>
+              <TavariCheckbox
+                checked={adTestEveryOneSong}
+                onChange={(checked) => {
+                  globalMusicService.setAdTestModeEveryOneSong?.(checked);
+                  setAdTestEveryOneSong(checked);
+                  toast.success(checked ? 'Test mode on: ad will play after every 1 song' : 'Test mode off: using normal ad frequency');
+                }}
+                label="Test mode: play ad every 1 song"
+                size="md"
+              />
+              <p style={{ margin: '4px 0 0 0', fontSize: 10, color: '#713f12' }}>
+                Use this to test the announcement flow without waiting for multiple songs. Turn off when done testing.
+              </p>
+            </div>
           </div>
 
           {/* Local Ad Upload - Protected by permission */}
@@ -1096,33 +1377,126 @@ const MusicAdManager = () => {
               Upload your own advertisements to promote your business or products
             </p>
             
-            <PermissionGate
-              permission="music.ads.manage"
-              fallback={
-                <button
-                  style={styles.lockedButton}
-                  disabled
-                  title="You don't have permission to upload ads"
-                >
-                  <FiLock size={20} />
-                  Upload Locked
-                </button>
-              }
-            >
-              <button
-                style={uploadingAd ? styles.disabledButton : styles.uploadButton}
-                onClick={handleLocalAdUpload}
-                disabled={uploadingAd}
+            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <PermissionGate
+                permission="music.ads.manage"
+                fallback={
+                  <button
+                    style={styles.lockedButton}
+                    disabled
+                    title="You don't have permission to upload ads"
+                  >
+                    <FiLock size={20} />
+                    Upload Locked
+                  </button>
+                }
               >
-                <FiUpload size={20} />
-                {uploadingAd ? 'Uploading...' : 'Upload Local Ad'}
-              </button>
-            </PermissionGate>
+                <button
+                  style={uploadingAd ? styles.disabledButton : styles.uploadButton}
+                  onClick={handleLocalAdUpload}
+                  disabled={uploadingAd}
+                >
+                  <FiUpload size={20} />
+                  {uploadingAd ? 'Uploading...' : 'Upload Local Ad'}
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    ...styles.uploadButton,
+                    background: 'linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%)',
+                    color: '#fff'
+                  }}
+                  onClick={() => setShowTtsModal(true)}
+                  disabled={uploadingAd || generatingTts}
+                >
+                  <FiZap size={20} />
+                  Create with AI (read aloud)
+                </button>
+              </PermissionGate>
+            </div>
+
+            {showTtsModal && (
+              <div style={{
+                position: 'fixed',
+                inset: 0,
+                zIndex: 1000,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'rgba(0,0,0,0.5)'
+              }} onClick={() => !generatingTts && setShowTtsModal(false)}>
+                <div style={{
+                  background: '#fff',
+                  borderRadius: 12,
+                  padding: 24,
+                  maxWidth: 480,
+                  width: '90%',
+                  boxShadow: '0 20px 60px rgba(0,0,0,0.3)'
+                }} onClick={e => e.stopPropagation()}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ margin: 0, fontSize: 14 }}>AI announcement</h3>
+                    <button type="button" onClick={() => !generatingTts && setShowTtsModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}><FiX size={24} /></button>
+                  </div>
+                  <p style={{ color: '#666', fontSize: 11, marginBottom: 12 }}>Enter text and OpenAI will read it aloud and save as a local ad.</p>
+                  <label style={{ display: 'block', marginBottom: 4, fontWeight: 600 }}>Title (for the ad list)</label>
+                  <input
+                    type="text"
+                    value={ttsTitle}
+                    onChange={e => setTtsTitle(e.target.value)}
+                    placeholder="e.g. Weekly special"
+                    style={{ width: '100%', padding: '8px 12px', marginBottom: 12, border: '1px solid #ccc', borderRadius: 8 }}
+                  />
+                  <label style={{ display: 'block', marginBottom: 4, fontWeight: 600 }}>Text to read aloud</label>
+                  <textarea
+                    value={ttsText}
+                    onChange={e => setTtsText(e.target.value)}
+                    placeholder="e.g. This week only, get 20% off all smoothies. Visit us at the counter."
+                    rows={4}
+                    maxLength={4096}
+                    style={{ width: '100%', padding: '8px 12px', marginBottom: 8, border: '1px solid #ccc', borderRadius: 8, resize: 'vertical' }}
+                  />
+                  <p style={{ fontSize: 10, color: '#888', marginBottom: 12 }}>{ttsText.length} / 4096 characters</p>
+                  <label style={{ display: 'block', marginBottom: 4, fontWeight: 600 }}>Voice</label>
+                  <select
+                    value={ttsVoice}
+                    onChange={e => setTtsVoice(e.target.value)}
+                    style={{ width: '100%', padding: '8px 12px', marginBottom: 16, border: '1px solid #ccc', borderRadius: 8 }}
+                  >
+                    <option value="alloy">Alloy (neutral)</option>
+                    <option value="echo">Echo</option>
+                    <option value="fable">Fable</option>
+                    <option value="onyx">Onyx (deeper)</option>
+                    <option value="nova">Nova</option>
+                    <option value="shimmer">Shimmer</option>
+                  </select>
+                  {errors.tts && <p style={{ color: '#dc2626', fontSize: 11, marginBottom: 12 }}>{errors.tts}</p>}
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button type="button" onClick={() => !generatingTts && setShowTtsModal(false)} style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #ccc', background: '#fff', cursor: 'pointer' }}>Cancel</button>
+                    <button type="button" onClick={generateAnnouncementWithAI} disabled={generatingTts || !ttsText.trim()} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: generatingTts ? '#94a3b8' : 'linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%)', color: '#fff', cursor: generatingTts ? 'not-allowed' : 'pointer' }}>
+                      {generatingTts ? 'Generating...' : 'Generate & save as ad'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Local Ads */}
           <div style={styles.adsSection}>
             <h2 style={styles.sectionTitle}>Your Local Ads ({localAds.length})</h2>
+            {testPlaybackUrl && (
+              <div style={{ marginBottom: 16, padding: 12, background: '#f0f9ff', borderRadius: 8, border: '1px solid #bae6fd' }}>
+                <p style={{ margin: '0 0 8px 0', fontSize: 11, fontWeight: 600 }}>Test playback — use the volume control below if you don’t hear sound</p>
+                <audio
+                  ref={testPlaybackAudioRef}
+                  src={testPlaybackUrl}
+                  controls
+                  style={{ width: '100%', maxWidth: 400, height: 40 }}
+                  onEnded={() => setTestPlaybackUrl(null)}
+                />
+                <button type="button" onClick={() => setTestPlaybackUrl(null)} style={{ marginTop: 8, fontSize: 10, color: '#0369a1', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Close player</button>
+              </div>
+            )}
             {localAds.length === 0 ? (
               <div style={styles.emptyState}>
                 <FiUpload size={48} style={styles.emptyIcon} />
@@ -1136,11 +1510,29 @@ const MusicAdManager = () => {
                     <div style={styles.adInfo}>
                       <h3 style={styles.adTitle}>{ad.title}</h3>
                       <p style={styles.adMeta}>
-                        Duration: {ad.duration}s • Plays every {ad.play_frequency} songs
+                        Duration: {ad.duration}s • {adTestEveryOneSong ? 'Plays every 1 song (test mode)' : `Plays every ${adSettings.frequency} songs (per settings above)`}
                         {ad.description && ` • ${ad.description}`}
+                      </p>
+                      <p style={{ ...styles.adMeta, marginTop: 4, fontSize: 10, color: TavariStyles.colors.gray600 }}>
+                        Schedule: {formatSchedule(ad)}
                       </p>
                     </div>
                     <div style={styles.adActions}>
+                      <PermissionGate permission="music.ads.manage">
+                        <button
+                          style={styles.actionButton}
+                          onClick={() => setScheduleModalAd({
+                            id: ad.id,
+                            title: ad.title,
+                            start_date: ad.start_date ? String(ad.start_date).slice(0, 10) : '',
+                            end_date: ad.end_date ? String(ad.end_date).slice(0, 10) : ''
+                          })}
+                          title="Set start and end date for when this ad runs"
+                        >
+                          <FiEdit size={16} />
+                          Schedule
+                        </button>
+                      </PermissionGate>
                       {/* Test button - always visible if user can manage ads */}
                       <PermissionGate
                         permission="music.ads.manage"
@@ -1157,9 +1549,18 @@ const MusicAdManager = () => {
                         <button
                           style={styles.actionButton}
                           onClick={() => simulateAdPlay(ad, true)}
+                          title="Preview in player below"
                         >
                           <FiPlay size={16} />
                           Test
+                        </button>
+                        <button
+                          style={styles.actionButton}
+                          onClick={() => testAdLive(ad)}
+                          title="Play like live: pauses music, plays ad with volume boost, then resumes"
+                        >
+                          <FiRadio size={16} />
+                          Test live
                         </button>
                       </PermissionGate>
 
@@ -1190,6 +1591,56 @@ const MusicAdManager = () => {
               </div>
             )}
           </div>
+
+          {/* Schedule modal for local ad */}
+          {scheduleModalAd && (
+            <div style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.5)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 1000
+            }} onClick={() => setScheduleModalAd(null)}>
+              <div style={{
+                background: TavariStyles.colors.white,
+                borderRadius: 12,
+                padding: 24,
+                maxWidth: 400,
+                width: '90%',
+                boxShadow: '0 20px 40px rgba(0,0,0,0.15)'
+              }} onClick={(e) => e.stopPropagation()}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                  <h3 style={{ margin: 0, fontSize: 14 }}>Schedule: {scheduleModalAd.title}</h3>
+                  <button type="button" onClick={() => setScheduleModalAd(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}><FiX size={20} /></button>
+                </div>
+                <p style={{ fontSize: 10, color: TavariStyles.colors.gray600, marginBottom: 16 }}>Only play this ad between the start and end dates. Leave blank for no limit.</p>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ display: 'block', fontSize: 10, fontWeight: 600, marginBottom: 4 }}>Start date (optional)</label>
+                  <input
+                    type="date"
+                    value={scheduleModalAd.start_date}
+                    onChange={(e) => setScheduleModalAd(prev => ({ ...prev, start_date: e.target.value }))}
+                    style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #ccc' }}
+                  />
+                </div>
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ display: 'block', fontSize: 10, fontWeight: 600, marginBottom: 4 }}>End date (optional)</label>
+                  <input
+                    type="date"
+                    value={scheduleModalAd.end_date}
+                    onChange={(e) => setScheduleModalAd(prev => ({ ...prev, end_date: e.target.value }))}
+                    style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #ccc' }}
+                  />
+                </div>
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                  <button type="button" onClick={() => setScheduleModalAd(null)} style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #ccc', background: '#fff', cursor: 'pointer' }}>Cancel</button>
+                  <button type="button" onClick={() => updateLocalAdSchedule(scheduleModalAd.id, { start_date: scheduleModalAd.start_date || null, end_date: scheduleModalAd.end_date || null })} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: TavariStyles.colors.primary, color: '#fff', cursor: 'pointer' }}>Save</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Network Ads */}
           <div style={styles.adsSection}>

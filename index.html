@@ -5,7 +5,73 @@
     <link rel="icon" type="image/jpeg" href="/Tavari-symbol.jpg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Tavari Operating System - Complete Business Management Platform" />
+    <meta name="tiktok-site-verification" content="TU4vvJIKFVoyiHdqdTzlFhUKpfXoh8by" />
     <title>Tavari Operating System</title>
+    <script>
+      (function () {
+        var host = window.location.hostname;
+        var path = window.location.pathname;
+        var search = window.location.search || '';
+        var hash = window.location.hash || '';
+        var isRoot = path === '/' || path === '/index.html';
+
+        // Host kiosk redirects must run before URLSearchParams (missing on older iOS).
+        // Modern React punch clock (iPad 7+). ES5 fallback remains at /legacy-punchclock/.
+        if (host === 'legacy-punchclock.tavarios.ca' && isRoot) {
+          window.location.replace(
+            'https://legacy-punchclock.tavarios.ca/time-clock-kiosk/cb982fca-cf7a-4f59-b9c7-55ca0364eddc' +
+              search +
+              hash
+          );
+          return;
+        }
+        if (host === 'legacy-waiver.tavarios.ca' && isRoot) {
+          window.location.replace('/waiver-browser-kiosk/' + search + hash);
+          return;
+        }
+        if (host === 'task-manager.tavarios.ca' && isRoot) {
+          window.location.replace('/task-manager-kiosk/' + search + hash);
+          return;
+        }
+        if (host === 'clover-waivers.tavarios.ca' && isRoot) {
+          window.location.replace('/clover-waivers/' + search + hash);
+          return;
+        }
+
+        var isLocal = host === 'localhost' || host === '127.0.0.1';
+        if (!isLocal) return;
+
+        function getQueryParam(name) {
+          var key = String(name || '') + '=';
+          var q = search.charAt(0) === '?' ? search.substring(1) : search;
+          var parts = q.split('&');
+          for (var i = 0; i < parts.length; i++) {
+            if (parts[i].indexOf(key) === 0) {
+              try {
+                return decodeURIComponent(parts[i].substring(key.length).replace(/\+/g, ' '));
+              } catch (e) {
+                return parts[i].substring(key.length);
+              }
+            }
+          }
+          return '';
+        }
+
+        function isCloverWaiverLaunch() {
+          var clientId = getQueryParam('client_id').replace(/C$/, '');
+          return clientId === 'M1NED1S5PRAJ';
+        }
+
+        // Clover sandbox often launches at http://localhost:5173/ even when Site URL includes /clover-waivers
+        if (isRoot && getQueryParam('merchant_id') && isCloverWaiverLaunch()) {
+          window.location.replace('/clover-waivers/' + search + hash);
+          return;
+        }
+        if (path === '/oauth/callback') {
+          window.location.replace('/clover-waivers/oauth/callback' + search + hash);
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

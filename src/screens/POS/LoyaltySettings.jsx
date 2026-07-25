@@ -1,6 +1,6 @@
 // screens/POS/LoyaltySettings.jsx - Updated with Permissions and Clean Logging
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 
 // Foundation Components
@@ -13,11 +13,16 @@ import { useAuditLog } from '../../hooks/useAuditLog';
 // Permission system integration
 import { usePermissions } from '../../hooks/usePermissions';
 import PermissionGate from '../../components/Auth/PermissionGate';
+import ModuleDeactivationPanel from '../../components/Modules/ModuleDeactivationPanel';
+import LoyaltyOfferRulesPanel from '../../components/POS/LoyaltyOfferRulesPanel';
 import toast from 'react-hot-toast';
 import { FiLock, FiAlertCircle } from 'react-icons/fi';
 
+const LOYALTY_SETTINGS_TABS = ['basic', 'redemption', 'advanced', 'security', 'family', 'campaigns', 'offers'];
+
 const LoyaltySettings = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const auditLog = useAuditLog();
   
   // Auth state will be handled by POSAuthWrapper
@@ -33,9 +38,21 @@ const LoyaltySettings = () => {
     loading: permissionsLoading 
   } = usePermissions();
 
-  // Permission checks
-  const canViewLoyaltySettings = hasAnyPermission(['pos.settings.view', 'pos.settings.edit']) || hasElevatedPrivileges();
-  const canEditLoyaltySettings = hasPermission('pos.settings.edit') || isOwner();
+  // Permission checks — align with POS Loyalty + POS Settings loyalty tabs
+  const canViewLoyaltySettings = hasAnyPermission([
+    'pos.settings.view',
+    'pos.settings.edit',
+    'pos.settings.loyalty',
+    'pos.settings.loyalty.edit',
+    'pos.loyalty.settings',
+    'pos.loyalty.manage',
+  ]) || hasElevatedPrivileges();
+  const canEditLoyaltySettings = hasAnyPermission([
+    'pos.settings.edit',
+    'pos.settings.loyalty.edit',
+    'pos.loyalty.settings',
+    'pos.loyalty.manage',
+  ]) || isOwner() || isManager();
   const canManageLoyaltyProgram = hasPermission('pos.loyalty.manage') || hasElevatedPrivileges();
   
   const [settings, setSettings] = useState({
@@ -91,7 +108,17 @@ const LoyaltySettings = () => {
     push_expiry_warnings: true
   });
   
-  const [activeTab, setActiveTab] = useState('basic');
+  const tabFromUrl = searchParams.get('tab');
+  const [activeTab, setActiveTab] = useState(
+    LOYALTY_SETTINGS_TABS.includes(tabFromUrl || '') ? tabFromUrl : 'basic',
+  );
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab && LOYALTY_SETTINGS_TABS.includes(tab) && tab !== activeTab) {
+      setActiveTab(tab);
+    }
+  }, [searchParams, activeTab]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -294,6 +321,7 @@ const LoyaltySettings = () => {
     });
     
     setActiveTab(newTab);
+    setSearchParams({ tab: newTab }, { replace: true });
   };
 
   // Calculate examples for display
@@ -598,7 +626,8 @@ const LoyaltySettings = () => {
             { key: 'advanced', label: 'Advanced Features' },
             { key: 'security', label: 'Security & Fraud' },
             { key: 'family', label: 'Family Features' },
-            { key: 'campaigns', label: 'Bonus Campaigns' }
+            { key: 'campaigns', label: 'Bonus Campaigns' },
+            { key: 'offers', label: 'Personalized Offers' }
           ].map(tab => (
             <button
               key={tab.key}
@@ -1090,6 +1119,13 @@ const LoyaltySettings = () => {
             </div>
           )}
 
+          {activeTab === 'offers' && (
+            <LoyaltyOfferRulesPanel
+              businessId={authData?.selectedBusinessId}
+              canEdit={canEditLoyaltySettings}
+            />
+          )}
+
           {error && (
             <div style={styles.errorBanner}>
               {error}
@@ -1116,6 +1152,8 @@ const LoyaltySettings = () => {
               </button>
             </div>
           )}
+
+          <ModuleDeactivationPanel moduleKey="loyalty" />
         </div>
       </div>
     );

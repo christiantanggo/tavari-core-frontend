@@ -1,0 +1,289 @@
+{
+  "links": [
+    {
+      "id": "customer_booking_portal",
+      "label": "Customer booking portal",
+      "description": "Main public link for customers to browse categories and book activities online.",
+      "audience": "customer",
+      "category": "customer",
+      "keywords": [
+        "booking portal",
+        "customer portal",
+        "book online",
+        "public booking",
+        "reservation link",
+        "book activities",
+        "online booking"
+      ],
+      "resolver": "customerPortalBase",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "customer_portal_account",
+      "label": "Customer account portal",
+      "description": "Customers sign in with phone to manage bookings, waivers, and account details.",
+      "audience": "customer",
+      "category": "customer",
+      "keywords": [
+        "customer account",
+        "account portal",
+        "customer login",
+        "manage booking",
+        "phone login"
+      ],
+      "resolver": "customerPortalAccount",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "camp_registration_portal",
+      "label": "Camp registration portal",
+      "description": "Parents complete or update annual camp registration and medical forms online.",
+      "audience": "customer",
+      "category": "customer",
+      "keywords": [
+        "camp registration link",
+        "camper registration link",
+        "medical form link",
+        "camp form link",
+        "registration portal"
+      ],
+      "resolver": "campRegistrationPortal",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "party_guest_list",
+      "label": "Party guest list (host link)",
+      "description": "Send this to the party host. They sign in with the phone on the booking, then pick their party date — not a direct link to one booking.",
+      "audience": "customer",
+      "category": "customer",
+      "keywords": [
+        "host link",
+        "host guest list",
+        "guest list link",
+        "party guest list link",
+        "send guest list",
+        "birthday guest list link"
+      ],
+      "resolver": "partyGuestListPortal",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "party_guest_lists_staff",
+      "label": "Party guest lists (staff page)",
+      "description": "Staff dashboard to browse and edit all party guest lists for your business.",
+      "audience": "staff",
+      "category": "staff",
+      "keywords": [
+        "party guest lists",
+        "guest lists page",
+        "manage guest lists",
+        "all guest lists"
+      ],
+      "resolver": "partyGuestListsStaff",
+      "requiresBusinessId": false
+    },
+    {
+      "id": "waiver_signing",
+      "label": "Waiver signing (public)",
+      "description": "Customers sign your default waiver online. The link includes your active waiver template so signing works immediately.",
+      "audience": "customer",
+      "category": "customer",
+      "keywords": [
+        "waiver link",
+        "sign waiver",
+        "complete waiver",
+        "complete a waiver",
+        "finish waiver",
+        "waiver signing",
+        "public waiver",
+        "waiver url",
+        "send waiver",
+        "signing link",
+        "waiver to complete",
+        "waiver to sign"
+      ],
+      "resolver": "waiverSigning",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "waiver_from_booking",
+      "label": "Waiver from booking",
+      "description": "Waiver flow after a booking (customer portal). Includes the default waiver template when configured.",
+      "audience": "customer",
+      "category": "customer",
+      "keywords": [
+        "waiver from booking",
+        "booking waiver",
+        "waiver booking link",
+        "complete waiver booking",
+        "booking portal waiver"
+      ],
+      "resolver": "waiverFromBooking",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "reputation_review",
+      "label": "Review / reputation link",
+      "description": "Customers leave a review after their visit.",
+      "audience": "customer",
+      "category": "customer",
+      "keywords": [
+        "review link",
+        "reputation",
+        "leave a review",
+        "google review",
+        "feedback link"
+      ],
+      "resolver": "reputationReview",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "waiver_kiosk_react",
+      "label": "Waiver kiosk (React)",
+      "description": "Modern fullscreen waiver kiosk for tablets and browsers. Idle content from Digital Signage → Waiver Kiosks.",
+      "audience": "staff",
+      "category": "kiosk",
+      "keywords": [
+        "waiver kiosk",
+        "waiver kiosk link",
+        "tablet waiver",
+        "signing kiosk"
+      ],
+      "resolver": "waiverKioskReact",
+      "requiresBusinessId": false
+    },
+    {
+      "id": "waiver_kiosk_dashboard",
+      "label": "Waiver kiosk (in dashboard)",
+      "description": "Signing kiosk tab inside the staff dashboard (requires staff login).",
+      "audience": "staff",
+      "category": "kiosk",
+      "keywords": [
+        "dashboard waiver kiosk",
+        "in app waiver kiosk",
+        "staff waiver kiosk"
+      ],
+      "resolver": "waiverKioskDashboard",
+      "requiresBusinessId": false
+    },
+    {
+      "id": "waiver_kiosk_download",
+      "label": "Waiver kiosk download / installer",
+      "description": "Download page for pinned waiver kiosk browsers and kiosk setup.",
+      "audience": "staff",
+      "category": "kiosk",
+      "keywords": [
+        "kiosk download",
+        "waiver installer",
+        "install waiver kiosk"
+      ],
+      "resolver": "waiverKioskDownload",
+      "requiresBusinessId": false
+    },
+    {
+      "id": "waiver_legacy_tablet",
+      "label": "Legacy waiver tablet (ES5)",
+      "description": "Standalone page for very old browsers without React. Same idle playlist as Waiver Kiosks schedule.",
+      "audience": "staff",
+      "category": "kiosk",
+      "keywords": [
+        "legacy waiver",
+        "es5 waiver",
+        "old browser waiver",
+        "waiver browser kiosk",
+        "legacy tablet"
+      ],
+      "resolver": "waiverLegacyTablet",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "music_kiosk",
+      "label": "Music kiosk",
+      "description": "Fullscreen music player kiosk. Use only for music hardware.",
+      "audience": "staff",
+      "category": "kiosk",
+      "keywords": [
+        "music kiosk",
+        "music player kiosk",
+        "kiosk music"
+      ],
+      "resolver": "musicKiosk",
+      "requiresBusinessId": false
+    },
+    {
+      "id": "digital_signage_player",
+      "label": "Digital signage player",
+      "description": "Fullscreen TV/tablet player. Pair once with a screen key — resumes after reboot.",
+      "audience": "staff",
+      "category": "kiosk",
+      "keywords": [
+        "signage",
+        "digital signage",
+        "signage player",
+        "tv player",
+        "screen player"
+      ],
+      "resolver": "signagePlayer",
+      "requiresBusinessId": false
+    },
+    {
+      "id": "time_clock_kiosk",
+      "label": "Time clock kiosk",
+      "description": "Employee punch clock on a shared device (PIN or badge).",
+      "audience": "staff",
+      "category": "kiosk",
+      "keywords": [
+        "time clock kiosk",
+        "punch clock",
+        "clock kiosk",
+        "time clock link"
+      ],
+      "resolver": "timeClockKiosk",
+      "requiresBusinessId": true
+    },
+    {
+      "id": "employee_portal_prod",
+      "label": "Employee web app (production)",
+      "description": "Dedicated employee portal for staff on phones or shared PCs in production.",
+      "audience": "staff",
+      "category": "staff",
+      "keywords": [
+        "employee portal",
+        "employee app",
+        "staff portal",
+        "employee login",
+        "employee.tavarios"
+      ],
+      "resolver": "employeePortalProd",
+      "requiresBusinessId": false
+    },
+    {
+      "id": "employee_portal_same_origin",
+      "label": "Employee portal (this site)",
+      "description": "Same employee portal build on the current app origin (dev or testing).",
+      "audience": "staff",
+      "category": "staff",
+      "keywords": [
+        "employee portal dev",
+        "portal login",
+        "local employee"
+      ],
+      "resolver": "employeePortalSameOrigin",
+      "requiresBusinessId": false
+    },
+    {
+      "id": "task_manager",
+      "label": "Task manager",
+      "description": "Internal tasks dashboard (requires staff sign-in).",
+      "audience": "staff",
+      "category": "staff",
+      "keywords": [
+        "task manager",
+        "tasks dashboard",
+        "internal tasks"
+      ],
+      "resolver": "taskManager",
+      "requiresBusinessId": false
+    }
+  ]
+}

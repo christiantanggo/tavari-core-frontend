@@ -2,6 +2,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { hasHRPermission, HR_PERMISSIONS, canViewEmployee, canEditEmployee, canViewEmployeeWage } from '../../utils/hrPermissions';
+import PositionLabel from './PositionLabel';
 
 const EmployeeCard = ({ 
   employee, 
@@ -297,16 +298,15 @@ const EmployeeCard = ({
       {/* Employee Details */}
       {config.showDetails && (
         <div style={{ marginBottom: showActions ? '16px' : '0' }}>
-          {employee.position && (
-            <p style={{
-              fontSize: config.fontSize,
-              color: '#111827',
-              fontWeight: '500',
-              margin: '0 0 6px 0'
-            }}>
-              {employee.position}
-            </p>
-          )}
+          <p style={{
+            fontSize: config.fontSize,
+            color: '#111827',
+            fontWeight: '500',
+            margin: '0 0 6px 0'
+          }}
+          >
+            <PositionLabel businessId={userContext?.businessId} value={employee.position} emptyFallback="—" />
+          </p>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
             {employee.department && (

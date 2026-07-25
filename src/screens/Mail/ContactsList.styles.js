@@ -109,6 +109,18 @@ export const styles = {
     alignItems: 'center',
     flexWrap: 'wrap',
   },
+  headerActionsStandalone: {
+    display: 'flex',
+    gap: '12px',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    marginBottom: '20px',
+    backgroundColor: 'white',
+    padding: '20px',
+    borderRadius: '12px',
+    border: '1px solid #ddd',
+    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+  },
   primaryButton: {
     backgroundColor: 'teal',
     color: 'white',

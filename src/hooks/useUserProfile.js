@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../supabaseClient';
+import { getPublicUserId } from '../utils/getPublicUserId';
 
 export function useUserProfile() {
   const [profile, setProfile] = useState(null);
@@ -15,13 +16,14 @@ export function useUserProfile() {
         return;
       }
 
+      const publicUserId = (await getPublicUserId(user.email)) || user.id;
+
       const { data: profileData } = await supabase
         .from('users')
         .select('*')
-        .eq('id', user.id)
-        .single();
+        .eq('id', publicUserId)
+        .maybeSingle();
 
-      // Role info is handled by RoleContext, not this hook
       setProfile(profileData || null);
       setRoleInfo(null);
       setLoading(false);

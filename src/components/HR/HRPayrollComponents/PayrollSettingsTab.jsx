@@ -29,7 +29,7 @@ const PayrollSettingsTab = ({
     tax_jurisdiction: 'ON',
     use_cra_tax_tables: true,
     default_claim_code: 1,
-    tax_year: 2025
+    tax_year: 2026
   });
 
   // State for hrpayroll_tax_settings table  
@@ -38,7 +38,7 @@ const PayrollSettingsTab = ({
     pay_frequency: 'weekly',
     claim_code_default: 1,
     use_cra_tables: true,
-    tax_year: 2025
+    tax_year: 2026
   });
 
   const [saving, setSaving] = useState(false);
@@ -70,6 +70,7 @@ const PayrollSettingsTab = ({
   // Load settings when component mounts or settings change
   useEffect(() => {
     if (settings) {
+      const loadedTaxYear = parseInt(settings.tax_year || 2026);
       // Load from hrpayroll_settings table
       setBasicSettings({
         pay_frequency: settings.pay_frequency || 'weekly',
@@ -82,11 +83,17 @@ const PayrollSettingsTab = ({
         tax_jurisdiction: settings.tax_jurisdiction || 'ON',
         use_cra_tax_tables: Boolean(settings.use_cra_tax_tables ?? true),
         default_claim_code: parseInt(settings.default_claim_code || 1),
-        tax_year: parseInt(settings.tax_year || 2025)
+        tax_year: loadedTaxYear
       });
+      
+      // Sync taxSettings with the same tax_year to keep them in sync
+      setTaxSettings(prev => ({
+        ...prev,
+        tax_year: loadedTaxYear
+      }));
     }
     
-    // Load tax settings separately if needed
+    // Load tax settings separately if needed (but tax_year should come from main settings)
     loadTaxSettings();
   }, [settings, selectedBusinessId]);
 
@@ -112,8 +119,16 @@ const PayrollSettingsTab = ({
           pay_frequency: data.pay_frequency || 'weekly',
           claim_code_default: parseInt(data.claim_code_default || 1),
           use_cra_tables: Boolean(data.use_cra_tables ?? true),
-          tax_year: parseInt(data.tax_year || 2025)
+          tax_year: parseInt(data.tax_year || settings?.tax_year || 2026)  // Sync with main settings if available
         });
+      } else {
+        // If no tax_settings record exists, sync with basicSettings
+        if (settings?.tax_year) {
+          setTaxSettings(prev => ({
+            ...prev,
+            tax_year: parseInt(settings.tax_year || 2026)
+          }));
+        }
       }
     } catch (err) {
       console.error('Error loading tax settings:', err);
@@ -123,6 +138,11 @@ const PayrollSettingsTab = ({
   // Handle input changes with validation
   const handleBasicSettingChange = async (field, value) => {
     setBasicSettings(prev => ({ ...prev, [field]: value }));
+    
+    // Sync tax_year to taxSettings as well (they should always be in sync)
+    if (field === 'tax_year') {
+      setTaxSettings(prev => ({ ...prev, tax_year: value }));
+    }
     
     // Clear any existing validation error for this field
     if (validationErrors[field]) {
@@ -227,7 +247,8 @@ const PayrollSettingsTab = ({
           yearToDateTotals: {
             yearToDateEI: 0,
             yearToDateCPP: 0
-          }
+          },
+          taxYear: basicSettings.tax_year || 2026
         });
 
         federalTax = craResult.federal_tax_period || 0;
@@ -326,15 +347,16 @@ const PayrollSettingsTab = ({
       if (basicError) throw basicError;
 
       // ✅ FIXED: Save to hrpayroll_tax_settings table with onConflict
+      // Use basicSettings.tax_year to ensure it's in sync (user changes this one)
       const { error: taxError } = await supabase
         .from('hrpayroll_tax_settings')
         .upsert({
           business_id: selectedBusinessId,
-          tax_jurisdiction: taxSettings.tax_jurisdiction,
-          pay_frequency: taxSettings.pay_frequency,
-          claim_code_default: taxSettings.claim_code_default,
-          use_cra_tables: taxSettings.use_cra_tables,
-          tax_year: taxSettings.tax_year,
+          tax_jurisdiction: taxSettings.tax_jurisdiction || basicSettings.tax_jurisdiction,
+          pay_frequency: taxSettings.pay_frequency || basicSettings.pay_frequency,
+          claim_code_default: taxSettings.claim_code_default || basicSettings.default_claim_code,
+          use_cra_tables: taxSettings.use_cra_tables ?? basicSettings.use_cra_tax_tables,
+          tax_year: basicSettings.tax_year,  // ✅ FIX: Use basicSettings.tax_year (what user actually changed)
           last_updated: new Date().toISOString()
         }, {
           onConflict: 'business_id'  // ✅ ADDED THIS
@@ -355,9 +377,37 @@ const PayrollSettingsTab = ({
 
       alert('Payroll settings saved successfully!');
       
+      // Refresh tax settings in the hook so it picks up the new tax_year
+      if (canadianTax?.refreshTaxSettings) {
+        await canadianTax.refreshTaxSettings();
+      }
+      
       // Trigger parent update if function provided
       if (updateSettings) {
         updateSettings({ ...basicSettings, ...taxSettings });
+      }
+      
+      // Reload tax settings from database to ensure UI shows correct value
+      await loadTaxSettings();
+      
+      // Reload settings from parent to ensure tax_year is refreshed
+      // Note: Parent should reload settings, but we'll also update local state
+      if (settings) {
+        const { data: refreshedSettings, error: refreshError } = await supabase
+          .from('hrpayroll_settings')
+          .select('tax_year, tax_jurisdiction, use_cra_tax_tables, default_claim_code')
+          .eq('business_id', selectedBusinessId)
+          .single();
+        
+        if (!refreshError && refreshedSettings) {
+          setBasicSettings(prev => ({
+            ...prev,
+            tax_year: parseInt(refreshedSettings.tax_year || 2026),
+            tax_jurisdiction: refreshedSettings.tax_jurisdiction || prev.tax_jurisdiction,
+            use_cra_tax_tables: Boolean(refreshedSettings.use_cra_tax_tables ?? prev.use_cra_tax_tables),
+            default_claim_code: parseInt(refreshedSettings.default_claim_code || prev.default_claim_code)
+          }));
+        }
       }
       
     } catch (error) {
@@ -389,15 +439,15 @@ const PayrollSettingsTab = ({
       setBasicSettings({
         pay_frequency: 'weekly',
         default_vacation_percent: 4.00,
-        federal_tax_percent: 15.00,
-        provincial_tax_percent: 10.00,
-        ei_percent: 1.64, // CORRECTED
+        federal_tax_percent: 14.00, // 2026 lowest federal rate
+        provincial_tax_percent: 5.05, // ON lowest bracket; rough preview only
+        ei_percent: 1.63, // 2026 employee EI rate
         cpp_percent: 5.95,
         use_accurate_tax_calculations: true,
         tax_jurisdiction: 'ON',
         use_cra_tax_tables: true,
         default_claim_code: 1,
-        tax_year: 2025
+        tax_year: 2026
       });
 
       setTaxSettings({
@@ -405,7 +455,7 @@ const PayrollSettingsTab = ({
         pay_frequency: 'weekly',
         claim_code_default: 1,
         use_cra_tables: true,
-        tax_year: 2025
+        tax_year: 2026
       });
 
       setValidationErrors({});
@@ -594,6 +644,57 @@ const PayrollSettingsTab = ({
                   Enable CRA T4127 compliant tax calculations (recommended for accuracy)
                 </div>
               </div>
+
+              {basicSettings.use_cra_tax_tables && (
+                <div style={{
+                  ...styles.formGroup,
+                  gridColumn: '1 / -1',
+                  marginBottom: '20px',
+                  padding: '15px',
+                  backgroundColor: '#f0f7ff',
+                  borderRadius: '8px',
+                  border: `2px solid ${basicSettings.tax_year === 2026 ? '#ff9800' : '#007bff'}`,
+                  marginTop: '10px'
+                }}>
+                  <h4 style={{ marginTop: 0, marginBottom: '10px', color: basicSettings.tax_year === 2026 ? '#ff9800' : '#007bff' }}>
+                    Tax Year Selection
+                  </h4>
+                  <p style={{ fontSize: '11px', color: '#666', marginBottom: '15px' }}>
+                    Switch between 2025 and 2026 CRA tax tables. Use 2026 for new calculations while keeping 2025 available for existing payroll.
+                  </p>
+                  
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+                    <strong>Tax Year:</strong>
+                    <select
+                      value={basicSettings.tax_year}
+                      onChange={(e) => handleBasicSettingChange('tax_year', parseInt(e.target.value))}
+                      style={{
+                        padding: '8px 12px',
+                        fontSize: '11px',
+                        borderRadius: '4px',
+                        border: '1px solid #ccc',
+                        minWidth: '120px',
+                        backgroundColor: '#fff'
+                      }}
+                    >
+                      <option value={2025}>2025</option>
+                      <option value={2026}>2026</option>
+                    </select>
+                  </label>
+                  
+                  {basicSettings.tax_year === 2026 && (
+                    <div style={{ 
+                      padding: '10px', 
+                      backgroundColor: '#fff3cd', 
+                      borderRadius: '4px', 
+                      border: '1px solid #ffc107',
+                      marginTop: '10px'
+                    }}>
+                      <strong>⚠️ Testing Mode:</strong> 2026 tax calculations are active. Verify all calculations before processing production payroll.
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div style={styles.formGroup}>
                 <label style={styles.label}>Tax Jurisdiction</label>

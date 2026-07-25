@@ -151,23 +151,37 @@ const EETRT_ReportConfiguration = ({ selectedEmployee, reportConfig, setReportCo
         {reportConfig.dateRangeType === 'custom' && (
           <>
             <div style={styles.formGroup}>
-              <label style={styles.label}>Custom Start Date:</label>
+              <label style={styles.label}>
+                {reportConfig.isT4Report ? 'Payroll Period Start:' : 'Custom Start Date:'}
+              </label>
               <input
                 type="date"
                 style={styles.input}
                 value={reportConfig.customStartDate}
                 onChange={(e) => setReportConfig(prev => ({ ...prev, customStartDate: e.target.value }))}
               />
+              {reportConfig.isT4Report && (
+                <div style={{ fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray600, marginTop: TavariStyles.spacing.xs }}>
+                  First day of the pay period to include (not pay date).
+                </div>
+              )}
             </div>
 
             <div style={styles.formGroup}>
-              <label style={styles.label}>Custom End Date:</label>
+              <label style={styles.label}>
+                {reportConfig.isT4Report ? 'Payroll Period End:' : 'Custom End Date:'}
+              </label>
               <input
                 type="date"
                 style={styles.input}
                 value={reportConfig.customEndDate}
                 onChange={(e) => setReportConfig(prev => ({ ...prev, customEndDate: e.target.value }))}
               />
+              {reportConfig.isT4Report && (
+                <div style={{ fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray600, marginTop: TavariStyles.spacing.xs }}>
+                  Last day of the pay period to include (not pay date).
+                </div>
+              )}
             </div>
           </>
         )}

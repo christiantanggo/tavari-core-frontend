@@ -1,0 +1,36 @@
+---
+description: Use the repo's established live E2E testing workflow
+alwaysApply: true
+---
+
+# Live E2E testing workflow
+
+When running full end-to-end tests in this repo, use the established local workflow instead of guessing routes, ports, or database access paths.
+
+## UI automation
+
+1. Check the active dev terminal first and use the actual Vite URL shown there. Do not guess `localhost` ports.
+2. Prefer temporary local **Playwright** scripts run with `node` for complex UI flows.
+3. Prefer public routes for public-flow testing:
+   - `/waiver/:businessId/:templateKey`
+   - `/waiver-from-booking/:businessId/:templateKey?`
+   - `/customer-portal/:businessId/portal`
+   - `/waiver-browser-kiosk/index.html?business=...`
+4. For protected dashboard flows, use an already authenticated local session or automate login only if the route truly requires it.
+5. Clean up temporary test scripts after verification.
+
+## Live Supabase verification
+
+1. First choice: run live checks with `npx supabase db query --linked "...sql..." -o json`.
+2. If Supabase CLI temp-role auth / pooler / `ECIRCUITBREAKER` blocks queries, use a temporary Edge Function instead:
+   - create a one-off function under `supabase/functions/`
+   - deploy with `npx supabase functions deploy <name> --no-verify-jwt --use-api`
+   - invoke it from PowerShell with `Invoke-RestMethod`
+   - delete it after use
+3. Do not rely on the Supabase dashboard for reproducible verification when the repo already supports CLI/function-based checks.
+
+## Practical expectations
+
+- Use unique test emails/phones so created rows are easy to identify.
+- Verify both the UI outcome and the persisted DB state.
+- For accounting or other sensitive flows, prefer app-native reversal/cleanup over ad hoc destructive SQL.

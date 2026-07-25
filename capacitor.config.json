@@ -1,0 +1,23 @@
+{
+  "appId": "com.tavari.waiverkiosk",
+  "appName": "Tavari Waiver Kiosk",
+  "webDir": "dist",
+  "server": {
+    "url": "https://www.tavarios.ca/kiosk/waiver",
+    "cleartext": false
+  },
+  "ios": {
+    "contentInset": "automatic",
+    "allowsLinkPreview": false,
+    "scrollEnabled": true
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "backgroundColor": "#0f172a"
+    }
+  },
+  "packageClassList": [
+    "WaiverNavigationPlugin"
+  ]
+}

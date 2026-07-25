@@ -1,0 +1,4 @@
+-- No-op placeholder.
+-- This version was applied remotely during accounting hardening cleanup.
+-- The canonical app_modules bootstrap migration is:
+--   20260205115959_create_app_modules_table.sql

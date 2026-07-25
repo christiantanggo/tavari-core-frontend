@@ -16,6 +16,7 @@ import { TavariStyles } from '../../utils/TavariStyles';
 import TOSAHeaderBar from '../../components/TavariAdminComp/TOSAHeaderBar';
 import TOSASidebarNav from '../../components/TavariAdminComp/TOSASidebarNav';
 import TOSABusinessSelector from '../../components/TavariAdminComp/TOSABusinessSelector';
+import { formatDateShort, getBusinessTimezone } from '../../utils/businessDateFormat';
 
 const TOSABusinessEditor = () => {
   const { businessId: paramBusinessId } = useParams();
@@ -62,6 +63,7 @@ const TOSABusinessEditor = () => {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const businessTimezone = getBusinessTimezone(businessData);
 
   // Check TOSA authentication on mount
   // TOSA is now open - no auth check needed
@@ -531,7 +533,7 @@ const TOSABusinessEditor = () => {
                     </div>
                     {user.hire_date && (
                       <div style={{fontSize: '12px', color: '#999'}}>
-                        Hired: {new Date(user.hire_date).toLocaleDateString()}
+                        Hired: {formatDateShort(user.hire_date, businessTimezone)}
                       </div>
                     )}
                   </div>
@@ -617,7 +619,7 @@ const TOSABusinessEditor = () => {
               <input
                 style={styles.input}
                 type="text"
-                value={businessData.created_at ? new Date(businessData.created_at).toLocaleDateString() : 'Unknown'}
+                value={businessData.created_at ? formatDateShort(businessData.created_at, businessTimezone) : 'Unknown'}
                 disabled
               />
             </div>

@@ -1,0 +1,895 @@
+-- Photo requirement modes: always, random (peer-review sample weights), or never.
+-- Existing tasks default to random.
+
+ALTER TABLE public.task_manager_tasks
+  ADD COLUMN IF NOT EXISTS photo_requirement_mode text NOT NULL DEFAULT 'never';
+
+ALTER TABLE public.task_manager_templates
+  ADD COLUMN IF NOT EXISTS photo_requirement_mode text NOT NULL DEFAULT 'never';
+
+ALTER TABLE public.task_manager_tasks
+  DROP CONSTRAINT IF EXISTS task_manager_tasks_photo_requirement_mode_check;
+
+ALTER TABLE public.task_manager_tasks
+  ADD CONSTRAINT task_manager_tasks_photo_requirement_mode_check
+  CHECK (photo_requirement_mode IN ('always', 'random', 'never'));
+
+ALTER TABLE public.task_manager_templates
+  DROP CONSTRAINT IF EXISTS task_manager_templates_photo_requirement_mode_check;
+
+ALTER TABLE public.task_manager_templates
+  ADD CONSTRAINT task_manager_templates_photo_requirement_mode_check
+  CHECK (photo_requirement_mode IN ('always', 'random', 'never'));
+
+UPDATE public.task_manager_tasks
+SET photo_requirement_mode = 'random';
+
+UPDATE public.task_manager_templates
+SET photo_requirement_mode = 'random';
+
+UPDATE public.task_manager_tasks
+SET requires_photo = (photo_requirement_mode = 'always');
+
+UPDATE public.task_manager_templates
+SET requires_photo = (photo_requirement_mode = 'always');
+
+CREATE OR REPLACE FUNCTION public.task_manager_sync_photo_requirement_flags()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.requires_photo := (COALESCE(NEW.photo_requirement_mode, 'never') = 'always');
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_task_manager_tasks_photo_flags ON public.task_manager_tasks;
+CREATE TRIGGER trg_task_manager_tasks_photo_flags
+  BEFORE INSERT OR UPDATE OF photo_requirement_mode ON public.task_manager_tasks
+  FOR EACH ROW
+  EXECUTE FUNCTION public.task_manager_sync_photo_requirement_flags();
+
+DROP TRIGGER IF EXISTS trg_task_manager_templates_photo_flags ON public.task_manager_templates;
+CREATE TRIGGER trg_task_manager_templates_photo_flags
+  BEFORE INSERT OR UPDATE OF photo_requirement_mode ON public.task_manager_templates
+  FOR EACH ROW
+  EXECUTE FUNCTION public.task_manager_sync_photo_requirement_flags();
+
+CREATE OR REPLACE FUNCTION public.task_manager_effective_photo_required(
+  p_business_id uuid,
+  p_task_id uuid,
+  p_employee_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_task public.task_manager_tasks%ROWTYPE;
+  v_mode text;
+  v_sample_rate numeric;
+  v_roll numeric;
+  v_seed text;
+BEGIN
+  SELECT * INTO v_task
+  FROM public.task_manager_tasks
+  WHERE id = p_task_id
+    AND business_id = p_business_id;
+
+  IF v_task.id IS NULL THEN
+    RETURN false;
+  END IF;
+
+  v_mode := COALESCE(
+    NULLIF(v_task.photo_requirement_mode, ''),
+    CASE WHEN v_task.requires_photo THEN 'always' ELSE 'never' END
+  );
+
+  IF v_mode = 'always' THEN
+    RETURN true;
+  ELSIF v_mode = 'never' THEN
+    RETURN false;
+  END IF;
+
+  v_sample_rate := public.task_manager_peer_review_sample_rate(p_business_id, p_employee_id);
+  v_seed := p_task_id::text || '|' || p_employee_id::text || '|' ||
+    COALESCE(v_task.scheduled_for::text, v_task.available_at::text, v_task.id::text);
+  v_roll := (
+    ('x' || substr(md5(v_seed), 1, 8))::bit(32)::bigint::numeric / 4294967295.0
+  );
+
+  RETURN v_roll < v_sample_rate;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.task_manager_resolve_task_photo_required(
+  p_business_id uuid,
+  p_task_id uuid,
+  p_employee_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_task public.task_manager_tasks%ROWTYPE;
+  v_mode text;
+BEGIN
+  SELECT * INTO v_task
+  FROM public.task_manager_tasks
+  WHERE id = p_task_id
+    AND business_id = p_business_id;
+
+  IF v_task.id IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Task not found');
+  END IF;
+
+  v_mode := COALESCE(
+    NULLIF(v_task.photo_requirement_mode, ''),
+    CASE WHEN v_task.requires_photo THEN 'always' ELSE 'never' END
+  );
+
+  RETURN jsonb_build_object(
+    'success', true,
+    'photo_requirement_mode', v_mode,
+    'photo_required', public.task_manager_effective_photo_required(p_business_id, p_task_id, p_employee_id),
+    'sample_rate', CASE
+      WHEN v_mode = 'random' THEN public.task_manager_peer_review_sample_rate(p_business_id, p_employee_id)
+      ELSE NULL
+    END
+  );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.task_manager_effective_photo_required(uuid, uuid, uuid) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.task_manager_resolve_task_photo_required(uuid, uuid, uuid) TO anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.task_manager_complete_task(
+  p_business_id uuid,
+  p_task_id uuid,
+  p_employee_id uuid,
+  p_pin text,
+  p_notes text DEFAULT NULL,
+  p_completed_checklist jsonb DEFAULT '[]'::jsonb,
+  p_evidence jsonb DEFAULT '{}'::jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_verified uuid;
+  v_task public.task_manager_tasks%ROWTYPE;
+  v_completion_id uuid;
+  v_missing_required integer := 0;
+  v_manager_review_rate numeric := 0;
+  v_employee_hire_date date;
+  v_prior_flags integer := 0;
+  v_should_manager_review boolean := false;
+  v_review_status text := 'not_required';
+  v_group_id uuid;
+  v_open_in_group integer := 0;
+  v_reset_cadence text;
+  v_next_due timestamptz;
+  v_occurrences integer;
+  v_photo_required boolean := false;
+BEGIN
+  SELECT employee_id INTO v_verified
+  FROM public.task_manager_verify_pin(p_business_id, p_pin)
+  LIMIT 1;
+
+  IF v_verified IS NULL OR v_verified <> p_employee_id THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Invalid PIN');
+  END IF;
+
+  SELECT * INTO v_task
+  FROM public.task_manager_tasks
+  WHERE id = p_task_id
+    AND business_id = p_business_id
+    AND status IN ('to_do', 'in_progress')
+  FOR UPDATE;
+
+  IF v_task.id IS NULL THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Task is no longer available');
+  END IF;
+
+  IF v_task.assigned_to IS NOT NULL AND v_task.assigned_to <> p_employee_id THEN
+    RETURN jsonb_build_object('success', false, 'error', 'This task is assigned to another employee');
+  END IF;
+
+  SELECT count(*)::integer INTO v_missing_required
+  FROM public.task_manager_training_resources tr
+  LEFT JOIN public.task_manager_employee_training_completions etc
+    ON etc.resource_id = tr.id AND etc.employee_id = p_employee_id
+  WHERE (tr.task_id = v_task.id OR (v_task.template_id IS NOT NULL AND tr.template_id = v_task.template_id AND tr.task_id IS NULL))
+    AND tr.is_required = true
+    AND etc.id IS NULL;
+
+  IF v_missing_required > 0 THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Required training must be completed first', 'training_required', true);
+  END IF;
+
+  IF v_task.requires_notes AND length(trim(COALESCE(p_notes, ''))) = 0 THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Completion notes are required');
+  END IF;
+
+  v_photo_required := public.task_manager_effective_photo_required(p_business_id, p_task_id, p_employee_id);
+
+  IF v_photo_required AND COALESCE(p_evidence->>'photo_data_url', p_evidence->>'photo_url', '') = '' THEN
+    RETURN jsonb_build_object('success', false, 'error', 'Photo evidence is required');
+  END IF;
+
+  SELECT COALESCE(t.manager_review_rate, 0), u.hire_date
+    INTO v_manager_review_rate, v_employee_hire_date
+  FROM public.task_manager_tasks task
+  LEFT JOIN public.task_manager_templates t ON t.id = task.template_id
+  LEFT JOIN public.users u ON u.id = p_employee_id
+  WHERE task.id = p_task_id;
+
+  SELECT count(*)::integer INTO v_prior_flags
+  FROM public.task_manager_reviews r
+  JOIN public.task_manager_tasks task ON task.id = r.task_id
+  WHERE task.completed_by = p_employee_id
+    AND r.status = 'flagged'
+    AND r.created_at > now() - interval '90 days';
+
+  v_manager_review_rate := LEAST(
+    1,
+    COALESCE(v_manager_review_rate, 0)
+    + CASE WHEN v_employee_hire_date IS NOT NULL AND v_employee_hire_date > current_date - 90 THEN 0.15 ELSE 0 END
+    + LEAST(0.35, v_prior_flags * 0.05)
+  );
+  v_should_manager_review := random() < v_manager_review_rate;
+
+  IF v_should_manager_review THEN
+    v_review_status := 'pending_manager';
+  END IF;
+
+  INSERT INTO public.task_manager_completions (
+    business_id, task_id, employee_id, notes, evidence, completed_checklist
+  )
+  VALUES (
+    p_business_id, p_task_id, p_employee_id, p_notes,
+    COALESCE(p_evidence, '{}'::jsonb), COALESCE(p_completed_checklist, '[]'::jsonb)
+  )
+  RETURNING id INTO v_completion_id;
+
+  IF v_task.peer_review_required THEN
+    PERFORM public.task_manager_maybe_add_peer_review_pool(
+      p_business_id, p_task_id, v_completion_id, p_employee_id, v_task.title
+    );
+  END IF;
+
+  v_occurrences := COALESCE(v_task.occurrences_completed, 0) + 1;
+
+  IF (v_task.due_schedule_mode = 'daily_required'
+      OR (v_task.due_schedule_mode = 'frequency' AND v_task.schedule_type IS NOT NULL)) THEN
+    IF v_task.due_schedule_mode = 'frequency'
+       AND v_task.ends_on IS NOT NULL
+       AND current_date > v_task.ends_on THEN
+      UPDATE public.task_manager_tasks
+      SET status = 'done', claimed_by = COALESCE(claimed_by, p_employee_id), completed_by = p_employee_id,
+          completed_at = now(), manager_review_required = v_should_manager_review, review_status = v_review_status,
+          occurrences_completed = v_occurrences,
+          completion_summary = jsonb_build_object('completion_id', v_completion_id, 'notes', p_notes, 'evidence', COALESCE(p_evidence, '{}'::jsonb))
+      WHERE id = p_task_id;
+    ELSIF v_task.due_schedule_mode = 'frequency'
+          AND v_task.max_occurrences IS NOT NULL
+          AND v_occurrences >= v_task.max_occurrences THEN
+      UPDATE public.task_manager_tasks
+      SET status = 'done', claimed_by = COALESCE(claimed_by, p_employee_id), completed_by = p_employee_id,
+          completed_at = now(), manager_review_required = v_should_manager_review, review_status = v_review_status,
+          occurrences_completed = v_occurrences,
+          completion_summary = jsonb_build_object('completion_id', v_completion_id, 'notes', p_notes, 'evidence', COALESCE(p_evidence, '{}'::jsonb))
+      WHERE id = p_task_id;
+    ELSIF v_task.due_schedule_mode = 'frequency' AND v_task.schedule_type = 'once' THEN
+      UPDATE public.task_manager_tasks
+      SET status = 'done', claimed_by = COALESCE(claimed_by, p_employee_id), completed_by = p_employee_id,
+          completed_at = now(), manager_review_required = v_should_manager_review, review_status = v_review_status,
+          occurrences_completed = v_occurrences,
+          completion_summary = jsonb_build_object('completion_id', v_completion_id, 'notes', p_notes, 'evidence', COALESCE(p_evidence, '{}'::jsonb))
+      WHERE id = p_task_id;
+    ELSE
+      v_next_due := COALESCE(v_task.due_at, now());
+      IF v_task.due_schedule_mode = 'daily_required'
+         OR v_task.schedule_type = 'daily' THEN
+        v_next_due := v_next_due + interval '1 day';
+      ELSIF v_task.schedule_type = 'weekly' THEN
+        v_next_due := v_next_due + interval '7 days';
+      ELSIF v_task.schedule_type = 'biweekly' THEN
+        v_next_due := v_next_due + interval '14 days';
+      ELSIF v_task.schedule_type IN ('monthly', 'monthly_weekday') THEN
+        v_next_due := v_next_due + interval '1 month';
+      END IF;
+
+      UPDATE public.task_manager_tasks
+      SET
+        status = 'to_do',
+        claimed_by = NULL,
+        completed_by = NULL,
+        completed_at = NULL,
+        available_at = v_next_due,
+        due_at = v_next_due,
+        occurrences_completed = v_occurrences,
+        manager_review_required = false,
+        review_status = 'not_required',
+        completion_summary = '{}'::jsonb
+      WHERE id = p_task_id;
+    END IF;
+  ELSE
+    UPDATE public.task_manager_tasks
+    SET
+      status = 'done',
+      claimed_by = COALESCE(claimed_by, p_employee_id),
+      completed_by = p_employee_id,
+      completed_at = now(),
+      manager_review_required = v_should_manager_review,
+      review_status = v_review_status,
+      completion_summary = jsonb_build_object(
+        'completion_id', v_completion_id,
+        'notes', p_notes,
+        'evidence', COALESCE(p_evidence, '{}'::jsonb)
+      )
+    WHERE id = p_task_id;
+  END IF;
+
+  PERFORM public.task_manager_clear_task_handoff(p_task_id);
+
+  IF v_task.round_robin_group_id IS NOT NULL THEN
+    v_group_id := v_task.round_robin_group_id;
+    SELECT reset_cadence INTO v_reset_cadence
+    FROM public.task_manager_round_robin_groups
+    WHERE id = v_group_id;
+
+    IF COALESCE(v_reset_cadence, 'on_complete') = 'on_complete' THEN
+      SELECT count(*)::integer INTO v_open_in_group
+      FROM public.task_manager_tasks
+      WHERE round_robin_group_id = v_group_id
+        AND business_id = p_business_id
+        AND status IN ('to_do', 'in_progress');
+
+      IF v_open_in_group = 0 THEN
+        UPDATE public.task_manager_tasks
+        SET
+          status = 'to_do',
+          claimed_by = NULL,
+          completed_by = NULL,
+          completed_at = NULL,
+          review_status = 'not_required',
+          manager_review_required = false,
+          completion_summary = '{}'::jsonb,
+          available_at = now()
+        WHERE round_robin_group_id = v_group_id
+          AND business_id = p_business_id
+          AND status <> 'cancelled';
+      END IF;
+    END IF;
+  END IF;
+
+  IF v_should_manager_review THEN
+    INSERT INTO public.task_manager_reviews (business_id, task_id, completion_id, review_type)
+    VALUES (p_business_id, p_task_id, v_completion_id, 'manager');
+  END IF;
+
+  INSERT INTO public.task_manager_activity (business_id, task_id, actor_id, action, details)
+  VALUES (
+    p_business_id, p_task_id, p_employee_id, 'task_completed',
+    jsonb_build_object('completion_id', v_completion_id, 'review_status', v_review_status, 'photo_required', v_photo_required)
+  );
+
+  RETURN jsonb_build_object(
+    'success', true,
+    'completion_id', v_completion_id,
+    'review_status', v_review_status,
+    'photo_required', v_photo_required
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.task_manager_generate_due_tasks(p_business_id uuid)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_inserted integer := 0;
+  v_missed integer;
+  v_prev_missed integer;
+  v_tz text;
+  v_business_date date;
+BEGIN
+  SELECT COALESCE(timezone, 'America/Toronto') INTO v_tz
+  FROM public.businesses
+  WHERE id = p_business_id;
+
+  v_business_date := (now() AT TIME ZONE v_tz)::date;
+  v_missed := public.task_manager_mark_missed_occurrences(p_business_id);
+
+  SELECT count(*)::integer INTO v_prev_missed
+  FROM public.task_manager_tasks
+  WHERE business_id = p_business_id
+    AND occurrence_status = 'missed'
+    AND missed_at > now() - interval '24 hours';
+
+  INSERT INTO public.task_manager_tasks (
+    business_id, template_id, title, description, category, category_id, priority,
+    assignment_scope, assigned_to, status, available_at, due_at, scheduled_for,
+    requires_photo, photo_requirement_mode, requires_notes, peer_review_required, instructions, checklist,
+    required_form_id, priority_boost, created_by
+  )
+  SELECT
+    t.business_id, t.id, t.title, t.description, t.category, t.category_id, t.priority,
+    t.assignment_scope, t.default_assigned_to, 'to_do',
+    scheduled_at, scheduled_at + make_interval(mins => t.due_window_minutes), scheduled_at,
+    t.requires_photo, t.photo_requirement_mode, t.requires_notes, t.peer_review_required, t.instructions, t.checklist,
+    t.required_form_id,
+    CASE WHEN v_prev_missed > 0 THEN 1 ELSE 0 END,
+    t.created_by
+  FROM public.task_manager_templates t
+  CROSS JOIN LATERAL (
+    SELECT public.forms_slot_at(v_business_date, schedule_time::text, v_tz) AS scheduled_at
+    FROM unnest(t.schedule_times) AS schedule_time
+  ) s
+  WHERE t.business_id = p_business_id
+    AND t.status = 'active'
+    AND t.recurrence_type = 'daily'
+    AND cardinality(t.schedule_times) > 0
+    AND scheduled_at <= now() + interval '30 minutes'
+    AND NOT EXISTS (
+      SELECT 1 FROM public.forms_submissions fs
+      WHERE fs.business_id = p_business_id
+        AND fs.task_template_id = t.id
+        AND fs.scheduled_for = scheduled_at
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM public.task_manager_tasks existing
+      WHERE existing.business_id = p_business_id
+        AND existing.template_id = t.id
+        AND existing.scheduled_for = scheduled_at
+    )
+  ON CONFLICT (template_id, scheduled_for) DO NOTHING;
+
+  GET DIAGNOSTICS v_inserted = ROW_COUNT;
+  RETURN v_inserted;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.task_manager_reset_weekly_round_robin(p_business_id uuid)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_week_start date;
+  v_biweekly_period_start date;
+  v_reset_count integer := 0;
+  g RECORD;
+  slot RECORD;
+  v_next_sort integer;
+  v_new_task_id uuid;
+  v_period_start date;
+  anchor public.task_manager_tasks%ROWTYPE;
+BEGIN
+  v_week_start := public.task_manager_business_week_start(p_business_id);
+  v_biweekly_period_start := public.task_manager_business_biweekly_period_start(p_business_id);
+
+  FOR g IN
+    SELECT id, reset_cadence
+    FROM public.task_manager_round_robin_groups
+    WHERE business_id = p_business_id
+      AND reset_cadence IN ('weekly_sunday', 'biweekly_sunday')
+  LOOP
+    v_period_start := CASE
+      WHEN g.reset_cadence = 'biweekly_sunday' THEN v_biweekly_period_start
+      ELSE v_week_start
+    END;
+
+    IF COALESCE(
+      (SELECT current_week_start FROM public.task_manager_round_robin_groups WHERE id = g.id),
+      '1900-01-01'::date
+    ) >= v_period_start THEN
+      CONTINUE;
+    END IF;
+
+    SELECT COALESCE(max(round_robin_sort_order), -1) + 1 INTO v_next_sort
+    FROM public.task_manager_tasks
+    WHERE round_robin_group_id = g.id
+      AND business_id = p_business_id
+      AND status <> 'cancelled';
+
+    FOR slot IN
+      SELECT DISTINCT round_robin_slot_order AS slot_order
+      FROM public.task_manager_tasks
+      WHERE round_robin_group_id = g.id
+        AND business_id = p_business_id
+        AND round_robin_slot_order IS NOT NULL
+        AND status <> 'cancelled'
+      ORDER BY 1
+    LOOP
+      IF EXISTS (
+        SELECT 1
+        FROM public.task_manager_tasks
+        WHERE round_robin_group_id = g.id
+          AND business_id = p_business_id
+          AND round_robin_slot_order = slot.slot_order
+          AND round_robin_week_start = v_period_start
+          AND status <> 'cancelled'
+      ) THEN
+        CONTINUE;
+      END IF;
+
+      SELECT * INTO anchor
+      FROM public.task_manager_tasks
+      WHERE round_robin_group_id = g.id
+        AND business_id = p_business_id
+        AND round_robin_slot_order = slot.slot_order
+        AND status <> 'cancelled'
+      ORDER BY created_at ASC
+      LIMIT 1;
+
+      IF anchor.id IS NULL THEN
+        CONTINUE;
+      END IF;
+
+      INSERT INTO public.task_manager_tasks (
+        business_id, title, description, category, category_id, priority,
+        assignment_scope, assigned_to, status, available_at, due_at,
+        requires_photo, photo_requirement_mode, requires_notes, peer_review_required, instructions, checklist,
+        required_form_id, module_link_key, due_schedule_mode, round_robin_group_id,
+        round_robin_sort_order, round_robin_slot_order, round_robin_week_start,
+        review_status, created_by
+      )
+      VALUES (
+        anchor.business_id, anchor.title, anchor.description, anchor.category, anchor.category_id, anchor.priority,
+        anchor.assignment_scope, anchor.assigned_to, 'to_do', now(), NULL,
+        anchor.requires_photo, anchor.photo_requirement_mode, anchor.requires_notes, anchor.peer_review_required, anchor.instructions, anchor.checklist,
+        anchor.required_form_id, anchor.module_link_key, anchor.due_schedule_mode, g.id,
+        v_next_sort, slot.slot_order, v_period_start,
+        'not_required', anchor.created_by
+      )
+      RETURNING id INTO v_new_task_id;
+
+      INSERT INTO public.task_manager_training_resources (
+        business_id, task_id, template_id, hr_training_item_id, title, resource_type,
+        resource_url, content, is_required, created_by
+      )
+      SELECT
+        tr.business_id, v_new_task_id, NULL, tr.hr_training_item_id, tr.title, tr.resource_type,
+        tr.resource_url, tr.content, tr.is_required, tr.created_by
+      FROM public.task_manager_training_resources tr
+      WHERE tr.task_id = anchor.id;
+
+      v_next_sort := v_next_sort + 1;
+    END LOOP;
+
+    UPDATE public.task_manager_round_robin_groups
+    SET current_week_start = v_period_start
+    WHERE id = g.id;
+
+    v_reset_count := v_reset_count + 1;
+  END LOOP;
+
+  RETURN v_reset_count;
+END;
+$$;
+
+DROP FUNCTION IF EXISTS public.task_manager_get_next_facility_task(uuid);
+
+CREATE OR REPLACE FUNCTION public.task_manager_get_next_facility_task(p_business_id uuid)
+RETURNS TABLE (
+  task_id uuid,
+  template_id uuid,
+  title text,
+  description text,
+  category text,
+  priority text,
+  assignment_scope text,
+  due_at timestamptz,
+  requires_photo boolean,
+  photo_requirement_mode text,
+  requires_notes boolean,
+  instructions text,
+  checklist jsonb,
+  training_resources jsonb,
+  missing_required_training integer,
+  required_form_id uuid,
+  required_form_title text,
+  scheduled_for timestamptz,
+  priority_boost integer,
+  module_link_key text,
+  module_link_path text,
+  module_link_button_label text,
+  module_link_allowed boolean,
+  handoff_notes text,
+  handoff_at timestamptz,
+  handoff_by_name text,
+  handoff_checklist jsonb
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  PERFORM public.task_manager_generate_due_tasks(p_business_id);
+  PERFORM public.task_manager_reset_weekly_round_robin(p_business_id);
+  PERFORM public.task_manager_reset_shift_checklists(p_business_id);
+
+  RETURN QUERY
+  WITH round_robin_heads AS (
+    SELECT DISTINCT ON (tm.round_robin_group_id)
+      tm.round_robin_group_id, tm.id AS head_task_id
+    FROM public.task_manager_tasks tm
+    WHERE tm.business_id = p_business_id
+      AND tm.round_robin_group_id IS NOT NULL
+      AND tm.status IN ('to_do', 'in_progress')
+    ORDER BY tm.round_robin_group_id, tm.round_robin_sort_order ASC NULLS LAST, tm.created_at ASC
+  ),
+  candidate AS (
+    SELECT tm.*
+    FROM public.task_manager_tasks tm
+    LEFT JOIN round_robin_heads rr ON rr.round_robin_group_id = tm.round_robin_group_id
+    LEFT JOIN public.task_manager_categories cat ON cat.id = tm.category_id
+    WHERE tm.business_id = p_business_id
+      AND tm.status IN ('to_do', 'in_progress')
+      AND tm.available_at <= now()
+      AND tm.due_schedule_mode NOT IN ('opening_checklist', 'closing_checklist', 'kiosk_checklist')
+      AND COALESCE(cat.kiosk_checklist_button, false) = false
+      AND tm.assignment_scope = 'facility'
+      AND tm.assigned_to IS NULL
+      AND (tm.round_robin_group_id IS NULL OR tm.id = rr.head_task_id)
+      AND NOT EXISTS (
+        SELECT 1 FROM public.forms_submissions fs
+        WHERE fs.business_id = p_business_id
+          AND fs.task_template_id = tm.template_id
+          AND fs.scheduled_for = tm.scheduled_for
+      )
+    ORDER BY
+      public.task_manager_kiosk_queue_tier(tm, p_business_id) ASC,
+      CASE WHEN tm.handoff_at IS NOT NULL AND tm.status = 'in_progress' THEN 0 ELSE 1 END,
+      tm.handoff_at DESC NULLS LAST,
+      tm.priority_boost DESC,
+      CASE tm.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,
+      COALESCE(tm.due_at, tm.available_at) ASC,
+      tm.round_robin_sort_order ASC NULLS LAST,
+      tm.created_at ASC
+    LIMIT 1
+  )
+  SELECT
+    c.id, c.template_id, c.title, c.description, c.category, c.priority, c.assignment_scope,
+    c.due_at, c.requires_photo, c.photo_requirement_mode, c.requires_notes, c.instructions, c.checklist,
+    COALESCE((
+      SELECT jsonb_agg(resource_row ORDER BY (resource_row->>'sort_order')::integer, resource_row->>'title')
+      FROM (
+        SELECT jsonb_build_object(
+          'id', tr.id,
+          'title', tr.title,
+          'resource_type', tr.resource_type,
+          'resource_url', tr.resource_url,
+          'content', tr.content,
+          'is_required', tr.is_required,
+          'completed', false,
+          'scope', CASE WHEN tr.task_id = c.id THEN 'task' ELSE 'template' END,
+          'hr_training_item_id', tr.hr_training_item_id,
+          'sort_order', CASE WHEN tr.task_id = c.id THEN 0 ELSE 1000 END + row_number() OVER (ORDER BY tr.created_at)
+        ) AS resource_row
+        FROM public.task_manager_training_resources tr
+        WHERE tr.hr_training_item_id IS NULL
+          AND (
+            tr.task_id = c.id
+            OR (c.template_id IS NOT NULL AND tr.template_id = c.template_id AND tr.task_id IS NULL)
+          )
+        UNION ALL
+        SELECT jsonb_build_object(
+          'id', tr.id,
+          'title', tr.title,
+          'resource_type', 'hr_training',
+          'resource_url', NULL,
+          'content', NULL,
+          'is_required', tr.is_required,
+          'completed', false,
+          'scope', 'task',
+          'hr_training_item_id', tr.hr_training_item_id,
+          'sort_order', 1000 + row_number() OVER (ORDER BY tr.created_at)
+        )
+        FROM public.task_manager_training_resources tr
+        JOIN public.hr_training_items hti ON hti.id = tr.hr_training_item_id
+        WHERE hti.is_active = true
+          AND (
+            tr.task_id = c.id
+            OR (c.template_id IS NOT NULL AND tr.template_id = c.template_id AND tr.task_id IS NULL)
+          )
+      ) resources
+    ), '[]'::jsonb),
+    COALESCE((
+      SELECT count(*)::integer
+      FROM public.task_manager_training_resources tr
+      WHERE (
+          tr.task_id = c.id
+          OR (c.template_id IS NOT NULL AND tr.template_id = c.template_id AND tr.task_id IS NULL)
+        )
+        AND tr.is_required = true
+    ), 0),
+    c.required_form_id,
+    (SELECT ft.title FROM public.forms_templates ft WHERE ft.id = c.required_form_id),
+    c.scheduled_for,
+    c.priority_boost,
+    c.module_link_key,
+    (public.task_manager_module_link_def(c.module_link_key)->>'path')::text,
+    (public.task_manager_module_link_def(c.module_link_key)->>'button_label')::text,
+    false,
+    c.handoff_notes,
+    c.handoff_at,
+    (
+      SELECT COALESCE(NULLIF(trim(u.full_name), ''), NULLIF(trim(u.first_name || ' ' || COALESCE(u.last_name, '')), ''), 'Staff')
+      FROM public.users u
+      WHERE u.id = c.handoff_by
+    ),
+    COALESCE(c.handoff_checklist, '[]'::jsonb)
+  FROM candidate c;
+END;
+$$;
+
+DROP FUNCTION IF EXISTS public.task_manager_get_checklist_tasks(uuid, uuid, uuid);
+
+CREATE OR REPLACE FUNCTION public.task_manager_get_checklist_tasks(
+  p_business_id uuid,
+  p_employee_id uuid,
+  p_category_id uuid
+)
+RETURNS TABLE (
+  task_id uuid,
+  title text,
+  description text,
+  priority text,
+  status text,
+  instructions text,
+  checklist jsonb,
+  requires_photo boolean,
+  photo_requirement_mode text,
+  requires_notes boolean,
+  required_form_id uuid,
+  required_form_title text,
+  checklist_sort_order integer,
+  completed_at timestamptz,
+  completion_outcome text,
+  training_resources jsonb,
+  missing_required_training integer,
+  module_link_key text,
+  module_link_path text,
+  module_link_button_label text,
+  module_link_allowed boolean
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_tz text;
+  v_today date;
+  v_category public.task_manager_categories%ROWTYPE;
+BEGIN
+  SELECT * INTO v_category
+  FROM public.task_manager_categories
+  WHERE id = p_category_id
+    AND business_id = p_business_id
+    AND is_active = true
+    AND kiosk_checklist_button = true;
+
+  IF v_category.id IS NULL THEN
+    RETURN;
+  END IF;
+
+  PERFORM public.task_manager_reset_shift_checklists(p_business_id);
+
+  SELECT COALESCE(timezone, 'America/Toronto') INTO v_tz
+  FROM public.businesses
+  WHERE id = p_business_id;
+
+  v_today := (now() AT TIME ZONE v_tz)::date;
+
+  RETURN QUERY
+  SELECT
+    tm.id,
+    tm.title,
+    tm.description,
+    tm.priority,
+    tm.status,
+    tm.instructions,
+    tm.checklist,
+    tm.requires_photo,
+    tm.photo_requirement_mode,
+    tm.requires_notes,
+    tm.required_form_id,
+    (SELECT ft.title FROM public.forms_templates ft WHERE ft.id = tm.required_form_id),
+    tm.checklist_sort_order,
+    tm.completed_at,
+    CASE
+      WHEN tm.status = 'done'
+        AND COALESCE(tm.completion_summary->>'outcome', '') = 'not_applicable' THEN 'not_applicable'
+      WHEN tm.status = 'done' THEN 'complete'
+      ELSE NULL
+    END,
+    COALESCE((
+      SELECT jsonb_agg(resource_row ORDER BY (resource_row->>'sort_order')::integer, resource_row->>'title')
+      FROM (
+        SELECT jsonb_build_object(
+          'id', tr.id,
+          'title', tr.title,
+          'resource_type', tr.resource_type,
+          'resource_url', tr.resource_url,
+          'content', tr.content,
+          'is_required', tr.is_required,
+          'completed', etc.id IS NOT NULL,
+          'sort_order', row_number() OVER (ORDER BY tr.created_at)
+        ) AS resource_row
+        FROM public.task_manager_training_resources tr
+        LEFT JOIN public.task_manager_employee_training_completions etc
+          ON etc.resource_id = tr.id AND etc.employee_id = p_employee_id
+        WHERE tr.task_id = tm.id
+        UNION ALL
+        SELECT jsonb_array_elements(public.task_manager_hr_training_resource_rows(hti, tr.id, p_employee_id)) AS resource_row
+        FROM public.task_manager_training_resources tr
+        JOIN public.hr_training_items hti ON hti.id = tr.hr_training_item_id
+        WHERE hti.is_active = true AND tr.task_id = tm.id
+      ) resources
+    ), '[]'::jsonb),
+    COALESCE((
+      SELECT count(*)::integer
+      FROM public.task_manager_training_resources tr
+      LEFT JOIN public.task_manager_employee_training_completions etc
+        ON etc.resource_id = tr.id AND etc.employee_id = p_employee_id
+      WHERE tr.task_id = tm.id
+        AND tr.is_required = true
+        AND etc.id IS NULL
+    ), 0),
+    tm.module_link_key,
+    (public.task_manager_module_link_def(tm.module_link_key)->>'path')::text,
+    (public.task_manager_module_link_def(tm.module_link_key)->>'button_label')::text,
+    CASE
+      WHEN p_employee_id IS NULL THEN false
+      ELSE public.task_manager_module_link_allowed(p_business_id, p_employee_id, tm.module_link_key)
+    END
+  FROM public.task_manager_tasks tm
+  WHERE tm.business_id = p_business_id
+    AND tm.category_id = p_category_id
+    AND tm.status <> 'cancelled'
+    AND (
+      tm.status IN ('to_do', 'in_progress')
+      OR (
+        tm.status = 'done'
+        AND tm.completed_at IS NOT NULL
+        AND (tm.completed_at AT TIME ZONE v_tz)::date = v_today
+      )
+    )
+    AND (
+      p_employee_id IS NULL
+      OR tm.assigned_to = p_employee_id
+      OR (tm.assignment_scope = 'facility' AND tm.assigned_to IS NULL)
+    )
+    AND (
+      p_employee_id IS NULL
+      OR NOT EXISTS (
+        SELECT 1 FROM public.task_manager_category_employees ce
+        WHERE ce.category_id = tm.category_id
+      )
+      OR EXISTS (
+        SELECT 1 FROM public.task_manager_category_employees ce
+        WHERE ce.category_id = tm.category_id AND ce.employee_id = p_employee_id
+      )
+    )
+  ORDER BY tm.checklist_sort_order ASC NULLS LAST, tm.created_at ASC;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.task_manager_get_next_facility_task(uuid) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.task_manager_get_checklist_tasks(uuid, uuid, uuid) TO anon, authenticated;
+
+COMMENT ON COLUMN public.task_manager_tasks.photo_requirement_mode IS
+  'always = photo required every completion; random = sampled using peer-review staff weights; never = no completion photo.';

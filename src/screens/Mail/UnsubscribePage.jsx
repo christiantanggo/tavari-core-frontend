@@ -50,16 +50,53 @@ const UnsubscribePage = () => {
 
   /**
    * Parse and validate the unsubscribe token
-   * Token format: base64(contactId:businessId)
+   * Signed format: base64url(json).base64url(signature)
+   * Legacy format: base64(contactId:businessId)
    */
   const parseToken = (tokenString) => {
     try {
       // Sanitize input
-      if (!tokenString || typeof tokenString !== 'string' || tokenString.length > 200) {
+      if (!tokenString || typeof tokenString !== 'string' || tokenString.length > 1200) {
         return null;
       }
 
-      const decoded = atob(tokenString);
+      if (tokenString.includes('.')) {
+        const [encodedPayload] = tokenString.split('.');
+        if (!encodedPayload) return null;
+
+        const normalizedPayload = encodedPayload
+          .replace(/-/g, '+')
+          .replace(/_/g, '/');
+        const paddedPayload = normalizedPayload.padEnd(
+          normalizedPayload.length + ((4 - (normalizedPayload.length % 4)) % 4),
+          '='
+        );
+
+        const parsedPayload = JSON.parse(atob(paddedPayload));
+        const contactId = String(parsedPayload?.contactId || '').trim();
+        const businessId = String(parsedPayload?.businessId || '').trim();
+
+        if (!contactId || !businessId) {
+          return null;
+        }
+
+        return {
+          contactId,
+          businessId,
+          emailAddress: String(parsedPayload?.emailAddress || '').trim().toLowerCase(),
+          signed: true
+        };
+      }
+
+      const normalizedToken = tokenString
+        .replace(/-/g, '+')
+        .replace(/_/g, '/');
+      const paddedToken = normalizedToken.padEnd(
+        normalizedToken.length + ((4 - (normalizedToken.length % 4)) % 4),
+        '='
+      );
+
+      const decoded = atob(paddedToken);
       const [contactId, businessId] = decoded.split(':');
       
       // Validate UUID format (basic check)
@@ -71,7 +108,7 @@ const UnsubscribePage = () => {
         return null;
       }
 
-      return { contactId, businessId };
+      return { contactId, businessId, signed: false };
     } catch (error) {
       console.error('Token parse error:', error);
       return null;
@@ -131,38 +168,29 @@ const UnsubscribePage = () => {
           tokenData.contactId,
           contact.email,
           'unsubscribe_duplicate',
-          'unsubscribe_link'
+          'unsubscribe_link',
+          token
         );
         
         return;
       }
 
-      // Perform unsubscribe
-      const { error: updateError } = await supabase
-        .from('mail_contacts')
-        .update({ 
-          subscribed: false,
-          unsubscribed_at: new Date().toISOString(),
-          consent_status: 'unsubscribed'
-        })
-        .eq('id', tokenData.contactId)
-        .eq('business_id', tokenData.businessId);
-
-      if (updateError) {
-        console.error('Unsubscribe error:', updateError);
-        setStatus('error');
-        setMessage('Failed to process unsubscribe request. Please contact support or try again later.');
-        return;
-      }
-
-      // Log consent action for CASL compliance
-      await logConsentAction(
+      // Perform unsubscribe through the existing DB consent/unsubscribe path.
+      const unsubscribeResult = await logConsentAction(
         tokenData.businessId,
         tokenData.contactId,
         contact.email,
         'unsubscribe',
-        'unsubscribe_link'
+        'unsubscribe_link',
+        token
       );
+
+      if (!unsubscribeResult.success) {
+        console.error('Unsubscribe error:', unsubscribeResult.error);
+        setStatus('error');
+        setMessage('Failed to process unsubscribe request. Please contact support or try again later.');
+        return;
+      }
 
       setStatus('success');
       setMessage('You have been successfully unsubscribed from our mailing list.');
@@ -177,20 +205,32 @@ const UnsubscribePage = () => {
   /**
    * Log consent action for compliance (CASL/PIPEDA)
    */
-  const logConsentAction = async (businessId, contactId, emailAddress, action, source) => {
+  const logConsentAction = async (businessId, contactId, emailAddress, action, source, signedToken = null) => {
     try {
-      await supabase.rpc('log_consent_action', {
-        p_business_id: businessId,
-        p_contact_id: contactId,
-        p_email_address: emailAddress,
-        p_action: action,
-        p_consent_source: source,
-        p_consent_ip: null, // Could capture IP if needed for compliance
-        p_consent_method: 'email_link'
+      const { data, error } = await supabase.functions.invoke('mail-consent-action', {
+        body: {
+          businessId,
+          contactId,
+          emailAddress,
+          action,
+          consentSource: source,
+          consentMethod: 'email_link',
+          consentText: null,
+          ipAddress: null,
+          userAgent: navigator.userAgent || null,
+          additionalData: null,
+          signedToken
+        }
       });
+
+      if (error || data?.ok === false) {
+        throw error || new Error(data?.error || 'Failed to log consent action');
+      }
+
+      return { success: true };
     } catch (error) {
       console.error('Error logging consent action:', error);
-      // Don't fail the unsubscribe if logging fails
+      return { success: false, error };
     }
   };
 

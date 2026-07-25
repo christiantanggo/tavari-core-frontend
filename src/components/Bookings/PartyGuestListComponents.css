@@ -1,0 +1,257 @@
+.party-guest-list-overage-panel {
+  margin-bottom: 20px;
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.party-guest-list-overage-panel-title {
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.party-guest-list-overage-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px 28px;
+}
+
+.party-guest-list-overage-column {
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+.party-guest-list-overage-column-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 8px;
+  padding: 0;
+}
+
+.party-guest-list-overage-option {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+  font-size: 14px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.party-guest-list-overage-option:last-child {
+  margin-bottom: 0;
+}
+
+.party-guest-list-overage-option input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.party-guest-list-overage-other-input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.party-guest-list-portal-page {
+  min-height: 100vh;
+  background: #f9fafb;
+  padding: 24px clamp(16px, 4vw, 48px);
+  box-sizing: border-box;
+}
+
+.party-guest-list-portal-card {
+  max-width: 1120px;
+  width: 100%;
+  margin: 0 auto;
+  background: #fff;
+  border-radius: 12px;
+  padding: clamp(20px, 3vw, 32px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  box-sizing: border-box;
+}
+
+.party-guest-list-editor-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 28px;
+  align-items: start;
+}
+
+.party-guest-list-table-wrap {
+  display: block;
+  overflow-x: auto;
+}
+
+.party-guest-list-mobile-stack {
+  display: none;
+}
+
+.party-guest-list-form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.party-guest-list-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.party-guest-list-card-header-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.party-guest-list-card-header-row .party-guest-list-card-number {
+  flex-shrink: 0;
+}
+
+.party-guest-list-card-header-row .party-guest-list-card-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.party-guest-list-card-extra-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: #92400e;
+  background: #fde68a;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.party-guest-list-card-meta-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.party-guest-list-card-meta-item {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.party-guest-list-card-waiver {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.party-guest-list-card-secondary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+.party-guest-list-card.is-over-limit {
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.party-guest-list-card-number {
+  font-weight: 700;
+  font-size: 15px;
+  color: #6b7280;
+}
+
+.party-guest-list-card.is-over-limit .party-guest-list-card-number {
+  color: #b45309;
+}
+
+.party-guest-list-card-name {
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 1.35;
+  color: #111827;
+}
+
+.party-guest-list-card-detail {
+  font-size: 13px;
+  color: #6b7280;
+  line-height: 1.45;
+}
+
+.party-guest-list-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.party-guest-list-mobile-edit {
+  padding: 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+}
+
+@media (max-width: 767px) {
+  .party-guest-list-overage-options {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .party-guest-list-editor-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .party-guest-list-table-wrap {
+    display: none;
+  }
+
+  .party-guest-list-mobile-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .party-guest-list-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .party-guest-list-card-actions button {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 120px;
+    justify-content: center;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1100px) {
+  .party-guest-list-overage-options {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .party-guest-list-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -235,10 +235,11 @@ export const validateFormSecurity = async (formData, validationRules = {}) => {
         validation = { valid: true, sanitized: SecurityUtilsClass.sanitizeString(value) };
     }
 
-    // Security checks
-    const xssCheck = SecurityUtilsClass.checkForXSS(value);
-    const sqlCheck = SecurityUtilsClass.checkForSQLInjection(value);
-    const commandCheck = SecurityUtilsClass.checkForCommandInjection(value);
+    // Security checks (skip injection heuristics for passwords — see useSecurityContext validateInput)
+    const skipInjectionHeuristics = rules.type === 'password' || fieldName === 'password';
+    const xssCheck = skipInjectionHeuristics ? { safe: true } : SecurityUtilsClass.checkForXSS(value);
+    const sqlCheck = skipInjectionHeuristics || rules.type === 'email' ? { safe: true } : SecurityUtilsClass.checkForSQLInjection(value);
+    const commandCheck = skipInjectionHeuristics ? { safe: true } : SecurityUtilsClass.checkForCommandInjection(value);
 
     if (!xssCheck.safe || !sqlCheck.safe || !commandCheck.safe) {
       validation.valid = false;

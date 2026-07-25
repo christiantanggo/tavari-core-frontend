@@ -1,0 +1,28 @@
+---
+description: Deploy Supabase functions and other deployable artifacts after making changes
+alwaysApply: true
+---
+
+# Deploy after changes
+
+For **Supabase Edge Functions**, run the deploy yourself when you change those files. For **Vercel**, deploy only when the user explicitly asks (see below). Do not tell the user to redeploy edge functions manually when you were supposed to run it.
+
+## Supabase Edge Functions
+
+After editing any file under `supabase/functions/**`:
+
+1. Deploy the specific function(s) you changed, e.g.:
+   - `npx supabase functions deploy receive-email --no-verify-jwt`
+   - `npx supabase functions deploy accounting-process-inbound-invoice --no-verify-jwt`
+   - Or deploy all: `npx supabase functions deploy --no-verify-jwt`
+2. Use PowerShell-compatible syntax in this repo (Windows): chain commands with `;` not `&&`, or run from the project root (tavari-core-frontend) where `supabase` is configured.
+
+## Vercel (this frontend)
+
+**Do not run** `npx vercel --prod`, `npm run deploy`, or any Vercel CLI deploy **unless the user explicitly asks you to deploy** in that conversation. The user deploys via GitHub and/or Vercel CLI on their own; do not deploy after every code change.
+
+When they do ask: **`npm run deploy`** only (`npx vercel --prod`). That triggers **exactly one** production build (on Vercel). **Never** run `npm run build && npx vercel --prod` or any script that builds locally before `vercel --prod` — Vercel will build again from uploaded sources, so you pay for two full Vite runs. If the user needs to sanity-check locally, they run `npm run build` separately for themselves; deploy still uses **`npm run deploy`** alone.
+
+## Other deployable artifacts
+
+For non–Supabase deploys, **only run deploy commands when the user explicitly requests deployment**, unless a different workspace rule overrides this.

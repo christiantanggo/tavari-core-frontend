@@ -13,7 +13,8 @@ const TaxesTab = ({
   setNewTaxCategory,
   setShowAddTaxModal,
   setShowAddRebateModal,
-  taxError 
+  taxError,
+  canEdit = true
 }) => {
   const primaryTaxes = taxCategories.filter(cat => cat.category_type === 'tax' && cat.is_active) || [];
   const rebates = taxCategories.filter(cat => (cat.category_type === 'rebate' || cat.category_type === 'exemption') && cat.is_active) || [];
@@ -228,6 +229,39 @@ const TaxesTab = ({
             </div>
           )}
         </div>
+
+        <div style={styles.indianStatusSection}>
+          <h4 style={styles.subSectionTitle}>Indian Status (GST only)</h4>
+          <div style={styles.settingDescription}>
+            When staff use &quot;Indian Status (GST Only)&quot; on the register, the whole sale is taxed at this federal GST rate only (not your full HST/GST+PST stack). Update when CRA rates change.
+          </div>
+          <div style={styles.setting}>
+            <label style={styles.label}>GST rate (decimal)</label>
+            <input
+              type="number"
+              step="0.0001"
+              min="0"
+              max="1"
+              value={settings.indian_status_gst_rate ?? 0.05}
+              onChange={(e) => handleInputChange('indian_status_gst_rate', parseFloat(e.target.value) || 0)}
+              disabled={!canEdit}
+              style={{ ...styles.input, width: '160px' }}
+            />
+            <div style={styles.settingDescription}>
+              Example: 0.05 = 5%
+            </div>
+          </div>
+          <div style={styles.setting}>
+            <label style={styles.label}>Tax line label (receipt / summary)</label>
+            <input
+              type="text"
+              value={settings.indian_status_tax_label ?? 'GST (Indian Status)'}
+              onChange={(e) => handleInputChange('indian_status_tax_label', e.target.value)}
+              disabled={!canEdit}
+              style={{ ...styles.input, width: '100%', maxWidth: '400px' }}
+            />
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -406,6 +440,13 @@ const styles = {
     backgroundColor: TavariStyles.colors.white,
     borderRadius: TavariStyles.borderRadius.md,
     border: `1px solid ${TavariStyles.colors.gray200}`
+  },
+  indianStatusSection: {
+    border: `2px solid ${TavariStyles.colors.primary}`,
+    borderRadius: TavariStyles.borderRadius.lg,
+    padding: TavariStyles.spacing.xl,
+    backgroundColor: TavariStyles.colors.gray25 || '#f9fafb',
+    marginTop: TavariStyles.spacing['2xl']
   }
 };
 

@@ -1,21 +1,33 @@
 // components/POS/POSProductGrid.jsx - Fixed modifier cart integration with smaller buttons
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import BarcodeScanHandler from "./BarcodeScanHandler";
 import ModifierSelectionModal from "./ModifierSelectionModal";
+import BundleModifierSelectionModal from "./BundleModifierSelectionModal";
+import ProductFolderPickerModal from "./ProductFolderPickerModal";
+import GiftCardSellModal from "./GiftCardSellModal";
 import { TavariStyles } from "../../utils/TavariStyles";
 import POSAuthWrapper from "../Auth/POSAuthWrapper";
 import { usePOSAuth } from "../../hooks/usePOSAuth";
 import { useTaxCalculations } from "../../hooks/useTaxCalculations";
+import { normalizeModifierGroupIds } from "../../utils/posModifierGroupsLoader";
+import { supabase } from "../../supabaseClient";
+import toast from "react-hot-toast";
 
-const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
+const POSProductGrid = ({ products, allProducts, onAddToCart, disabled = false }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [windowWidth, setWindowWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 768);
   
   // Modifier selection modal state
   const [showModifierModal, setShowModifierModal] = useState(false);
+  const [showBundleModifierModal, setShowBundleModifierModal] = useState(false);
+  const [showFolderModal, setShowFolderModal] = useState(false);
+  const [showGiftCardModal, setShowGiftCardModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
+  const [giftCardProduct, setGiftCardProduct] = useState(null);
+  const [folderChildren, setFolderChildren] = useState([]);
   
   const searchInputRef = useRef(null);
+  const catalog = allProducts || products || [];
 
   // Authentication and business context
   const auth = usePOSAuth({
@@ -26,7 +38,8 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
   // Tax calculations for price display
   const { calculateItemTax, formatTaxAmount, loading: taxLoading } = useTaxCalculations(auth.selectedBusinessId);
 
-  // Track window width for responsive behavior
+  // Track viewport width only for optional product images (not for grid column math —
+  // grid uses CSS repeat(auto-fill, minmax(...)) so it fits the real container width).
   useEffect(() => {
     if (typeof window === 'undefined') return;
     
@@ -35,88 +48,157 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Calculate grid columns based on available space (excluding cart panel)
-  const getGridColumns = () => {
-    // Account for cart panel (380px) + padding and margins
-    const availableWidth = windowWidth - 380 - 64 - 32; // cart width + padding + margin
-    const buttonWidth = 140; // Smaller button width
-    const gap = 16; // Grid gap
-    
-    if (availableWidth <= 0) return 2; // Fallback for very small screens
-    
-    const maxColumns = Math.floor((availableWidth + gap) / (buttonWidth + gap));
-    return Math.max(2, Math.min(6, maxColumns)); // Limit to 6 columns max
-  };
+  const getFolderChildren = (parentId) =>
+    (catalog || []).filter(
+      (p) => p.parent_inventory_id && String(p.parent_inventory_id) === String(parentId)
+    );
 
-  // Handle product selection - check for modifiers first
-  const handleProductClick = (product) => {
-    // Check if product has modifier groups - More comprehensive check
-    const hasModifierGroups = product.modifier_group_ids && 
-      ((Array.isArray(product.modifier_group_ids) && product.modifier_group_ids.length > 0) ||
-       (typeof product.modifier_group_ids === 'object' && product.modifier_group_ids !== null && Object.keys(product.modifier_group_ids).length > 0));
-    
-    if (hasModifierGroups) {
-      // Show modifier selection modal
+  const buildCartItem = (product, extras = {}) => ({
+    id: product.id,
+    name: product.name,
+    price: product.price,
+    category_id: product.category_id,
+    station_ids: product.station_ids,
+    track_stock: product.track_stock,
+    stock_quantity: product.stock_quantity,
+    barcode: product.barcode,
+    sku: product.sku,
+    image_url: product.image_url,
+    modifier_group_ids: product.modifier_group_ids,
+    is_bundle: product.is_bundle || false,
+    quantity: 1,
+    modifiers: [],
+    bundle_component_modifiers: [],
+    ...extras,
+  });
+
+  // Handle product selection - folders, gift cards, bundles, modifiers, or direct add
+  const handleProductClick = async (product) => {
+    const children = getFolderChildren(product.id);
+    if (children.length > 0) {
+      setSelectedProduct(product);
+      setFolderChildren(
+        [...children].sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+      );
+      setShowFolderModal(true);
+      return;
+    }
+
+    if (product.is_gift_card || product.gift_card_product_id) {
+      setSelectedProduct(product);
+      setGiftCardProduct(null);
+      setShowGiftCardModal(true);
+      try {
+        let gc = null;
+        if (product.gift_card_product_id) {
+          const { data } = await supabase
+            .from('gift_card_products')
+            .select('*')
+            .eq('id', product.gift_card_product_id)
+            .maybeSingle();
+          gc = data;
+        }
+        if (!gc) {
+          const { data } = await supabase
+            .from('gift_card_products')
+            .select('*')
+            .eq('business_id', auth.selectedBusinessId)
+            .eq('pos_product_id', product.id)
+            .maybeSingle();
+          gc = data;
+        }
+        setGiftCardProduct(gc || {
+          id: null,
+          product_type: 'money',
+          face_value: Number(product.price) || 0,
+          sale_price: Number(product.price) || 0,
+          name: product.name,
+        });
+      } catch (err) {
+        toast.error(err.message || 'Unable to load gift card details');
+        setShowGiftCardModal(false);
+        setSelectedProduct(null);
+      }
+      return;
+    }
+
+    if (product.is_bundle) {
+      setSelectedProduct(product);
+      setShowBundleModifierModal(true);
+      return;
+    }
+
+    if (hasModifiers(product)) {
       setSelectedProduct(product);
       setShowModifierModal(true);
     } else {
-      // Add directly to cart with proper structure
-      const cartItem = {
-        id: product.id,
-        name: product.name,
-        price: product.price,
-        category_id: product.category_id,
-        station_ids: product.station_ids,
-        track_stock: product.track_stock,
-        stock_quantity: product.stock_quantity,
-        barcode: product.barcode,
-        sku: product.sku,
-        image_url: product.image_url,
-        modifier_group_ids: product.modifier_group_ids,
-        quantity: 1,
-        modifiers: [] // Empty modifiers array for products without modifiers
-      };
-      onAddToCart(cartItem);
+      onAddToCart(buildCartItem(product));
     }
   };
 
-  // Handle modifier selection completion - FIXED VERSION
+  const handleGiftCardConfirm = ({ price, gift_card }) => {
+    if (!selectedProduct) return;
+    onAddToCart(buildCartItem(selectedProduct, {
+      price,
+      is_gift_card: true,
+      gift_card_product_id: gift_card?.gift_card_product_id || selectedProduct.gift_card_product_id || null,
+      gift_card,
+      tax_exempt: true,
+      // Unique cart key so personal messages don't merge into one line
+      cart_line_key: `gc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    }));
+    setShowGiftCardModal(false);
+    setSelectedProduct(null);
+    setGiftCardProduct(null);
+  };
+
+  const handleFolderChildSelect = (child) => {
+    const folder = selectedProduct;
+    setShowFolderModal(false);
+    setFolderChildren([]);
+    setSelectedProduct(null);
+    // Folder base price (e.g. Bubly $1.77); flavour children can be $0.
+    const folderPrice = Number(folder?.price);
+    const pricedChild =
+      folderPrice > 0
+        ? { ...child, price: folderPrice }
+        : child;
+    handleProductClick(pricedChild);
+  };
+
   const handleModifierAddToCart = (productWithModifiers) => {
-    // Create properly structured cart item
-    const cartItem = {
-      id: productWithModifiers.id,
-      name: productWithModifiers.name,
-      price: productWithModifiers.price,
-      category_id: productWithModifiers.category_id,
-      station_ids: productWithModifiers.station_ids,
-      track_stock: productWithModifiers.track_stock,
-      stock_quantity: productWithModifiers.stock_quantity,
-      barcode: productWithModifiers.barcode,
-      sku: productWithModifiers.sku,
-      image_url: productWithModifiers.image_url,
-      modifier_group_ids: productWithModifiers.modifier_group_ids,
-      quantity: 1,
-      // Ensure modifiers array exists and is properly formatted
-      modifiers: Array.isArray(productWithModifiers.modifiers) ? productWithModifiers.modifiers : []
-    };
-    
-    // Add to cart
-    onAddToCart(cartItem);
-    
-    // Close modal
+    onAddToCart(buildCartItem(productWithModifiers, {
+      modifiers: Array.isArray(productWithModifiers.modifiers) ? productWithModifiers.modifiers : [],
+    }));
     setShowModifierModal(false);
     setSelectedProduct(null);
   };
 
-  // Handle modal close
+  const handleBundleModifierAddToCart = (productWithBundleModifiers) => {
+    onAddToCart(buildCartItem(productWithBundleModifiers, {
+      is_bundle: true,
+      modifiers: Array.isArray(productWithBundleModifiers.modifiers)
+        ? productWithBundleModifiers.modifiers
+        : [],
+      bundle_component_modifiers: productWithBundleModifiers.bundle_component_modifiers || [],
+    }));
+    setShowBundleModifierModal(false);
+    setSelectedProduct(null);
+  };
+
   const handleModalClose = () => {
     setShowModifierModal(false);
+    setShowBundleModifierModal(false);
+    setShowFolderModal(false);
+    setShowGiftCardModal(false);
+    setGiftCardProduct(null);
+    setFolderChildren([]);
     setSelectedProduct(null);
   };
 
   // Handle barcode scan from BarcodeScanHandler
   const handleBarcodeScan = (code) => {
-    const match = products.find(
+    const match = catalog.find(
       (p) =>
         p.barcode?.toLowerCase() === code.toLowerCase() ||
         p.sku?.toLowerCase() === code.toLowerCase()
@@ -136,7 +218,7 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
   // Handle enter key for search/barcode entry
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && searchTerm.trim() !== "") {
-      const match = products.find(
+      const match = catalog.find(
         (p) =>
           p.barcode?.toLowerCase() === searchTerm.trim().toLowerCase() ||
           p.name.toLowerCase().includes(searchTerm.trim().toLowerCase()) ||
@@ -151,15 +233,22 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
     }
   };
 
-  // Filter products by search term (categories handled by parent)
-  const filteredProducts = products.filter((p) => {
-    if (!searchTerm) return true;
-    return (
-      p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.barcode?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.sku?.toLowerCase().includes(searchTerm.toLowerCase())
+  // Root tiles only when not searching; search includes nested folder children
+  const filteredProducts = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    const pool = products || [];
+    if (!term) {
+      return pool.filter((p) => !p.parent_inventory_id);
+    }
+    // Prefer catalog so children outside the active category filter still match
+    const searchPool = catalog.length ? catalog : pool;
+    return searchPool.filter(
+      (p) =>
+        p.name.toLowerCase().includes(term) ||
+        p.barcode?.toLowerCase().includes(term) ||
+        p.sku?.toLowerCase().includes(term)
     );
-  });
+  }, [products, catalog, searchTerm]);
 
   // Check if product is out of stock
   const isOutOfStock = (product) => {
@@ -174,13 +263,8 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
   };
 
   // Check if product has modifiers
-  const hasModifiers = (product) => {
-    const result = product.modifier_group_ids && 
-      ((Array.isArray(product.modifier_group_ids) && product.modifier_group_ids.length > 0) ||
-       (typeof product.modifier_group_ids === 'object' && product.modifier_group_ids !== null && Object.keys(product.modifier_group_ids).length > 0));
-    
-    return result;
-  };
+  const hasModifiers = (product) =>
+    normalizeModifierGroupIds(product?.modifier_group_ids).length > 0;
 
   // Get station routing display - now supports multiple stations
   const getStationBadge = (product) => {
@@ -235,11 +319,13 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
   const styles = {
     container: {
       width: "100%",
+      maxWidth: "100%",
+      minWidth: 0,
       height: "100%",
       display: "flex",
       flexDirection: "column",
       backgroundColor: TavariStyles.colors.gray50,
-      maxWidth: `calc(100vw - 420px)` // Ensure it never overlaps cart (380px + 40px margin)
+      boxSizing: "border-box"
     },
     
     searchContainer: {
@@ -260,20 +346,26 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
     
     gridContainer: {
       flex: 1,
+      minWidth: 0,
+      minHeight: 0,
       padding: `0 ${TavariStyles.spacing.lg}`,
       overflowY: "auto",
+      overflowX: "hidden",
       width: "100%",
-      maxWidth: "100%"
+      maxWidth: "100%",
+      boxSizing: "border-box"
     },
     
     productGrid: {
       display: "grid",
-      gridTemplateColumns: `repeat(${getGridColumns()}, 1fr)`,
+      // Fits whatever width the parent flex column actually has (not 100vw — avoids overlap with cart)
+      gridTemplateColumns: "repeat(auto-fill, minmax(min(124px, 100%), 1fr))",
       gap: TavariStyles.spacing.md,
       justifyItems: "stretch",
       paddingBottom: TavariStyles.spacing.xl,
       width: "100%",
-      maxWidth: "100%"
+      maxWidth: "100%",
+      boxSizing: "border-box"
     },
     
     productButton: {
@@ -289,7 +381,7 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
       position: "relative",
       width: "100%",
       height: "120px", // Fixed smaller height
-      maxWidth: "140px", // Fixed smaller width
+      maxWidth: "min(140px, 100%)",
       transition: `all ${TavariStyles.transitions.normal}`,
       padding: 0,
       boxShadow: TavariStyles.shadows.sm,
@@ -332,6 +424,25 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
       alignItems: 'center',
       gap: "1px"
     },
+
+    folderBadge: {
+      position: "absolute",
+      top: "2px",
+      right: "2px",
+      backgroundColor: TavariStyles.colors.primary,
+      color: TavariStyles.colors.white,
+      fontSize: "10px",
+      padding: `1px 3px`,
+      borderRadius: TavariStyles.borderRadius.sm,
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+    },
+
+    folderHint: {
+      fontSize: "11px",
+      color: TavariStyles.colors.primary,
+      marginTop: "1px",
+      fontWeight: TavariStyles.typography.fontWeight.medium
+    },
     
     imageContainer: {
       width: "100%",
@@ -354,7 +465,7 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
       alignItems: "center",
       justifyContent: "center",
       color: TavariStyles.colors.gray400,
-      fontSize: "10px"
+      fontSize: "12px"
     },
     
     productInfo: {
@@ -379,7 +490,7 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
     },
     
     productName: {
-      fontSize: "11px", // Smaller font
+      fontSize: "9px", // Smaller font
       fontWeight: TavariStyles.typography.fontWeight.semibold,
       width: "100%",
       textAlign: "center",
@@ -400,7 +511,7 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
     },
     
     productPrice: {
-      fontSize: "12px", // Smaller price font
+      fontSize: "9px", // Smaller price font
       color: TavariStyles.colors.success,
       fontWeight: TavariStyles.typography.fontWeight.semibold
     },
@@ -412,7 +523,7 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
     },
     
     modifierHint: {
-      fontSize: "9px", // Smaller modifier hint
+      fontSize: "7px", // Smaller modifier hint
       color: TavariStyles.colors.secondary,
       marginTop: "1px",
       fontWeight: TavariStyles.typography.fontWeight.medium
@@ -430,7 +541,7 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
       justifyContent: "space-between",
       alignItems: "center",
       width: "100%",
-      fontSize: "9px", // Smaller bottom text
+      fontSize: "7px", // Smaller bottom text
       padding: `0 2px`
     },
     
@@ -462,8 +573,20 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
     }
   };
 
-  const ProductGridContent = () => (
-    <div style={styles.container}>
+  // Do not define an inner component here — a new type each render remounts the
+  // modifier modal and clears selections (register clock / inventory refresh).
+  return (
+    <POSAuthWrapper
+      requireBusiness={true}
+      componentName="POSProductGrid"
+      onAuthReady={(authData) => {
+        console.log('POSProductGrid: Authentication ready', {
+          businessId: authData.selectedBusinessId,
+          userRole: authData.userRole
+        });
+      }}
+    >
+      <div style={styles.container}>
       {/* Barcode Scanner Handler */}
       <BarcodeScanHandler onScan={handleBarcodeScan} />
       
@@ -489,8 +612,9 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
         <div style={styles.productGrid}>
           {filteredProducts.map((product) => {
             const priceInfo = getDisplayPrice(product);
-            const isDisabled = isOutOfStock(product);
-            const productHasModifiers = hasModifiers(product);
+            const productHasFolder = getFolderChildren(product.id).length > 0;
+            const isDisabled = productHasFolder ? false : isOutOfStock(product);
+            const productHasModifiers = !productHasFolder && hasModifiers(product);
             
             return (
               <button
@@ -506,6 +630,10 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
                   ...(productHasModifiers ? { 
                     borderColor: TavariStyles.colors.secondary,
                     boxShadow: `0 0 0 1px ${TavariStyles.colors.secondary}20`
+                  } : {}),
+                  ...(productHasFolder ? {
+                    borderColor: TavariStyles.colors.primary,
+                    boxShadow: `0 0 0 1px ${TavariStyles.colors.primary}20`
                   } : {})
                 }}
                 onMouseEnter={(e) => {
@@ -520,23 +648,27 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
                 }}
               >
                 {/* Stock status indicators */}
-                {isOutOfStock(product) && (
+                {isOutOfStock(product) && !productHasFolder && (
                   <div style={{...styles.badge, ...styles.stockOutBadge}}>
                     OUT
                   </div>
                 )}
-                {isLowStock(product) && !isOutOfStock(product) && (
+                {isLowStock(product) && !isOutOfStock(product) && !productHasFolder && (
                   <div style={{...styles.badge, ...styles.stockLowBadge}}>
                     LOW
                   </div>
                 )}
 
-                {/* Modifier indicator */}
-                {productHasModifiers && (
+                {/* Folder / modifier indicators */}
+                {productHasFolder ? (
+                  <div style={styles.folderBadge}>
+                    FOLDER
+                  </div>
+                ) : productHasModifiers ? (
                   <div style={styles.modifierBadge}>
                     MOD
                   </div>
-                )}
+                ) : null}
 
                 {/* Product Image - Only show on medium+ screens and make smaller */}
                 {windowWidth >= 800 && (
@@ -575,18 +707,26 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
                   
                   {/* Price */}
                   <div style={styles.priceContainer}>
-                    <span style={styles.productPrice}>
-                      ${priceInfo.displayPrice.toFixed(2)}
-                    </span>
-                    {priceInfo.showTaxInclusive && (
-                      <span style={styles.taxInclusivePrice}>
-                        ${priceInfo.priceWithTax.toFixed(2)} incl. tax
+                    {productHasFolder ? (
+                      <span style={styles.folderHint}>
+                        Choose option ›
                       </span>
-                    )}
-                    {productHasModifiers && (
-                      <span style={styles.modifierHint}>
-                        Customizable
-                      </span>
+                    ) : (
+                      <>
+                        <span style={styles.productPrice}>
+                          ${priceInfo.displayPrice.toFixed(2)}
+                        </span>
+                        {priceInfo.showTaxInclusive && (
+                          <span style={styles.taxInclusivePrice}>
+                            ${priceInfo.priceWithTax.toFixed(2)} incl. tax
+                          </span>
+                        )}
+                        {productHasModifiers && (
+                          <span style={styles.modifierHint}>
+                            Customizable
+                          </span>
+                        )}
+                      </>
                     )}
                   </div>
                   
@@ -596,9 +736,14 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
                       <span style={styles.stationInfo}>
                         {getStationBadge(product) || ""}
                       </span>
-                      {product.track_stock && (
+                      {product.track_stock && !productHasFolder && (
                         <span style={styles.stockInfo}>
                           {product.stock_quantity || 0}
+                        </span>
+                      )}
+                      {productHasFolder && (
+                        <span style={styles.stockInfo}>
+                          {getFolderChildren(product.id).length}
                         </span>
                       )}
                     </div>
@@ -625,22 +770,35 @@ const POSProductGrid = ({ products, onAddToCart, disabled = false }) => {
         businessId={auth.selectedBusinessId}
         onAddToCart={handleModifierAddToCart}
       />
+      <BundleModifierSelectionModal
+        isOpen={showBundleModifierModal}
+        onClose={handleModalClose}
+        product={selectedProduct}
+        businessId={auth.selectedBusinessId}
+        onAddToCart={handleBundleModifierAddToCart}
+      />
+      <ProductFolderPickerModal
+        isOpen={showFolderModal}
+        onClose={handleModalClose}
+        folderProduct={selectedProduct}
+        childrenProducts={folderChildren}
+        onSelectChild={handleFolderChildSelect}
+      />
+      {showGiftCardModal && selectedProduct && (
+        <GiftCardSellModal
+          product={selectedProduct}
+          giftCardProduct={giftCardProduct}
+          businessId={auth.selectedBusinessId}
+          onConfirm={handleGiftCardConfirm}
+          onClose={() => {
+            setShowGiftCardModal(false);
+            setSelectedProduct(null);
+            setGiftCardProduct(null);
+          }}
+        />
+      )}
     </div>
-  );
-
-  return (
-    <POSAuthWrapper
-      requireBusiness={true}
-      componentName="POSProductGrid"
-      onAuthReady={(authData) => {
-        console.log('POSProductGrid: Authentication ready', {
-          businessId: authData.selectedBusinessId,
-          userRole: authData.userRole
-        });
-      }}
-    >
-      <ProductGridContent />
-    </POSAuthWrapper>
+      </POSAuthWrapper>
   );
 };
 

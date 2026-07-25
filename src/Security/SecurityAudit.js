@@ -3,6 +3,62 @@ import { supabase } from '../supabaseClient';
 import deviceFingerprint from './DeviceFingerprint';
 import SecurityUtils from './SecurityUtils';
 
+const MAX_AUDIT_STRING = 500;
+const MAX_AUDIT_DEPTH = 8;
+const FINGERPRINT_FIELDS = new Set([
+  'identifier',
+  'devicefingerprint',
+  'device_fingerprint',
+  'rate_limit_identifier'
+]);
+
+const FINGERPRINT_OMIT_KEYS = new Set(['canvas', 'webgl', 'audio', 'fonts', 'features', 'storage']);
+
+/**
+ * Recursively cap / redact values so we never persist full device fingerprints,
+ * canvas/base64 blobs, or unbounded caller-provided objects in `details` jsonb.
+ */
+function sanitizeStringForAudit(s) {
+  if (s == null || typeof s !== 'string') return s;
+  if (s.length <= MAX_AUDIT_STRING) return s;
+  if (s.startsWith('data:') || /^eyJ[A-Za-z0-9+/]+=*$/.test(s.slice(0, 120))) {
+    return `[redacted:${s.length}b]`;
+  }
+  const looksLikeB64 = /^[A-Za-z0-9+/=\s]+$/.test(s) && s.length >= 400;
+  if (looksLikeB64) return `[redacted:${s.length}b]`;
+  return `${s.slice(0, MAX_AUDIT_STRING - 3)}...`;
+}
+
+function sanitizeFingerprintLike(v) {
+  if (v == null) return v;
+  if (typeof v !== 'string') return sanitizeAuditDetails(v);
+  return v.length <= 120 ? v : `fp:${v.slice(0, 8)}…(${v.length}b)`;
+}
+
+function sanitizeAuditDetails(input, depth = 0) {
+  if (depth > MAX_AUDIT_DEPTH) return '[max depth]';
+  if (input == null) return input;
+  if (typeof input === 'string') return sanitizeStringForAudit(input);
+  if (typeof input === 'number' || typeof input === 'boolean') return input;
+  if (Array.isArray(input)) return input.map((x) => sanitizeAuditDetails(x, depth + 1));
+  if (typeof input !== 'object') return sanitizeStringForAudit(String(input));
+
+  const out = {};
+  for (const [k, v] of Object.entries(input)) {
+    const kl = k.toLowerCase();
+    if (FINGERPRINT_OMIT_KEYS.has(kl)) {
+      out[k] = '[omitted]';
+      continue;
+    }
+    if (FINGERPRINT_FIELDS.has(kl) || kl.endsWith('devicefingerprint')) {
+      out[k] = sanitizeFingerprintLike(v);
+      continue;
+    }
+    out[k] = sanitizeAuditDetails(v, depth + 1);
+  }
+  return out;
+}
+
 /**
  * Security audit logging service for tracking all security-related events
  * across the Tavari platform
@@ -15,6 +71,8 @@ class SecurityAudit {
     this.initialized = false;
     this.queue = [];
     this.isProcessing = false;
+    this.batchInterval = null;
+    this.loggingDisabledAfter403 = false; // stop re-queuing when DB returns 403
   }
 
   /**
@@ -31,13 +89,20 @@ class SecurityAudit {
     // Process any queued events
     await this.processQueue();
 
-    // Log session start
+    // Set up batch processing interval (every 30 seconds)
+    if (!this.batchInterval) {
+      this.batchInterval = setInterval(() => {
+        this.processQueueBatch();
+      }, 30000); // Every 30 seconds
+    }
+
+    // Log session start (medium severity - will be batched)
     await this.logEvent('session_start', {
       session_id: this.sessionId,
-      user_agent: navigator.userAgent,
-      url: window.location.href,
-      referrer: document.referrer
-    });
+      user_agent: navigator.userAgent.substring(0, 200), // Limit size
+      url: window.location.href.substring(0, 500), // Limit size
+      referrer: document.referrer.substring(0, 500) // Limit size
+    }, 'medium');
   }
 
   /**
@@ -57,13 +122,14 @@ class SecurityAudit {
    * @param {string} businessId - Override business ID
    */
   async logEvent(eventType, details = {}, severity = 'medium', userId = null, businessId = null) {
+    const safeDetails = sanitizeAuditDetails(details);
     const event = {
       event_type: eventType,
       user_id: userId || this.userId,
       business_id: businessId || this.businessId,
       session_id: this.sessionId,
       severity,
-      details: await this.enrichEventDetails(details),
+      details: await this.enrichEventDetails(safeDetails),
       created_at: new Date().toISOString()
     };
 
@@ -88,14 +154,20 @@ class SecurityAudit {
    * @returns {object} Enriched event details
    */
   async enrichEventDetails(details) {
+    // Limit detail sizes to prevent huge log entries
+    const limitString = (str, maxLength = 500) => {
+      if (!str) return null;
+      return typeof str === 'string' ? str.substring(0, maxLength) : str;
+    };
+
     const enriched = {
       ...details,
       timestamp: new Date().toISOString(),
       session_id: this.sessionId,
-      url: window.location.href,
-      user_agent: navigator.userAgent,
+      url: limitString(window.location.href, 500),
+      user_agent: limitString(navigator.userAgent, 200),
       ip_address: await SecurityUtils.getClientIP(),
-      device_fingerprint: await deviceFingerprint.generate(),
+      device_fingerprint: limitString(await deviceFingerprint.generate(), 200),
       screen_resolution: `${screen.width}x${screen.height}`,
       viewport: `${window.innerWidth}x${window.innerHeight}`,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -130,7 +202,7 @@ class SecurityAudit {
       }
     }
 
-    return enriched;
+    return sanitizeAuditDetails(enriched);
   }
 
   /**
@@ -138,12 +210,100 @@ class SecurityAudit {
    * @param {object} event - Security event
    */
   async sendToDatabase(event) {
-    const { error } = await supabase
-      .from('tavari_admin_security_logs')
-      .insert([event]);
+    // Rate limiting: Only log critical/high severity events immediately
+    // Low/medium events are batched and sent less frequently
+    if (event.severity === 'low' || event.severity === 'medium') {
+      // Queue low/medium events for batch processing
+      this.queue.push(event);
+      // Process queue every 30 seconds or when it reaches 50 events
+      if (this.queue.length >= 50) {
+        this.processQueueBatch();
+      }
+      return;
+    }
 
-    if (error) {
-      throw error;
+    // Critical/high events are sent immediately
+    try {
+      if (this.loggingDisabledAfter403) {
+        this.storeLocally(event);
+        return;
+      }
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        this.storeLocally(event);
+        return;
+      }
+      const { error } = await supabase
+        .from('tavari_admin_security_logs')
+        .insert([event]);
+
+      if (error) {
+        const isAuthBlocked =
+          error.message?.includes('403') ||
+          error.message?.includes('401') ||
+          error.code === 'PGRST301' ||
+          error.status === 403 ||
+          error.status === 401;
+        if (isAuthBlocked) this.loggingDisabledAfter403 = true;
+        this.storeLocally(event);
+      }
+    } catch (error) {
+      this.storeLocally(event);
+    }
+  }
+
+  /**
+   * Process queue in batches to reduce database load
+   */
+  async processQueueBatch() {
+    if (this.isProcessing || this.queue.length === 0) {
+      return;
+    }
+    if (this.loggingDisabledAfter403) {
+      this.queue.length = 0;
+      return;
+    }
+
+    this.isProcessing = true;
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        this.queue.length = 0;
+        return;
+      }
+
+      const batch = this.queue.splice(0, 50);
+      
+      if (batch.length > 0) {
+        const { error } = await supabase
+          .from('tavari_admin_security_logs')
+          .insert(batch);
+
+        if (error) {
+          const isAuthBlocked =
+            error.message?.includes('403') ||
+            error.message?.includes('401') ||
+            error.code === 'PGRST301' ||
+            error.status === 403 ||
+            error.status === 401;
+          if (isAuthBlocked) {
+            this.loggingDisabledAfter403 = true;
+            if (typeof console !== 'undefined' && console.debug) {
+              console.debug('[SecurityAudit] Logging paused (unauthorized). Events kept locally.');
+            }
+          }
+          if (!this.loggingDisabledAfter403 && this.queue.length < 1000) {
+            this.queue.unshift(...batch);
+          }
+        }
+      }
+    } catch (error) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[SecurityAudit] Batch processing error:', error);
+      }
+    } finally {
+      this.isProcessing = false;
     }
   }
 
@@ -168,26 +328,11 @@ class SecurityAudit {
   }
 
   /**
-   * Process queued events
+   * Process queued events (legacy - now uses batch processing)
    */
   async processQueue() {
-    if (this.isProcessing || this.queue.length === 0) {
-      return;
-    }
-
-    this.isProcessing = true;
-
-    while (this.queue.length > 0) {
-      const event = this.queue.shift();
-      try {
-        await this.sendToDatabase(event);
-      } catch (error) {
-        console.error('Failed to process queued event:', error);
-        this.storeLocally(event);
-      }
-    }
-
-    this.isProcessing = false;
+    // Use batch processing instead
+    await this.processQueueBatch();
   }
 
   /**

@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "Tavari Waiver Kiosk",
+    "slug": "tavari-waiver-kiosk",
+    "version": "1.0.1",
+    "orientation": "default",
+    "ios": {
+      "bundleIdentifier": "com.tavari.waiverkiosk",
+      "supportsTablet": true
+    }
+  }
+}

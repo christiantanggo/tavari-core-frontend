@@ -28,6 +28,7 @@ const DeductionReportsTab = ({ selectedBusinessId, businessData, settings }) => 
     total_net_pay: 0
   });
   const [loading, setLoading] = useState(false);
+  const [postingToAccounting, setPostingToAccounting] = useState(false);
   const [includePreviousReports, setIncludePreviousReports] = useState(false);
 
   // Security context for sensitive financial data
@@ -454,30 +455,30 @@ const DeductionReportsTab = ({ selectedBusinessId, businessData, settings }) => 
           <meta charset="UTF-8">
           <style>
             @page { size: 8.5in 11in; margin: 0.4in; }
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; line-height: 1.2; color: #333; font-size: 11px; }
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; line-height: 1.2; color: #111; font-size: 11px; }
             .header { text-align: center; border-bottom: 2px solid #008080; padding-bottom: 8px; margin-bottom: 12px; }
             .company-name { font-size: 18px; font-weight: bold; color: #008080; margin-bottom: 4px; }
-            .report-title { font-size: 14px; margin: 6px 0; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
-            .compliance-badge { background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); padding: 6px; border-radius: 4px; border-left: 3px solid #28a745; margin: 8px 0; text-align: center; font-weight: bold; color: #155724; font-size: 9px; }
-            .date-info { font-size: 10px; color: #666; margin-top: 4px; }
+            .report-title { font-size: 14px; margin: 6px 0; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; color: #111; }
+            .compliance-badge { background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); padding: 6px; border-radius: 4px; border-left: 3px solid #28a745; margin: 8px 0; text-align: center; font-weight: bold; color: #0d3d0d; font-size: 9px; }
+            .date-info { font-size: 10px; color: #111; margin-top: 4px; }
             .two-column { display: flex; gap: 10px; }
             .column { flex: 1; }
             .summary-section { margin: 10px 0; }
-            .summary-section h3 { font-size: 12px; margin: 8px 0 4px 0; color: #333; }
-            .summary-table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 10px; }
-            .summary-table th, .summary-table td { padding: 4px 6px; border: 1px solid #dee2e6; text-align: left; }
-            .summary-table th { background: linear-gradient(135deg, #e9ecef 0%, #f8f9fa 100%); font-weight: 600; color: #495057; text-transform: uppercase; font-size: 8px; letter-spacing: 0.3px; }
-            .summary-table td.amount { text-align: right; font-family: 'Courier New', monospace; font-weight: 500; }
+            .summary-section h3 { font-size: 12px; margin: 8px 0 4px 0; color: #111; }
+            .summary-table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 10px; color: #111; }
+            .summary-table th, .summary-table td { padding: 4px 6px; border: 1px solid #dee2e6; text-align: left; color: #111; }
+            .summary-table th { background: linear-gradient(135deg, #e9ecef 0%, #f8f9fa 100%); font-weight: 600; color: #111; text-transform: uppercase; font-size: 8px; letter-spacing: 0.3px; }
+            .summary-table td.amount { text-align: right; font-family: 'Courier New', monospace; font-weight: 500; color: #111; }
             .total-row { background: linear-gradient(135deg, #008080 0%, #006666 100%); color: white; font-weight: bold; font-size: 10px; }
-            .cra-highlight { background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%); border-left: 3px solid #17a2b8; }
-            .provincial-highlight { background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%); border-left: 3px solid #dc3545; }
+            .cra-highlight { background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%); border-left: 3px solid #17a2b8; color: #111; }
+            .provincial-highlight { background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%); border-left: 3px solid #dc3545; color: #111; }
             .payroll-summary { width: 100%; font-size: 9px; }
-            .remittance-instructions { margin: 8px 0; background: #f8f9fa; padding: 8px; border-radius: 4px; border: 1px solid #dee2e6; font-size: 9px; }
-            .remittance-instructions h4 { color: #17a2b8; margin: 4px 0 2px 0; font-size: 10px; }
-            .remittance-instructions ul { margin: 2px 0; padding-left: 12px; }
+            .remittance-instructions { margin: 8px 0; background: #f8f9fa; padding: 8px; border-radius: 4px; border: 1px solid #dee2e6; font-size: 9px; color: #111; }
+            .remittance-instructions h4 { color: #0c5460; margin: 4px 0 2px 0; font-size: 10px; }
+            .remittance-instructions ul { margin: 2px 0; padding-left: 12px; color: #111; }
             .remittance-instructions li { margin: 1px 0; }
             .footer { background: #212529; color: white; padding: 6px; border-radius: 3px; margin: 8px 0; font-size: 8px; text-align: center; }
-            .report-meta { margin-top: 8px; text-align: center; font-size: 8px; color: #6c757d; border-top: 1px solid #dee2e6; padding-top: 6px; }
+            .report-meta { margin-top: 8px; text-align: center; font-size: 8px; color: #111; border-top: 1px solid #dee2e6; padding-top: 6px; }
           </style>
         </head>
         <body>
@@ -599,7 +600,7 @@ const DeductionReportsTab = ({ selectedBusinessId, businessData, settings }) => 
           <div class="report-meta">
             <p><strong>Tavari HR Payroll System - CRA T4127 Compliant Remittance Report</strong></p>
             <p>Generated by: ${authUser?.email || 'System'} | Business: ${effectiveBusinessData?.name || 'N/A'} | ID: ${Date.now().toString(36).toUpperCase()}</p>
-            <p style="font-size: 7px; color: #999;">Values read directly from hrpayroll_entries table</p>
+            <p style="font-size: 7px; color: #374151;">Values read directly from hrpayroll_entries table</p>
           </div>
         </body>
         </html>
@@ -774,7 +775,7 @@ const DeductionReportsTab = ({ selectedBusinessId, businessData, settings }) => 
     },
     emptyState: {
       textAlign: 'center',
-      color: TavariStyles.colors?.gray500 || '#6b7280',
+      color: TavariStyles.colors?.gray700 || '#374151',
       padding: TavariStyles.spacing?.xl || '20px',
       fontSize: TavariStyles.typography?.fontSize?.lg || '18px'
     },
@@ -808,7 +809,7 @@ const DeductionReportsTab = ({ selectedBusinessId, businessData, settings }) => 
             
             <p style={{ 
               fontSize: TavariStyles.typography?.fontSize?.sm || '14px', 
-              color: TavariStyles.colors?.gray600 || '#4b5563',
+              color: TavariStyles.colors?.gray700 || '#374151',
               marginBottom: TavariStyles.spacing?.md || '12px'
             }}>
               <strong>Note:</strong> Select the date range for when work was performed (pay period end dates). 
@@ -908,7 +909,7 @@ const DeductionReportsTab = ({ selectedBusinessId, businessData, settings }) => 
                 </div>
               </div>
 
-              <div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                 <button
                   style={styles.secondaryButton}
                   onClick={exportToCSV}
@@ -921,7 +922,43 @@ const DeductionReportsTab = ({ selectedBusinessId, businessData, settings }) => 
                 >
                   Generate CRA T4127 Remittance Report
                 </button>
+                <button
+                  style={{ ...styles.secondaryButton, borderColor: TavariStyles?.colors?.primary || '#0ea5e9', color: TavariStyles?.colors?.primary || '#0ea5e9' }}
+                  onClick={async () => {
+                    if (!effectiveBusinessId || !reportPeriod.end) return;
+                    setPostingToAccounting(true);
+                    try {
+                      const { data, error } = await supabase.functions.invoke('accounting-post-payroll-journal', {
+                        body: {
+                          business_id: effectiveBusinessId,
+                          posting_date: reportPeriod.end,
+                          total_gross_pay: totals.total_gross_pay,
+                          total_net_pay: totals.total_net_pay,
+                          employee_federal_tax: totals.employee_federal_tax,
+                          employee_provincial_tax: totals.employee_provincial_tax,
+                          employee_ei: totals.employee_ei,
+                          employee_cpp: totals.employee_cpp,
+                          employer_ei: totals.employer_ei,
+                          employer_cpp: totals.employer_cpp
+                        }
+                      });
+                      if (data?.error) toast.error(data.error);
+                      else if (error) toast.error(error.message || 'Failed to post');
+                      else toast.success('Payroll journal posted to ERPNext');
+                    } catch (e) {
+                      toast.error(e?.message || 'Failed to post to accounting');
+                    } finally {
+                      setPostingToAccounting(false);
+                    }
+                  }}
+                  disabled={postingToAccounting}
+                >
+                  {postingToAccounting ? 'Posting...' : 'Post to Accounting (ERPNext)'}
+                </button>
               </div>
+              <p style={{ fontSize: 10, color: TavariStyles?.colors?.gray800 || '#1f2937', marginTop: 8 }}>
+                Post to Accounting: posts a payroll journal to ERPNext. Set Salary, Payroll liability, and Bank accounts in Dashboard → Accounting → Settings.
+              </p>
             </div>
           )}
 

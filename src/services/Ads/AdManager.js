@@ -111,7 +111,8 @@ class AdManager {
         .from('music_settings')
         .select('ad_frequency, ad_enabled, ad_volume_adjustment, ad_max_per_hour')
         .eq('business_id', this.businessId)
-        .single();
+        .limit(1)
+        .maybeSingle();
 
       if (settings) {
         this.adSettings = {

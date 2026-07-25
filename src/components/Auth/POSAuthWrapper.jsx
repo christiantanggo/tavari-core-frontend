@@ -1,5 +1,6 @@
 // components/Auth/POSAuthWrapper.jsx - Fixed Authentication Component
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import { TavariStyles } from '../../utils/TavariStyles';
 
@@ -26,29 +27,59 @@ const POSAuthWrapper = ({
   errorContent = null,
   onAuthReady = null
 }) => {
+  const navigate = useNavigate();
   const auth = usePOSAuth({
     requiredRoles,
     requireBusiness,
     componentName
   });
 
-  const [authReady, setAuthReady] = useState(false);
+  const authRef = useRef(auth);
+  const authReadyNotifiedRef = useRef(false);
+  authRef.current = auth;
+  
+  // Check if user has register-only access (unlocked register with PIN but not full app access)
+  const hasRegisterOnlyAccess = () => {
+    try {
+      const posActiveUserRaw = localStorage.getItem('posActiveUser');
+      if (!posActiveUserRaw) return false;
+      
+      const posActiveUser = JSON.parse(posActiveUserRaw);
+      // If posActiveUser exists and was set by register unlock, user has register-only access
+      return posActiveUser?.source === 'register_pin' || posActiveUser?.source === 'register';
+    } catch {
+      return false;
+    }
+  };
 
-  // Call onAuthReady callback when authentication is complete and ready
+  // Call onAuthReady callback once when authentication is complete and ready.
   useEffect(() => {
-    if (auth.isReady && !authReady) {
-      setAuthReady(true);
+    if (!auth.isReady) {
+      authReadyNotifiedRef.current = false;
+      return;
+    }
+
+    if (!authReadyNotifiedRef.current) {
+      authReadyNotifiedRef.current = true;
       if (onAuthReady) {
+        const currentAuth = authRef.current;
         onAuthReady({
-          selectedBusinessId: auth.selectedBusinessId,
-          authUser: auth.authUser,
-          userRole: auth.userRole,
-          businessData: auth.businessData,
-          ...auth
+          selectedBusinessId: currentAuth.selectedBusinessId,
+          authUser: currentAuth.authUser,
+          userRole: currentAuth.userRole,
+          businessData: currentAuth.businessData,
+          ...currentAuth
         });
       }
     }
-  }, [auth.isReady, authReady, onAuthReady, auth]);
+  }, [
+    auth.isReady,
+    auth.selectedBusinessId,
+    auth.authUser,
+    auth.userRole,
+    auth.businessData,
+    onAuthReady
+  ]);
 
   // Create styles using TavariStyles
   const styles = {
@@ -210,6 +241,8 @@ const POSAuthWrapper = ({
     if (errorContent) {
       return errorContent;
     }
+    
+    const isRegisterOnly = hasRegisterOnlyAccess();
 
     return (
       <div style={styles.container}>
@@ -217,9 +250,30 @@ const POSAuthWrapper = ({
           <h3 style={styles.errorTitle}>Authentication Error</h3>
           <p style={styles.errorMessage}>{auth.authError}</p>
           
+          {isRegisterOnly && (
+            <p style={{
+              ...styles.errorMessage,
+              fontSize: TavariStyles.typography.fontSize.sm,
+              color: TavariStyles.colors.gray600,
+              fontStyle: 'italic',
+              marginTop: '-10px',
+              marginBottom: TavariStyles.spacing.md
+            }}>
+              You have register-only access. Use the original logged-in user's PIN to unlock the full app.
+            </p>
+          )}
+          
           <div style={styles.buttonGroup}>
+            {isRegisterOnly && (
+              <button 
+                style={styles.primaryButton}
+                onClick={() => navigate('/dashboard/pos/register')}
+              >
+                Return to Register
+              </button>
+            )}
             <button 
-              style={styles.primaryButton}
+              style={isRegisterOnly ? styles.secondaryButton : styles.primaryButton}
               onClick={auth.goToLogin}
             >
               Return to Login
@@ -230,12 +284,14 @@ const POSAuthWrapper = ({
             >
               Retry Authentication
             </button>
-            <button 
-              style={styles.secondaryButton}
-              onClick={auth.goToDashboard}
-            >
-              Go to Dashboard
-            </button>
+            {!isRegisterOnly && (
+              <button 
+                style={styles.secondaryButton}
+                onClick={auth.goToDashboard}
+              >
+                Go to Dashboard
+              </button>
+            )}
           </div>
           
           {auth.clearAuthError && (
@@ -256,21 +312,35 @@ const POSAuthWrapper = ({
 
   // Not ready state (shouldn't happen with proper auth flow)
   if (!auth.isReady) {
+    const isRegisterOnly = hasRegisterOnlyAccess();
+    
     return (
       <div style={styles.container}>
         <div style={styles.errorCard}>
           <h3 style={styles.errorTitle}>Setup Required</h3>
           <p style={styles.errorMessage}>
-            Authentication is incomplete. Please ensure you are logged in and have selected a business.
+            {isRegisterOnly 
+              ? 'You have register-only access. You cannot access other parts of the app.'
+              : 'Authentication is incomplete. Please ensure you are logged in and have selected a business.'}
           </p>
           
           <div style={styles.buttonGroup}>
-            <button 
-              style={styles.primaryButton}
-              onClick={auth.goToDashboard}
-            >
-              Go to Dashboard
-            </button>
+            {isRegisterOnly && (
+              <button 
+                style={styles.primaryButton}
+                onClick={() => navigate('/dashboard/pos/register')}
+              >
+                Return to Register
+              </button>
+            )}
+            {!isRegisterOnly && (
+              <button 
+                style={styles.primaryButton}
+                onClick={auth.goToDashboard}
+              >
+                Go to Dashboard
+              </button>
+            )}
             <button 
               style={styles.secondaryButton}
               onClick={auth.refreshAuth}
@@ -289,7 +359,7 @@ const POSAuthWrapper = ({
       {children}
       
       {/* Optional auth info panel for debugging */}
-      {process.env.NODE_ENV === 'development' && (
+      {import.meta.env.DEV && (
         <div style={styles.authInfo}>
           <div style={styles.authInfoRow}>
             <span style={styles.authInfoLabel}>User:</span>

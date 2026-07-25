@@ -6,9 +6,20 @@ import { CheckCircle, AlertCircle, X, FileText, Download, Printer } from 'lucide
 import DigitalSignature from '../../components/HR/DigitalSignature';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import toast from 'react-hot-toast';
-import html2pdf from 'html2pdf.js';
 import { TavariStyles } from '../../utils/TavariStyles';
 import { formatDateForBusiness, formatDateShort, formatDateTimeForBusiness, getBusinessTimezone } from '../../utils/businessDateFormat';
+import {
+  formatContractHrFromName,
+  resolveBusinessDisplayName,
+} from '../../utils/contractPersistence';
+import {
+  blobToBase64,
+  blobToUint8Array,
+  embedEmployeeSignature,
+  extractBodyHtml,
+  generatePdfBlobFromHtml,
+} from '../../utils/contractHtmlUtils';
+import { downloadContractPdf } from '../../utils/contractPdf';
 
 // Import generateContractPDF function
 let generateContractPDF = null;
@@ -184,6 +195,18 @@ const ContractSignScreen = () => {
         return;
       }
 
+      // Normalize wage from column into keyTerms for display/regeneration
+      if (data.contract_data?.keyTerms) {
+        if (data.wage_amount != null && !data.contract_data.keyTerms.baseHourlyWage) {
+          data.contract_data.keyTerms.baseHourlyWage = String(data.wage_amount);
+        }
+      } else if (data.wage_amount != null) {
+        data.contract_data = {
+          keyTerms: { baseHourlyWage: String(data.wage_amount) },
+          selectedTerms: [],
+        };
+      }
+
       // DEBUG: Log the full contract_data structure
       console.log('[ContractSignScreen] FULL contract_data:', JSON.stringify(data.contract_data, null, 2));
       console.log('[ContractSignScreen] contract_data.selectedTerms:', data.contract_data?.selectedTerms);
@@ -208,8 +231,14 @@ const ContractSignScreen = () => {
           sectionCount: sectionMatches?.length || 0
         });
         
+        const storedTermsCount = data.contract_data?.selectedTerms?.length || 0;
+        const htmlSectionCount = sectionMatches?.length || 0;
+
         // If no sections found but contract_data exists, regenerate
-        if ((!hasSections || !hasSectionContent || !hasContractTerms) && data.contract_data) {
+        if (
+          ((!hasSections || !hasSectionContent || !hasContractTerms) && data.contract_data) ||
+          (storedTermsCount > 0 && htmlSectionCount < Math.min(storedTermsCount, 3))
+        ) {
           console.log('[ContractSignScreen] Contract HTML missing sections, attempting to regenerate from contract_data');
           needsRegeneration = true;
         }
@@ -230,7 +259,7 @@ const ContractSignScreen = () => {
             console.log('[ContractSignScreen] selectedTerms is empty, loading from contract_sections table for contract_id:', data.id);
             const { data: sectionsData, error: sectionsError } = await supabase
               .from('contract_sections')
-              .select('id, contract_id, title, content, section_order, is_required, section_type, placeholder_tags')
+              .select('id, contract_id, title, content, section_order, is_required, section_type')
               .eq('contract_id', data.id)
               .order('section_order', { ascending: true })
               .limit(100);
@@ -340,7 +369,7 @@ const ContractSignScreen = () => {
             if (data.business_id) {
               const { data: bizData, error: bizError } = await supabase
                 .from('businesses')
-                .select('id, business_name, name, business_email, phone, address, business_settings')
+                .select('id, name, business_email, phone, address, business_settings')
                 .eq('id', data.business_id)
                 .maybeSingle();
               
@@ -467,71 +496,20 @@ const ContractSignScreen = () => {
     console.log('[ContractSign] Validation Passed - Starting signature process');
     setSigning(true);
     try {
-      // Generate signed PDF with signature embedded
-      let contractHTML = contract.contract_html;
-      
-      // Replace the existing employee signature section instead of adding a duplicate
-      // Find the employee signature section and replace the signature line with actual signature
       const signatureDate = formatDateForBusiness(new Date(), businessTimezone);
-      
-      // Look for the employee signature div and replace the border-bottom divs with actual signature
-      // Pattern captures: before label, label, content before signature line, signature line (REMOVE), date label, date line (REMOVE), after
-      // Updated to match margin-top: 20px (changed from 40px to reduce gaps) and font-size: 9px (increased from 6px)
-      const employeeSignatureSection = /(<div style="margin-top: [0-9]+px;">[\s\S]*?<p style="margin-bottom: 15px;"><strong>For the Employee:<\/strong><\/p>[\s\S]*?<div style="margin-bottom: 25px;">[\s\S]*?<p style="margin-bottom: 4px; font-size: [0-9]+px;">Employee Signature:<\/p>)([\s\S]*?)(<div style="border-bottom: 1px solid #000; height: 40px; margin-bottom: 15px;"><\/div>)([\s\S]*?<p style="margin-bottom: 4px; font-size: [0-9]+px;">Date:<\/p>)([\s\S]*?<div style="border-bottom: 1px solid #000; height: 40px;"><\/div>)([\s\S]*?<\/div>[\s\S]*?<\/div>[\s\S]*?<\/div>)/;
-      
-      // Replace signature line and date line with actual signature image, name, and date (REMOVE $3 and $5 which are the border-bottom divs)
-      const signatureReplacement = `$1$2<img src="${signatureRecord.signatureData}" alt="Signature" style="max-width: 300px; height: auto; border: 1px solid #ccc; padding: 10px; background: white; margin-bottom: 10px; display: block;" /><p style="margin-bottom: 4px; font-size: 9px;"><strong>${signerName}</strong></p>$4<p style="margin-top: 8px; font-size: 9px;">${signatureDate}</p>$6`;
-      
-      // Try to replace the existing signature section
-      if (employeeSignatureSection.test(contractHTML)) {
-        contractHTML = contractHTML.replace(employeeSignatureSection, signatureReplacement);
-      } else {
-        // Fallback: simpler replacement - find "For the Employee" section and replace signature line and date line
-        const simplePattern = /(<p style="margin-bottom: 4px; font-size: [0-9]+px;">Employee Signature:<\/p>)([\s\S]*?)(<div style="border-bottom: 1px solid #000; height: 40px; margin-bottom: 15px;"><\/div>)([\s\S]*?<p style="margin-bottom: 4px; font-size: [0-9]+px;">Date:<\/p>)([\s\S]*?<div style="border-bottom: 1px solid #000; height: 40px;"><\/div>)/;
-        if (simplePattern.test(contractHTML)) {
-          // Remove $3 (signature line) and $5 (date line)
-          contractHTML = contractHTML.replace(simplePattern, `$1<img src="${signatureRecord.signatureData}" alt="Signature" style="max-width: 300px; height: auto; border: 1px solid #ccc; padding: 10px; background: white; margin-bottom: 10px; display: block;" /><p style="margin-bottom: 4px; font-size: 9px;"><strong>${signerName}</strong></p>$4<p style="margin-top: 8px; font-size: 9px;">${signatureDate}</p>`);
-        } else {
-          // Last resort: append before </body>
-          contractHTML = contractHTML.replace('</body>', `<div style="margin-top: 20px;"><p><strong>Employee Signature:</strong></p><img src="${signatureRecord.signatureData}" alt="Signature" style="max-width: 300px; height: auto; border: 1px solid #ccc; padding: 10px; background: white;" /><p><strong>${signerName}</strong></p><p>Signed: ${signatureDate}</p></div></body>`);
-        }
-      }
-      
-      // Additional cleanup: Remove ALL remaining signature lines and empty divs with large heights
-      // Remove any border-bottom divs (signature lines) that might still be there
-      contractHTML = contractHTML.replace(
-        /<div style="border-bottom: 1px solid #000; height: 40px[^"]*"><\/div>/g,
-        ''
+      const signedHTML = embedEmployeeSignature(
+        contract.contract_html,
+        signatureRecord,
+        signerName,
+        signatureDate
       );
-      // Remove any empty divs with height: 40px that might be creating gaps
-      contractHTML = contractHTML.replace(
-        /<div[^>]*height:\s*40px[^>]*><\/div>/g,
-        ''
+
+      const signedPdfBlob = await generatePdfBlobFromHtml(
+        signedHTML,
+        `Signed_Employment_Contract_${contract.employee_first_name}_${contract.employee_last_name}.pdf`
       );
-      
-      const signedHTML = contractHTML;
-
-      // Generate signed PDF
-      const signedPdfBlob = await html2pdf().set({
-        margin: [0.5, 0.5, 0.5, 0.5],
-        filename: `Signed_Employment_Contract_${contract.employee_first_name}_${contract.employee_last_name}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true },
-        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
-      }).from(signedHTML).outputPdf('blob');
-
-      // Convert to base64 for storage
-      const signedPdfBase64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64String = reader.result.split(',')[1];
-          resolve(base64String);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(signedPdfBlob);
-      });
-
-      const signedPdfBuffer = Uint8Array.from(atob(signedPdfBase64), c => c.charCodeAt(0));
+      const signedPdfBase64 = await blobToBase64(signedPdfBlob);
+      const signedPdfBuffer = await blobToUint8Array(signedPdfBlob);
 
       // ========== EXTENSIVE LOGGING FOR CONTRACT SIGNING ==========
       console.log('========== CONTRACT SIGNING - START UPDATE ==========');
@@ -817,7 +795,7 @@ const ContractSignScreen = () => {
               <p>The employment contract for <strong>${contractForEmail.employee_first_name} ${contractForEmail.employee_last_name}</strong> has been signed by the employee and now requires your signature as the authorized representative.</p>
               <p><strong>Please review and sign the contract by clicking the button below:</strong></p>
               <a href="${authRepSigningLink}" class="sign-button" style="color: white; text-decoration: none;">Review & Sign Contract</a>
-              <p style="margin-top: 15px; font-size: 12px; color: #666;">
+              <p style="margin-top: 15px; font-size: 9px; color: #666;">
                 Or copy and paste this link into your browser:<br>
                 <a href="${authRepSigningLink}" style="color: #008080; word-break: break-all;">${authRepSigningLink}</a>
               </p>
@@ -833,48 +811,21 @@ The employment contract for ${contractForEmail.employee_first_name} ${contractFo
 Please review and sign the contract by visiting:
 ${authRepSigningLink}`;
 
-        // Get business name for sender - check contract_data first, then database
-        let businessName = 'The Company';
-        
-        // First, try to get from contract_data (already loaded)
-        if (contract.contract_data?.businessData?.name) {
-          businessName = contract.contract_data.businessData.name;
-          console.log('[Email] Using business name from contract_data:', businessName);
-        } else if (contract.contract_data?.businessData?.business_name) {
-          businessName = contract.contract_data.businessData.business_name;
-          console.log('[Email] Using business_name from contract_data:', businessName);
-        } else if (contractForEmail.business_id) {
-          // Fallback: query database
-          console.log('[Email] Business name not in contract_data, querying database...');
-          try {
-            const { data: bizData, error: bizError } = await supabase
-              .from('businesses')
-              .select('business_name, name')
-              .eq('id', contractForEmail.business_id)
-              .maybeSingle();
-            
-            if (bizError) {
-              console.warn('[Email] Error querying business:', bizError.message);
-            } else if (bizData) {
-              businessName = bizData.business_name || bizData.name || businessName;
-              console.log('[Email] Using business name from database:', businessName);
-            } else {
-              console.warn('[Email] Business not found in database, using default');
-            }
-          } catch (err) {
-            console.warn('[Email] Exception querying business:', err.message);
-          }
-        }
-        
+        const businessName = await resolveBusinessDisplayName({
+          businessId: contractForEmail.business_id,
+          contractData: contract.contract_data,
+        });
+        const senderName = formatContractHrFromName(businessName);
         console.log('[Email] Final business name for email:', businessName);
 
         const emailPayload = {
           businessId: contractForEmail.business_id,
           campaignId: `contract-auth-rep-${contractForEmail.id}-${Date.now()}`,
           contactId: `contract-auth-rep-${authRepEmail}`,
+          emailType: 'transactional',
           to: authRepEmail,
           fromEmail: 'noreply@tavarios.ca',
-          fromName: `${businessName} - HR`,
+          fromName: senderName,
           subject: `Contract Requires Your Signature - ${contractForEmail.employee_first_name} ${contractForEmail.employee_last_name}`,
           html: authRepEmailHTML,
           text: plainTextBody
@@ -977,45 +928,26 @@ ${authRepSigningLink}`;
             .eq('email', contractForEmail.employee_email)
             .maybeSingle();
           
-          // Check if auth account already exists
-          const { data: { session } } = await supabase.auth.getSession();
-          if (!session) {
-            throw new Error('Must be authenticated to create employee portal access');
-          }
-          
           // ALWAYS generate temp password - we will send this regardless
           const tempPasswordValue = `TempPass${Math.random().toString(36).substring(2, 10)}!`;
           let tempPassword = tempPasswordValue; // Always set this so email always includes it
           
+          // NOTE: Portal access creation requires authentication, but employee signing is public
+          // Portal access will be created when the contract is fully signed (from authorized rep signing)
+          // For now, we'll just generate the temp password and include it in the email
+          // The employee can use it once portal access is created after full signing
+          console.log('[ContractSign] Portal access will be created when contract is fully signed');
+          
           if (existingUser) {
-            // User exists - create/update auth account with temp password
-            console.log('[ContractSign] User exists, creating auth account with temp password');
-            
-            const { data: authResult, error: authError } = await supabase.functions.invoke('create-employee-auth', {
-              body: {
-                method: 'password',
-                employee_email: contractForEmail.employee_email,
-                employee_id: existingUser.id,
-                first_name: contractForEmail.employee_first_name || '',
-                last_name: contractForEmail.employee_last_name || '',
-                full_name: `${contractForEmail.employee_first_name || ''} ${contractForEmail.employee_last_name || ''}`.trim(),
-                temporary_password: tempPasswordValue
-              }
-            });
-            
-            if (authError) {
-              console.error('[ContractSign] Failed to create/update auth account:', authError);
-              console.warn('[ContractSign] Auth account creation failed, but temp password email will still be sent');
-              // Continue anyway - temp password is already set
-            } else {
-              console.log('[ContractSign] ✅ Auth account created/updated successfully with temp password');
-            }
+            // User exists - portal access will be created when contract is fully signed
+            console.log('[ContractSign] User exists, portal access will be created when contract is fully signed');
           } else {
-            // User doesn't exist - create employee record with auth account
-            console.log('[ContractSign] User does not exist, creating employee with auth account');
+            // User doesn't exist - create employee record (auth account will be created when contract is fully signed)
+            console.log('[ContractSign] User does not exist, creating employee (auth account will be created when contract is fully signed)');
             const { createEmployeeFromContract } = await import('../../utils/contractEmployeeCreation');
             
             const contractForEmployeeCreation = {
+              id: contractForEmail.id, // Contract ID - required for public call validation
               business_id: contractForEmail.business_id,
               employee_email: contractForEmail.employee_email,
               employee_first_name: contractForEmail.employee_first_name || '',
@@ -1028,7 +960,7 @@ ${authRepSigningLink}`;
             const result = await createEmployeeFromContract(contractForEmployeeCreation);
             if (result.success && result.tempPassword) {
               tempPassword = result.tempPassword; // Use the temp password from employee creation
-              console.log('[ContractSign] ✅ Employee and auth account created with temp password');
+              console.log('[ContractSign] ✅ Employee created (auth account will be created when contract is fully signed)');
             } else {
               // If employee creation didn't return temp password, use the one we generated
               console.warn('[ContractSign] Employee creation did not return temp password, using generated one');
@@ -1036,27 +968,17 @@ ${authRepSigningLink}`;
             }
           }
           
-          // Get business name for email
-          let businessName = 'The Company';
-          if (contractForEmail.contract_data?.businessData?.name) {
-            businessName = contractForEmail.contract_data.businessData.name;
-          } else if (contractForEmail.contract_data?.businessData?.business_name) {
-            businessName = contractForEmail.contract_data.businessData.business_name;
-          } else if (contractForEmail.business_id) {
-            const { data: bizData } = await supabase
-              .from('businesses')
-              .select('business_name, name')
-              .eq('id', contractForEmail.business_id)
-              .maybeSingle();
-            if (bizData) {
-              businessName = bizData.business_name || bizData.name || businessName;
-            }
-          }
+          const businessName = await resolveBusinessDisplayName({
+            businessId: contractForEmail.business_id,
+            contractData: contractForEmail.contract_data,
+          });
+          const senderName = formatContractHrFromName(businessName);
           
           const frontendUrl = import.meta.env.VITE_FRONTEND_URL || window.location.origin;
           const portalLoginLink = `${frontendUrl}/portal/login`;
           
           // Create email with portal credentials
+          // NOTE: Portal access will be created when the contract is fully signed by the authorized representative
           const portalCredentialsEmailHTML = `
             <!DOCTYPE html>
             <html>
@@ -1089,7 +1011,7 @@ ${authRepSigningLink}`;
                 }
                 .credential-item {
                   margin: 10px 0;
-                  font-size: 16px;
+                  font-size: 9px;
                 }
                 .credential-label {
                   font-weight: bold;
@@ -1099,7 +1021,7 @@ ${authRepSigningLink}`;
                 }
                 .temp-password {
                   font-family: monospace;
-                  font-size: 18px;
+                  font-size: 9px;
                   font-weight: bold;
                   color: #d9534f;
                   background-color: #fff;
@@ -1131,39 +1053,24 @@ ${authRepSigningLink}`;
             </head>
             <body>
               <div class="email-wrapper">
-                <h2>Welcome to Your Employee Portal!</h2>
+                <h2>Contract Signed Successfully!</h2>
                 <p>Dear ${contractForEmail.employee_first_name || 'Employee'},</p>
-                <p>Thank you for signing your employment contract! Your Employee Portal access has been activated.</p>
-                
-                <div class="credentials-box">
-                  <h3 style="margin-top: 0;">Your Login Credentials:</h3>
-                  <div class="credential-item">
-                    <span class="credential-label">Email:</span>
-                    <strong>${contractForEmail.employee_email}</strong>
-                  </div>
-                  <div class="credential-item">
-                    <span class="credential-label">Password:</span>
-                    <span class="temp-password">${tempPassword}</span>
-                  </div>
-                </div>
+                <p>Thank you for signing your employment contract! Your signature has been received.</p>
                 
                 <div class="warning-box">
-                  <strong>⚠️ IMPORTANT:</strong> This is a temporary password. You will be asked to change it when you log in.
+                  <strong>📋 Next Steps:</strong>
+                  <ul style="margin: 10px 0; padding-left: 20px;">
+                    <li>Your contract is now awaiting signature from the authorized representative</li>
+                    <li>Once the contract is fully signed, you will receive an email with your Employee Portal login credentials</li>
+                    <li>You will be able to access your portal to view your contract, pay statements, and update your profile</li>
+                  </ul>
                 </div>
                 
-                <p><strong>Click the button below to access your Employee Portal:</strong></p>
-                <a href="${portalLoginLink}" class="portal-button" style="color: white; text-decoration: none;">Go to Employee Portal</a>
-                
-                <p style="margin-top: 15px; font-size: 12px; color: #666;">
-                  Or copy and paste this link into your browser:<br>
-                  <a href="${portalLoginLink}" style="color: #008080; word-break: break-all;">${portalLoginLink}</a>
+                <p style="margin-top: 30px; font-size: 9px; color: #666;">
+                  You will receive another email once the contract is fully signed with your portal access information.
                 </p>
                 
-                <p style="margin-top: 30px; font-size: 14px; color: #666;">
-                  After logging in, you'll be asked to complete your profile setup, including your personal information, SIN number, and emergency contacts.
-                </p>
-                
-                <p>Best regards,<br>${businessName} - HR</p>
+                <p>Best regards,<br>${senderName}</p>
               </div>
             </body>
             </html>
@@ -1171,29 +1078,28 @@ ${authRepSigningLink}`;
           
           const plainTextBody = `Dear ${contractForEmail.employee_first_name || 'Employee'},
 
-Thank you for signing your employment contract! Your Employee Portal access has been activated.
+Thank you for signing your employment contract! Your signature has been received.
 
-Your Login Credentials:
-Email: ${contractForEmail.employee_email}
-Temporary Password: ${tempPassword}
+Next Steps:
+- Your contract is now awaiting signature from the authorized representative
+- Once the contract is fully signed, you will receive an email with your Employee Portal login credentials
+- You will be able to access your portal to view your contract, pay statements, and update your profile
 
-⚠️ IMPORTANT: This is a temporary password. You will be asked to change it when you log in.
-
-Access your Employee Portal at:
-${portalLoginLink}
+You will receive another email once the contract is fully signed with your portal access information.
 
 After logging in, you'll be asked to complete your profile setup, including your personal information, SIN number, and emergency contacts.
 
 Best regards,
-${businessName} - HR`;
+${senderName}`;
           
           const portalCredentialsEmailPayload = {
             businessId: contractForEmail.business_id,
             campaignId: `portal-credentials-${contractForEmail.id}-${Date.now()}`,
             contactId: `portal-credentials-${contractForEmail.employee_email}`,
+            emailType: 'transactional',
             to: contractForEmail.employee_email,
             fromEmail: 'noreply@tavarios.ca',
-            fromName: `${businessName} - HR`,
+            fromName: senderName,
             subject: `Your Employee Portal Access - ${contractForEmail.employee_first_name} ${contractForEmail.employee_last_name}`,
             html: portalCredentialsEmailHTML,
             text: plainTextBody
@@ -1273,31 +1179,8 @@ ${businessName} - HR`;
 
     try {
       toast.loading('Generating PDF...', { id: 'pdf-generate' });
-      
-      // Create a temporary container for PDF generation
-      const element = document.createElement('div');
-      element.innerHTML = contract.contract_html;
-      
-      // Configure PDF options
-      const opt = {
-        margin: [0.5, 0.5, 0.5, 0.5],
-        filename: `Employment_Contract_${contract.employee_first_name}_${contract.employee_last_name}_${new Date().toISOString().split('T')[0]}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { 
-          scale: 2,
-          useCORS: true,
-          logging: false
-        },
-        jsPDF: { 
-          unit: 'in', 
-          format: 'letter', 
-          orientation: 'portrait' 
-        }
-      };
-
-      // Generate and download PDF
-      await html2pdf().set(opt).from(element).save();
-      
+      const filename = `Employment_Contract_${contract.employee_first_name}_${contract.employee_last_name}_${new Date().toISOString().split('T')[0]}.pdf`;
+      await downloadContractPdf(contract.contract_html, filename);
       toast.success('PDF downloaded successfully!', { id: 'pdf-generate' });
     } catch (error) {
       console.error('[ContractSignScreen] Error generating PDF:', error);
@@ -1547,7 +1430,7 @@ ${businessName} - HR`;
         {/* Contract Preview */}
         <div style={styles.contractPreview}>
           {contract.contract_html ? (
-            <div dangerouslySetInnerHTML={{ __html: contract.contract_html }} />
+            <div dangerouslySetInnerHTML={{ __html: extractBodyHtml(contract.contract_html) }} />
           ) : (
             <div style={{ padding: '20px', textAlign: 'center', color: TavariStyles.colors.gray600 }}>
               <AlertCircle size={48} style={{ marginBottom: '16px', color: TavariStyles.colors.warning }} />

@@ -1,0 +1,44 @@
+# Vercel builds with `vite build` on their servers — do not upload local output (often 100MB+ with Electron unpacked).
+/dist
+
+# Exclude large installer files from Vercel deployment
+public/installers/*
+public/installers/**
+public/legacy-kiosk-downloads/**
+
+# Exclude backup zip files (root)
+*.zip
+
+# Capacitor iOS — built on Mac with Xcode, not on Vercel
+/ios
+
+# Exclude Electron build artifacts
+/electron/dist
+/electron/node_modules
+
+# Local voice servers — not part of Vite web deploy
+/tavari-voice-server
+/voice-agent-server
+
+# Cursor / IDE
+/.cursor
+
+# Large sibling app / archive folders not used by this Vite deploy
+/KiddConnect
+/Waivers
+/src (Original)
+/warmup
+/docs
+
+# Local repo metadata and desktop/mobile build outputs
+/.git
+/.vercel
+/build
+
+# Exclude node_modules (explicit for monorepo uploads)
+node_modules
+**/node_modules
+
+# Exclude source zip files
+src*.zip
+screens.zip

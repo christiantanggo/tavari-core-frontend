@@ -1,0 +1,34 @@
+{
+  "appId": "com.tavari.pos-print-agent",
+  "productName": "Tavari Receipt Printer",
+  "extraMetadata": {
+    "main": "build/electron/pos-print-agent-main.cjs"
+  },
+  "directories": {
+    "output": "dist",
+    "buildResources": "build"
+  },
+  "files": [
+    "build/electron/pos-print-agent-main.cjs",
+    "build/electron/pos-print-agent-lib.cjs",
+    "tools/pos-print-agent/lib.cjs",
+    "package.json"
+  ],
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "signingHashAlgorithms": [],
+    "signDlls": false,
+    "verifyUpdateCodeSignature": false
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "allowElevation": true,
+    "createDesktopShortcut": false,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Tavari Receipt Printer",
+    "runAfterFinish": true,
+    "artifactName": "Tavari-Receipt-Printer-Setup-${version}.exe",
+    "uninstallDisplayName": "Tavari Receipt Printer"
+  }
+}

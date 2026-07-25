@@ -1,7 +1,7 @@
 // screens/HR/EmployeeProfiles.jsx - WITH FULL PERMISSION SYSTEM (FIXED)
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Users, Search, Filter, Plus, AlertCircle, X } from 'lucide-react';
+import { Users, Search, Filter, Plus, AlertCircle, X, CheckCircle, Mail, Printer } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 
 // Import all required consistency files
@@ -14,6 +14,10 @@ import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../utils/TavariStyles';
 import { usePermissions } from '../../hooks/usePermissions';
 import PermissionGate from '../../components/Auth/PermissionGate';
+import {
+  mergeBusinessEmploymentOntoEmployees,
+  updateBusinessEmploymentStatus,
+} from '../../utils/businessEmploymentStatus';
 
 // Import existing modals
 import AddEmployeeModal from '../../components/HR/AddEmployeeModal';
@@ -29,7 +33,39 @@ import EmployeeVacationPayModal from '../../components/HR/HREmployeeProfilesComp
 import EmployeeBirthdayManager from '../../components/HR/HREmployeeProfilesComponents/EmployeeBirthdayManager';
 import EmployeeSINManager from '../../components/HR/HREmployeeProfilesComponents/EmployeeSINManager';
 import EmployeeStudentPaySettings from '../../components/HR/HREmployeeProfilesComponents/EmployeeStudentPaySettings';
+import EmployeeContractModal from '../../components/HR/HREmployeeProfilesComponents/EmployeeContractModal';
 import toast from 'react-hot-toast';
+import {
+  enrichEmployeeWithContractContext,
+  loadContractsByBusiness,
+  pickContractForEmployee,
+} from '../../utils/employeeContractContext';
+
+function normalizeAuthEmail(email) {
+  return (email || '').trim().toLowerCase();
+}
+
+/** public.users row for the signed-in operator (JWT id may differ from roster user_id). */
+async function fetchOperatorPublicUserRow(supabaseClient, authUser) {
+  const em = normalizeAuthEmail(authUser?.email);
+  if (em) {
+    const { data, error } = await supabaseClient
+      .from('users')
+      .select('id')
+      .eq('email', em)
+      .maybeSingle();
+    if (!error && data) return data;
+  }
+  if (authUser?.id) {
+    const { data, error } = await supabaseClient
+      .from('users')
+      .select('id')
+      .eq('id', authUser.id)
+      .maybeSingle();
+    if (!error && data) return data;
+  }
+  return null;
+}
 
 const EmployeeProfiles = () => {
   const navigate = useNavigate();
@@ -79,7 +115,7 @@ const EmployeeProfiles = () => {
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('active');
   const [departmentFilter, setDepartmentFilter] = useState('all');
   const [premiumFilter, setPremiumFilter] = useState('all');
   const [selectedEmployee, setSelectedEmployee] = useState(null);
@@ -93,9 +129,16 @@ const EmployeeProfiles = () => {
   const [showCertificateManagement, setShowCertificateManagement] = useState(false);
   const [showLieuTimeModal, setShowLieuTimeModal] = useState(false);
   const [showVacationPayModal, setShowVacationPayModal] = useState(false);
+  const [showResendSuccessModal, setShowResendSuccessModal] = useState(false);
+  const [resendSuccessEmail, setResendSuccessEmail] = useState('');
   const [showBirthdayManager, setShowBirthdayManager] = useState(false);
   const [showSINManager, setShowSINManager] = useState(false);
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [reportData, setReportData] = useState([]);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState(null);
   const [showStudentPaySettings, setShowStudentPaySettings] = useState(false);
+  const [showContractModal, setShowContractModal] = useState(false);
 
   // Available data for filtering
   const [departments, setDepartments] = useState([]);
@@ -185,13 +228,19 @@ const EmployeeProfiles = () => {
             lieu_time_balance,
             vacation_percent,
             birth_date,
-            sin_number,
             student_pay_enabled,
+            labor_subsidy_enabled,
+            labor_subsidy_partner,
+            labor_subsidy_wage_cap,
+            labor_subsidy_max_hours_per_week,
+            labor_subsidy_start_date,
+            labor_subsidy_end_date,
             created_at
           )
         `)
         .eq('business_id', selectedBusinessId)
-        .eq('active', true);
+        .eq('active', true)
+        .limit(200);
 
       if (userError) {
         console.error('Error loading employees:', userError);
@@ -211,17 +260,24 @@ const EmployeeProfiles = () => {
         role: entry.role
       }));
 
-      console.log(`✅ Loaded ${transformedData.length} employees for business ${selectedBusinessId}`);
+      const withBusinessEmployment = await mergeBusinessEmploymentOntoEmployees(
+        supabase,
+        selectedBusinessId,
+        transformedData,
+      );
+
+      console.log(`✅ Loaded ${withBusinessEmployment.length} employees for business ${selectedBusinessId}`);
 
       // Load premium data if user has permission
       let premiumData = [];
       if (canManagePremiums) {
         const { data, error } = await supabase
           .from('hrpayroll_employee_premiums')
-          .select('*')
+          .select('id, user_id, premium_name, premium_rate, applies_to_all_hours, is_active')
           .eq('business_id', selectedBusinessId)
           .eq('is_active', true)
-          .in('user_id', transformedData.map(emp => emp.id));
+          .in('user_id', withBusinessEmployment.map(emp => emp.id))
+          .limit(500);
 
         if (!error) premiumData = data || [];
       }
@@ -232,7 +288,7 @@ const EmployeeProfiles = () => {
         const { data, error } = await supabase
           .from('employee_certificates')
           .select(`
-            *,
+            id, employee_id, certificate_id, issue_date, expiry_date, status,
             hr_certificates!inner(
               id,
               name,
@@ -244,12 +300,14 @@ const EmployeeProfiles = () => {
           `)
           .eq('business_id', selectedBusinessId)
           .eq('status', 'active')
-          .in('employee_id', transformedData.map(emp => emp.id));
+          .in('employee_id', withBusinessEmployment.map(emp => emp.id))
+          .limit(500);
 
         if (!error) certificateData = data || [];
       }
 
-      const data = transformedData;
+      const data = withBusinessEmployment;
+      const contractsByKey = await loadContractsByBusiness(selectedBusinessId);
 
       const transformedEmployees = (data || []).map(user => {
         const userPremiums = canManagePremiums ? (premiumData || [])
@@ -280,7 +338,7 @@ const EmployeeProfiles = () => {
             days_until_expiry: cert.expiry_date ? Math.ceil((new Date(cert.expiry_date) - new Date()) / (1000 * 60 * 60 * 24)) : null
           })) : [];
 
-        return {
+        const baseEmployee = {
           id: user.id,
           role: user.role || 'employee',
           first_name: user.first_name || user.full_name?.split(' ')[0] || 'Unknown',
@@ -300,13 +358,14 @@ const EmployeeProfiles = () => {
           lieu_time_balance: canManageLieuTime ? (user.lieu_time_balance || 0) : null,
           vacation_percent: canManageVacationPay ? user.vacation_percent : null,
           birth_date: canViewSensitiveData ? user.birth_date : null,
-          sin_number: canViewSensitiveData ? user.sin_number : null,
           student_pay_enabled: user.student_pay_enabled || false,
           created_at: user.created_at,
-          tenure: user.hire_date ? calculateTenure(user.hire_date) : null,
           active_premiums: userPremiums,
-          active_certificates: userCertificates
+          active_certificates: userCertificates,
         };
+
+        const contract = pickContractForEmployee(contractsByKey, baseEmployee);
+        return enrichEmployeeWithContractContext(baseEmployee, contract);
       });
       
       setEmployees(transformedEmployees);
@@ -370,26 +429,6 @@ const EmployeeProfiles = () => {
     }
   };
 
-  const calculateTenure = (hireDate) => {
-    if (!hireDate) return null;
-    
-    const hire = new Date(hireDate);
-    const now = new Date();
-    const diffTime = Math.abs(now - hire);
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
-    if (diffDays < 30) {
-      return `${diffDays} days`;
-    } else if (diffDays < 365) {
-      const months = Math.floor(diffDays / 30);
-      return `${months} month${months !== 1 ? 's' : ''}`;
-    } else {
-      const years = Math.floor(diffDays / 365);
-      const remainingMonths = Math.floor((diffDays % 365) / 30);
-      return `${years} year${years !== 1 ? 's' : ''}${remainingMonths > 0 ? `, ${remainingMonths} month${remainingMonths !== 1 ? 's' : ''}` : ''}`;
-    }
-  };
-
   // Event handlers for employee actions
   const handleEmployeeCreated = (newEmployee) => {
     setShowAddModal(false);
@@ -431,10 +470,6 @@ const EmployeeProfiles = () => {
     recordAction('view_audit_history', employee.id);
   };
 
-  const handleViewEmployee = (employee) => {
-    console.log('View employee details:', employee.id);
-    handleEditEmployee(employee);
-  };
 
   const handleManagePremiums = (employee) => {
     if (!canManagePremiums) {
@@ -598,78 +633,36 @@ const EmployeeProfiles = () => {
         employee_id: employee.id,
         employee_name: employee.full_name
       }, 'high');
-      
-      console.log('Attempting to delete employee:', {
-        user_id: employee.id,
-        business_id: selectedBusinessId,
-        employee_name: employee.full_name
+
+      if (!selectedBusinessId) {
+        toast.error('No business selected');
+        return;
+      }
+
+      const operatorRow = await fetchOperatorPublicUserRow(supabase, authUser);
+      if (String(employee.id) === String(operatorRow?.id ?? authUser?.id)) {
+        toast.error('You cannot remove your own account from the roster here.');
+        return;
+      }
+
+      const { data: rpcResult, error: rpcError } = await supabase.rpc('remove_employee_from_business', {
+        p_target_user_id: employee.id,
+        p_business_id: selectedBusinessId
       });
-      
-      // Hard delete: Remove from user_roles (for this business only)
-      const { data: deleteData, error: roleError } = await supabase
-        .from('user_roles')
-        .delete()
-        .eq('user_id', employee.id)
-        .eq('business_id', selectedBusinessId)
-        .select();
-      
-      console.log('Delete result from user_roles:', { deleteData, roleError });
-      
-      if (roleError) {
-        console.error('Error deleting user_roles:', roleError);
-        toast.error('Failed to delete employee: ' + roleError.message);
-        throw roleError;
-      }
-      
-      if (!deleteData || deleteData.length === 0) {
-        console.warn('No rows deleted from user_roles. Employee may not exist in user_roles for this business.');
-        console.warn('Checking if employee exists in user_roles...');
-        
-        // Check if the employee actually exists in user_roles
-        const { data: checkData, error: checkError } = await supabase
-          .from('user_roles')
-          .select('*')
-          .eq('user_id', employee.id)
-          .eq('business_id', selectedBusinessId);
-        
-        console.log('Employee check in user_roles:', { checkData, checkError });
-        
-        if (checkData && checkData.length > 0) {
-          console.error('Employee exists in user_roles but delete returned 0 rows. Possible RLS issue.');
-          toast.error('Failed to delete: Employee exists but deletion was blocked. Check RLS policies.');
-          throw new Error('Delete operation returned 0 rows despite employee existing in user_roles');
-        } else {
-          toast.error('Employee not found in user_roles for this business.');
-          throw new Error('Employee does not exist in user_roles for this business');
-        }
-      } else {
-        console.log(`Successfully deleted ${deleteData.length} row(s) from user_roles`);
-      }
-      
-      // Also delete from business_users if it exists
-      const { data: businessUserDeleteData, error: businessUserError } = await supabase
-        .from('business_users')
-        .delete()
-        .eq('user_id', employee.id)
-        .eq('business_id', selectedBusinessId)
-        .select();
-      
-      // business_users deletion is optional (table might not exist or entry might not exist)
-      if (businessUserError && businessUserError.code !== 'PGRST116') {
-        console.warn('Error deleting business_users (non-critical):', businessUserError);
-      } else if (businessUserDeleteData && businessUserDeleteData.length > 0) {
-        console.log(`Successfully deleted ${businessUserDeleteData.length} row(s) from business_users`);
-      }
-      
-      // Note: We do NOT delete from users table as the user might exist in other businesses
-      // Only remove their association with THIS business
-      
+
+      if (rpcError) throw rpcError;
+
+      const rowsRemoved =
+        (rpcResult?.user_roles_deleted != null ? Number(rpcResult.user_roles_deleted) : 0) +
+        (rpcResult?.business_users_deleted != null ? Number(rpcResult.business_users_deleted) : 0);
+
       await logSecurityEvent('employee_deleted', {
         employee_id: employee.id,
         employee_name: employee.full_name,
         deleted_by: authUser?.id,
         business_id: selectedBusinessId,
-        rows_deleted: deleteData?.length || 0
+        rows_deleted: rowsRemoved,
+        rpc_result: rpcResult
       }, 'high');
       
       console.log('Delete employee completed:', employee.id);
@@ -696,14 +689,95 @@ const EmployeeProfiles = () => {
     }
   };
 
+  const handleOpenReportModal = async () => {
+    if (!selectedBusinessId) return;
+    setReportModalOpen(true);
+    setReportLoading(true);
+    setReportError(null);
+    setReportData([]);
+    try {
+      const { data, error } = await supabase.rpc('get_active_employees_report', {
+        p_business_id: selectedBusinessId
+      });
+      if (error) throw error;
+      setReportData(Array.isArray(data) ? data : data ? [data] : []);
+    } catch (err) {
+      console.error('Report fetch error:', err);
+      setReportError(err.message || 'Failed to load report');
+      setReportData([]);
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const handlePrintReport = () => {
+    const businessName = businessData?.business_name || businessData?.name || 'Company';
+    const formatMoney = (n) => {
+      if (n == null || n === '') return '—';
+      const num = parseFloat(n);
+      return isNaN(num) ? '—' : `$${num.toFixed(2)}`;
+    };
+    const formatPct = (n) => {
+      if (n == null || n === '') return '—';
+      const num = parseFloat(n);
+      if (isNaN(num)) return '—';
+      return (num < 1 ? num * 100 : num).toFixed(1) + '%';
+    };
+    const formatDate = (d) => !d ? '—' : new Date(d).toLocaleDateString();
+    const rows = reportData.map((r) => {
+      const premiumsText = (r.premiums && r.premiums.length)
+        ? r.premiums.map((p) => `${p.premium_name || 'Premium'}: ${formatMoney(p.rate_per_hour)}/hr`).join('; ')
+        : '—';
+      return `<tr>
+        <td>${(r.first_name || '').trim() || '—'}</td>
+        <td>${(r.last_name || '').trim() || '—'}</td>
+        <td>${r.employment_status || '—'}</td>
+        <td>${formatMoney(r.hourly_wage)}</td>
+        <td>${premiumsText}</td>
+        <td>${formatDate(r.hire_date)}</td>
+        <td>${r.avg_weekly_hours != null ? Number(r.avg_weekly_hours).toFixed(1) : '—'}</td>
+        <td>${formatPct(r.vacation_percent)}</td>
+      </tr>`;
+    }).join('');
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Active Employees Report</title>
+      <style>
+        body{font-family:system-ui,sans-serif;font-size: 14px;padding:24px;margin:0;}
+        table{border-collapse:collapse;width:100%;font-size: 14px;}
+        th,td{border:1px solid #333;padding:8px 9px;text-align:left;}
+        th{background:#eee;font-weight:600;}
+        h1{font-size: 22px;margin:0 0 9px 0;}
+        p{margin:0 0 12px 0;}
+        @media print{
+          body{padding:18px;margin:0;}
+          table{font-size: 14px;}
+          th,td{padding:6px 8px;}
+          h1{font-size: 19px;}
+        }
+      </style></head>
+      <body><h1>Active Employees Report</h1><p><strong>${businessName}</strong> — ${new Date().toLocaleString()}</p>
+      <table><thead><tr><th>First name</th><th>Last name</th><th>Status</th><th>Wage</th><th>Premiums ($/hr)</th><th>Hire date</th><th>Avg hrs/wk</th><th>Vacation %</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+    const w = window.open('', '_blank');
+    if (!w) {
+      toast.error('Please allow pop-ups to print the report.');
+      return;
+    }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => {
+      w.print();
+      w.close();
+    }, 300);
+  };
+
   const handleViewContract = async (employee) => {
     try {
-      // Find the signed contract for this employee
+      // Find any contract for this employee (signed, pending, or sent)
       const { data: contracts, error: contractError } = await supabase
         .from('hr_contracts')
         .select('id, signing_token, status, employee_email, employee_first_name, employee_last_name')
         .eq('employee_email', employee.email)
-        .eq('status', 'signed')
+        .in('status', ['signed', 'pending', 'sent'])
         .order('signed_at', { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -715,7 +789,9 @@ const EmployeeProfiles = () => {
       }
 
       if (!contracts || !contracts.signing_token) {
-        toast.error('No signed contract found for this employee');
+        // No contract found - show modal with upload option
+        setSelectedEmployee(employee);
+        setShowContractModal(true);
         return;
       }
 
@@ -724,6 +800,216 @@ const EmployeeProfiles = () => {
     } catch (error) {
       console.error('Error viewing contract:', error);
       toast.error('Failed to open contract: ' + error.message);
+    }
+  };
+
+  const handleContractUploaded = (contractRecord) => {
+    // Refresh employee data or show success message
+    console.log('Contract uploaded:', contractRecord);
+    // Optionally reload employees to reflect the new contract
+    loadEmployees();
+  };
+
+  const handleResendPersonalInfo = async (employee) => {
+    try {
+      if (!employee.email) {
+        toast.error('Employee email is missing');
+        return;
+      }
+
+      // Get or create user record
+      let user = employee;
+      if (!employee.id) {
+        const { data: userData, error: userError } = await supabase
+          .from('users')
+          .select('id, email, first_name, last_name, personal_info_token')
+          .eq('email', employee.email)
+          .maybeSingle();
+        
+        if (userError && userError.code !== 'PGRST116') {
+          throw new Error('Failed to load employee: ' + userError.message);
+        }
+        
+        if (userData) {
+          user = userData;
+        } else {
+          throw new Error('Employee not found in system. Please ensure the employee exists.');
+        }
+      }
+
+      // Generate or get existing personal info token from user record
+      let personalInfoToken = user.personal_info_token;
+      
+      if (!personalInfoToken) {
+        personalInfoToken = crypto.randomUUID();
+      }
+
+      // Update user record with token (primary storage)
+      // Check if column exists first (migration might not be run)
+      const { error: userTokenUpdateError } = await supabase
+        .from('users')
+        .update({ personal_info_token: personalInfoToken })
+        .eq('id', user.id);
+      
+      if (userTokenUpdateError) {
+        // If column doesn't exist, try to use contract token only
+        if (userTokenUpdateError.message?.includes('personal_info_token') || userTokenUpdateError.code === 'PGRST204') {
+          console.warn('personal_info_token column not found in users table. Please run migration: add_personal_info_token_to_users.sql');
+          // Continue with contract token only
+        } else {
+          throw new Error('Failed to generate token: ' + userTokenUpdateError.message);
+        }
+      }
+
+      // Also update contract if it exists (for backwards compatibility)
+      const { data: contract } = await supabase
+        .from('hr_contracts')
+        .select('id, business_id')
+        .or(`employee_email.eq.${employee.email},employee_id.eq.${user.id}`)
+        .in('status', ['employee_signed', 'signed'])
+        .order('signed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (contract) {
+        await supabase
+          .from('hr_contracts')
+          .update({ personal_info_token: personalInfoToken })
+          .eq('id', contract.id);
+      }
+
+      // Get business name
+      let businessName = businessData?.business_name || businessData?.name || 'Company';
+      const businessId = contract?.business_id || selectedBusinessId;
+      if (businessId && !businessName) {
+        const { data: bizData } = await supabase
+          .from('businesses')
+          .select('business_name, name')
+          .eq('id', businessId)
+          .maybeSingle();
+        if (bizData) {
+          businessName = bizData.business_name || bizData.name || businessName;
+        }
+      }
+
+      const frontendUrl = import.meta.env.VITE_FRONTEND_URL || window.location.origin;
+      const personalInfoLink = `${frontendUrl}/contract/personal-info/${personalInfoToken}`;
+      const employeeName = `${employee.first_name || ''} ${employee.last_name || ''}`.trim() || 'Employee';
+
+      const personalInfoEmailHTML = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Complete Your Employee Profile</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              line-height: 1.6;
+              color: #333;
+              max-width: 800px;
+              margin: 0 auto;
+              padding: 20px;
+              background-color: #f5f5f5;
+            }
+            .email-wrapper {
+              background: white;
+              border-radius: 8px;
+              padding: 30px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            .form-button {
+              display: inline-block;
+              background-color: #008080;
+              color: white;
+              padding: 15px 30px;
+              text-decoration: none;
+              border-radius: 5px;
+              font-weight: bold;
+              margin: 20px 0;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="email-wrapper">
+            <h2>Complete Your Employee Profile</h2>
+            <p>Dear ${employeeName},</p>
+            <p>Please complete your personal information form to finalize your employee profile setup.</p>
+            <p><strong>Please complete the form by clicking the button below:</strong></p>
+            <a href="${personalInfoLink}" class="form-button" style="color: white; text-decoration: none;">Complete Personal Information Form</a>
+            <p style="margin-top: 15px; font-size: 10px; color: #666;">
+              Or copy and paste this link into your browser:<br>
+              <a href="${personalInfoLink}" style="color: #008080; word-break: break-all;">${personalInfoLink}</a>
+            </p>
+            <p style="margin-top: 20px; font-size: 10px; color: #666;">
+              This form includes fields for your SIN number, address, birth date, emergency contact information, and account setup (password and PIN).
+            </p>
+          </div>
+        </body>
+        </html>
+      `;
+
+      const plainTextBody = `Dear ${employeeName},
+
+Please complete your personal information form to finalize your employee profile setup.
+
+Please complete the form by visiting:
+${personalInfoLink}
+
+This form includes fields for your SIN number, address, birth date, emergency contact information, and account setup (password and PIN).`;
+
+      const emailPayload = {
+        businessId: businessId || selectedBusinessId,
+        campaignId: `personal-info-resend-${user.id}-${Date.now()}`,
+        contactId: `personal-info-${employee.email}`,
+        emailType: 'transactional',
+        to: employee.email,
+        fromEmail: 'noreply@tavarios.ca',
+        fromName: `${businessName} - HR`,
+        subject: `Complete Your Employee Profile - ${employeeName}`,
+        html: personalInfoEmailHTML,
+        text: plainTextBody
+      };
+
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mail-send`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`
+        },
+        body: JSON.stringify(emailPayload)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to send email');
+      }
+
+      const data = await response.json();
+      if (!data?.ok) {
+        throw new Error(data?.error || 'Failed to send email');
+      }
+
+      // Show success modal with email address
+      setResendSuccessEmail(employee.email);
+      setShowResendSuccessModal(true);
+      
+      recordAction('resend_personal_info_form', employee.id);
+      await logSecurityEvent('personal_info_form_resent', {
+        employee_id: employee.id,
+        employee_email: employee.email,
+        contract_id: contract?.id
+      }, 'medium');
+    } catch (error) {
+      console.error('Error resending personal info form:', error);
+      toast.error('Failed to resend personal info form: ' + (error.message || 'Unknown error'));
+      await logSecurityEvent('personal_info_form_resend_failed', {
+        employee_id: employee.id,
+        employee_email: employee.email,
+        error: error.message
+      }, 'medium');
     }
   };
 
@@ -748,7 +1034,8 @@ const EmployeeProfiles = () => {
           wage: employee.wage,
           hireDate: employee.hire_date,
           employmentStatus: employee.employment_status,
-          vacationPercent: employee.vacation_percent
+          vacationPercent: employee.vacation_percent,
+          manager_id: employee.manager_id || null
         }
       }
     });
@@ -784,14 +1071,12 @@ const EmployeeProfiles = () => {
           reason: reason
         }, 'high');
         
-        // Update users table: set employment_status to terminated
-        const { error: updateError } = await supabase
-          .from('users')
-          .update({
-            employment_status: 'terminated',
-            termination_date: finalTerminationDate
-          })
-          .eq('id', employee.id);
+        const { error: updateError } = await updateBusinessEmploymentStatus(supabase, {
+          userId: employee.id,
+          businessId: selectedBusinessId,
+          employment_status: 'terminated',
+          termination_date: finalTerminationDate,
+        });
         
         if (updateError) {
           console.error('Error terminating employee:', updateError);
@@ -808,18 +1093,6 @@ const EmployeeProfiles = () => {
         
         if (roleError) {
           console.warn('Error deactivating user_roles (non-critical):', roleError);
-          // Don't fail the termination if this fails, but log it
-        }
-        
-        // Also update business_users if it exists
-        const { error: businessUserError } = await supabase
-          .from('business_users')
-          .update({ active: false })
-          .eq('user_id', employee.id)
-          .eq('business_id', selectedBusinessId);
-        
-        if (businessUserError && businessUserError.code !== 'PGRST116') {
-          console.warn('Error updating business_users (non-critical):', businessUserError);
         }
         
         await logSecurityEvent('employee_terminated', {
@@ -851,7 +1124,12 @@ const EmployeeProfiles = () => {
       employee.position?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       employee.employee_number?.toLowerCase().includes(searchTerm.toLowerCase());
     
-    const matchesStatus = statusFilter === 'all' || employee.employment_status === statusFilter;
+    const statusKey = employee.lifecycle_status || employee.employment_status;
+    const matchesStatus = statusFilter === 'all'
+      ? true
+      : statusFilter === 'active'
+        ? statusKey !== 'terminated' && statusKey !== 'suspended'
+        : statusKey === statusFilter;
     const matchesDepartment = departmentFilter === 'all' || employee.department === departmentFilter;
     
     const matchesPremium = premiumFilter === 'all' || 
@@ -860,13 +1138,19 @@ const EmployeeProfiles = () => {
       employee.active_premiums.some(p => p.premium.id === premiumFilter);
     
     return matchesSearch && matchesStatus && matchesDepartment && matchesPremium;
+  }).sort((a, b) => {
+    // Sort alphabetically by full name
+    const nameA = (a.full_name || '').toLowerCase();
+    const nameB = (b.full_name || '').toLowerCase();
+    return nameA.localeCompare(nameB);
   });
 
   // Get employee statistics
   const stats = {
     total: employees.length,
-    active: employees.filter(e => e.employment_status === 'active').length,
-    probation: employees.filter(e => e.employment_status === 'probation').length,
+    active: employees.filter(e => e.employment_status !== 'terminated').length,
+    probation: employees.filter((e) => e.lifecycle_status === 'probation').length,
+    pending: employees.filter((e) => e.lifecycle_status === 'pending').length,
     recent: employees.filter(e => e.hire_date && new Date(e.hire_date) >= new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)).length,
     with_premiums: employees.filter(e => e.active_premiums.length > 0).length,
     with_certificates: employees.filter(e => e.active_certificates.length > 0).length,
@@ -879,13 +1163,21 @@ const EmployeeProfiles = () => {
     container: {
       minHeight: '100vh',
       backgroundColor: TavariStyles.colors.gray50,
-      padding: TavariStyles.spacing['3xl'],
-      paddingTop: '100px',
+      padding: '20px',
+      paddingTop: '0px',
       boxSizing: 'border-box'
     },
     header: {
-      marginBottom: TavariStyles.spacing['3xl'],
+      marginBottom: '5px',
       textAlign: 'center'
+    },
+    headerH2: {
+      marginTop: '0',
+      marginBottom: '8px'
+    },
+    headerP: {
+      marginTop: '0',
+      marginBottom: '0'
     },
     errorBanner: {
       ...TavariStyles.components.banner?.base,
@@ -936,12 +1228,14 @@ const EmployeeProfiles = () => {
       display: 'flex',
       gap: TavariStyles.spacing.lg,
       flex: 1,
-      flexWrap: 'wrap'
+      flexWrap: 'wrap',
+      minWidth: 0
     },
     searchGroup: {
       position: 'relative',
-      flex: 1,
-      minWidth: '300px'
+      flex: '1 1 300px',
+      minWidth: '200px',
+      maxWidth: '500px'
     },
     searchIcon: {
       position: 'absolute',
@@ -978,7 +1272,8 @@ const EmployeeProfiles = () => {
       display: 'flex',
       alignItems: 'center',
       gap: TavariStyles.spacing.sm,
-      whiteSpace: 'nowrap'
+      whiteSpace: 'nowrap',
+      flexShrink: 0
     },
     content: {
       marginBottom: TavariStyles.spacing['3xl']
@@ -1004,7 +1299,7 @@ const EmployeeProfiles = () => {
     },
     employeeGrid: {
       display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fill, minmax(450px, 1fr))',
+      gridTemplateColumns: '1fr',
       gap: TavariStyles.spacing.xl,
       paddingBottom: TavariStyles.spacing.xl
     },
@@ -1016,6 +1311,18 @@ const EmployeeProfiles = () => {
       fontSize: TavariStyles.typography.fontSize.lg,
       color: TavariStyles.colors.gray600
     }
+  };
+
+  const reportTableHeader = {
+    border: `1px solid ${TavariStyles.colors.gray300}`,
+    padding: '8px 10px',
+    textAlign: 'left',
+    backgroundColor: TavariStyles.colors.gray100,
+    fontWeight: TavariStyles.typography.fontWeight.semibold
+  };
+  const reportTableCell = {
+    border: `1px solid ${TavariStyles.colors.gray200}`,
+    padding: '8px 10px'
   };
 
   // Loading states
@@ -1056,8 +1363,8 @@ const EmployeeProfiles = () => {
       <SecurityWrapper>
         <div style={styles.container}>
           <div style={styles.header}>
-            <h2>Employee Profiles</h2>
-            <p>Manage employee information, premiums, certificates, lieu time, and view change history</p>
+            <h2 style={styles.headerH2}>Employee Profiles</h2>
+            <p style={styles.headerP}>Manage employee information, premiums, certificates, lieu time, and view change history</p>
           </div>
 
           {error && (
@@ -1070,6 +1377,118 @@ const EmployeeProfiles = () => {
               >
                 <X size={16} />
               </button>
+            </div>
+          )}
+
+          {/* Active employees report modal */}
+          {reportModalOpen && (
+            <div
+              style={{
+                position: 'fixed',
+                inset: 0,
+                backgroundColor: 'rgba(0,0,0,0.5)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 9999,
+                padding: 24
+              }}
+              onClick={(e) => e.target === e.currentTarget && setReportModalOpen(false)}
+            >
+              <div
+                style={{
+                  backgroundColor: TavariStyles.colors.white,
+                  borderRadius: TavariStyles.borderRadius?.md || '8px',
+                  maxWidth: 960,
+                  width: '100%',
+                  maxHeight: '90vh',
+                  overflow: 'auto',
+                  boxShadow: '0 20px 40px rgba(0,0,0,0.15)',
+                  padding: TavariStyles.spacing.xl
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                  <h3 style={{ margin: 0 }}>Active employees report</h3>
+                  <button
+                    type="button"
+                    onClick={() => setReportModalOpen(false)}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}
+                  >
+                    <X size={24} />
+                  </button>
+                </div>
+                {reportLoading && <div style={styles.loading}>Loading report…</div>}
+                {reportError && (
+                  <div style={{ ...styles.errorBanner, marginBottom: 16 }}>
+                    {reportError}
+                  </div>
+                )}
+                {!reportLoading && reportData.length > 0 && (
+                  <>
+                    <div style={{ overflowX: 'auto', marginBottom: 16 }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                        <thead>
+                          <tr>
+                            <th style={reportTableHeader}>First name</th>
+                            <th style={reportTableHeader}>Last name</th>
+                            <th style={reportTableHeader}>Status</th>
+                            <th style={reportTableHeader}>Hourly wage</th>
+                            <th style={reportTableHeader}>Premiums ($/hr)</th>
+                            <th style={reportTableHeader}>Hire date</th>
+                            <th style={reportTableHeader}>Avg weekly hrs</th>
+                            <th style={reportTableHeader}>Vacation %</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {reportData.map((r, i) => (
+                            <tr key={i}>
+                              <td style={reportTableCell}>{r.first_name || '—'}</td>
+                              <td style={reportTableCell}>{r.last_name || '—'}</td>
+                              <td style={reportTableCell}>{r.employment_status || '—'}</td>
+                              <td style={reportTableCell}>
+                                {r.hourly_wage != null && r.hourly_wage !== '' ? `$${Number(r.hourly_wage).toFixed(2)}` : '—'}
+                              </td>
+                              <td style={reportTableCell}>
+                                {r.premiums?.length
+                                  ? r.premiums.map((p) => `${p.premium_name || 'Premium'}: $${Number(p.rate_per_hour || 0).toFixed(2)}/hr`).join('; ')
+                                  : '—'}
+                              </td>
+                              <td style={reportTableCell}>
+                                {r.hire_date ? new Date(r.hire_date).toLocaleDateString() : '—'}
+                              </td>
+                              <td style={reportTableCell}>
+                                {r.avg_weekly_hours != null ? Number(r.avg_weekly_hours).toFixed(1) : '—'}
+                              </td>
+                              <td style={reportTableCell}>
+                                {r.vacation_percent != null && r.vacation_percent !== ''
+                                  ? (Number(r.vacation_percent) < 1 ? Number(r.vacation_percent) * 100 : Number(r.vacation_percent)).toFixed(1) + '%'
+                                  : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        onClick={() => setReportModalOpen(false)}
+                        style={{ ...styles.createButton, ...TavariStyles.components?.button?.variants?.secondary }}
+                      >
+                        Close
+                      </button>
+                      <button type="button" onClick={handlePrintReport} style={styles.createButton}>
+                        <Printer size={18} style={{ marginRight: 6 }} />
+                        Print
+                      </button>
+                    </div>
+                  </>
+                )}
+                {!reportLoading && !reportError && reportData.length === 0 && (
+                  <p style={{ color: TavariStyles.colors.gray600 }}>No active employees to show.</p>
+                )}
+              </div>
             </div>
           )}
 
@@ -1139,7 +1558,8 @@ const EmployeeProfiles = () => {
                   style={styles.filterSelect}
                 >
                   <option value="all">All Status</option>
-                  <option value="active">Active</option>
+                  <option value="active">Current (excl. terminated)</option>
+                  <option value="pending">Pending Contract</option>
                   <option value="probation">Probation</option>
                   <option value="suspended">Suspended</option>
                   <option value="terminated">Terminated</option>
@@ -1182,6 +1602,20 @@ const EmployeeProfiles = () => {
               )}
             </div>
             
+            {finalCanViewEmployees && (
+              <button
+                onClick={handleOpenReportModal}
+                style={{
+                  ...styles.createButton,
+                  ...TavariStyles.components.button?.variants?.secondary,
+                  backgroundColor: TavariStyles.colors?.gray100 ?? '#f3f4f6',
+                  color: TavariStyles.colors?.gray800 ?? '#1f2937'
+                }}
+              >
+                <Printer size={20} />
+                Print active employees
+              </button>
+            )}
             <PermissionGate permissions={['hr.employees.create']} requireElevated>
               <button
                 onClick={() => setShowAddModal(true)}
@@ -1224,10 +1658,10 @@ const EmployeeProfiles = () => {
                   <EmployeeCard
                     key={employee.id}
                     employee={employee}
+                    businessId={selectedBusinessId}
                     formatTaxAmount={formatTaxAmount}
                     canManageEmployees={() => canEditEmployees}
                     canViewAuditHistory={() => canViewAudit}
-                    onViewEmployee={handleViewEmployee}
                     onEditEmployee={handleEditEmployee}
                     onManagePremiums={handleManagePremiums}
                     onManageCertificates={handleManageCertificates}
@@ -1241,6 +1675,7 @@ const EmployeeProfiles = () => {
                     onToggleStudentPay={handleToggleStudentPay}
                     onViewContract={handleViewContract}
                     onCreateContract={handleCreateContract}
+                    onResendPersonalInfo={handleResendPersonalInfo}
                   />
                 ))}
               </div>
@@ -1390,6 +1825,139 @@ const EmployeeProfiles = () => {
               onStudentPayUpdated={handleStudentPayUpdated}
             />
           </PermissionGate>
+
+          <EmployeeContractModal
+            isOpen={showContractModal}
+            onClose={() => {
+              setShowContractModal(false);
+              setSelectedEmployee(null);
+            }}
+            employee={selectedEmployee}
+            businessId={selectedBusinessId}
+            authUser={authUser}
+            onContractUploaded={handleContractUploaded}
+          />
+
+          {/* Resend Personal Info Form Success Modal */}
+          {showResendSuccessModal && (
+            <div style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 10000
+            }}>
+              <div style={{
+                backgroundColor: TavariStyles.colors.white,
+                borderRadius: TavariStyles.borderRadius?.lg || '12px',
+                padding: TavariStyles.spacing.xl,
+                maxWidth: '500px',
+                width: '90%',
+                boxShadow: TavariStyles.shadows?.xl || '0 20px 60px rgba(0,0,0,0.3)'
+              }}>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: TavariStyles.spacing.lg
+                }}>
+                  <h3 style={{
+                    fontSize: TavariStyles.typography.fontSize.xl,
+                    fontWeight: TavariStyles.typography.fontWeight.bold,
+                    color: TavariStyles.colors.gray900,
+                    margin: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: TavariStyles.spacing.sm
+                  }}>
+                    <CheckCircle size={24} style={{ color: TavariStyles.colors.success }} />
+                    Email Sent Successfully
+                  </h3>
+                  <button
+                    onClick={() => {
+                      setShowResendSuccessModal(false);
+                      setResendSuccessEmail('');
+                    }}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '4px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      color: TavariStyles.colors.gray600
+                    }}
+                  >
+                    <X size={24} />
+                  </button>
+                </div>
+
+                <div style={{
+                  marginBottom: TavariStyles.spacing.lg
+                }}>
+                  <p style={{
+                    fontSize: TavariStyles.typography.fontSize.base,
+                    color: TavariStyles.colors.gray700,
+                    marginBottom: TavariStyles.spacing.md
+                  }}>
+                    The personal information form has been sent successfully.
+                  </p>
+                  
+                  <div style={{
+                    backgroundColor: TavariStyles.colors.gray50,
+                    borderRadius: TavariStyles.borderRadius?.md || '8px',
+                    padding: TavariStyles.spacing.md,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: TavariStyles.spacing.sm
+                  }}>
+                    <Mail size={20} style={{ color: TavariStyles.colors.primary }} />
+                    <div>
+                      <div style={{
+                        fontSize: TavariStyles.typography.fontSize.sm,
+                        color: TavariStyles.colors.gray600,
+                        marginBottom: '4px'
+                      }}>
+                        Sent to:
+                      </div>
+                      <div style={{
+                        fontSize: TavariStyles.typography.fontSize.base,
+                        fontWeight: TavariStyles.typography.fontWeight.medium,
+                        color: TavariStyles.colors.gray900
+                      }}>
+                        {resendSuccessEmail}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setShowResendSuccessModal(false);
+                    setResendSuccessEmail('');
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: `${TavariStyles.spacing.md} ${TavariStyles.spacing.lg}`,
+                    backgroundColor: TavariStyles.colors.primary,
+                    color: TavariStyles.colors.white,
+                    border: 'none',
+                    borderRadius: TavariStyles.borderRadius?.md || '8px',
+                    fontSize: TavariStyles.typography.fontSize.base,
+                    fontWeight: TavariStyles.typography.fontWeight.semibold,
+                    cursor: 'pointer'
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </SecurityWrapper>
     </POSAuthWrapper>

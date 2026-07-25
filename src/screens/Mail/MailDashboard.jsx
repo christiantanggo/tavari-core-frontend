@@ -4,8 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../supabaseClient';
 import { useBusiness } from '../../contexts/BusinessContext';
 import { 
-  FiMail, FiUsers, FiSend, FiSettings, FiBarChart2, FiFileText, 
-  FiShield, FiDollarSign, FiActivity, FiAlertTriangle, FiPause, FiAlertCircle 
+  FiMail, FiUsers, FiSend, FiSettings, FiDollarSign, FiAlertTriangle, FiPause, FiAlertCircle, FiPlus, FiActivity
 } from 'react-icons/fi';
 
 // Permission System Imports
@@ -14,6 +13,8 @@ import PermissionGate from '../../components/Auth/PermissionGate';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { SecurityWrapper, useSecurityContext } from '../../Security';
+import MailModuleHeader from '../../components/Mail/MailModuleHeader';
+import { MailModuleTabs } from '../../components/Mail/MailModuleNavigation';
 import toast from 'react-hot-toast';
 
 const MailDashboard = () => {
@@ -75,7 +76,11 @@ const MailDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const businessId = selectedBusinessId || business?.id;
+  const businessId =
+    selectedBusinessId ||
+    localStorage.getItem('currentBusinessId') ||
+    business?.id ||
+    localStorage.getItem('businessId');
 
   // Permission checks
   const canViewDashboard = hasAnyPermission([
@@ -86,8 +91,6 @@ const MailDashboard = () => {
   const canViewContacts = hasPermission('mail.contacts.view') || hasElevatedPrivileges();
   const canCreateCampaigns = hasPermission('mail.campaigns.create') || hasElevatedPrivileges();
   const canViewCampaigns = hasPermission('mail.campaigns.view') || hasElevatedPrivileges();
-  const canImportContacts = hasPermission('mail.contacts.import') || hasElevatedPrivileges();
-
   // Check basic dashboard access
   useEffect(() => {
     if (!permissionsLoading && !authLoading && !canViewDashboard) {
@@ -226,44 +229,12 @@ const MailDashboard = () => {
     }
   };
 
-  const navigateTo = (path) => {
-    // Log navigation
-    logSecurityEvent('mail_dashboard_navigation', {
-      action: 'navigate',
-      target_path: path,
-      business_id: businessId,
-      user_id: authUser?.id
-    }, 'low');
-
-    // Block navigation to email-sending screens when paused
-    if (emailSendingPaused && (path.includes('/builder') || path.includes('/campaigns'))) {
-      toast.warning('Email sending is currently PAUSED. Go to Mail Settings to enable sending before creating or managing campaigns.');
-      return;
-    }
-
-    // Check permissions before navigation
-    if (path.includes('/builder') && !canCreateCampaigns) {
-      toast.error('You do not have permission to create campaigns');
-      return;
-    }
-
-    if (path.includes('/campaigns') && !canViewCampaigns) {
-      toast.error('You do not have permission to view campaigns');
-      return;
-    }
-
-    if (path.includes('/contacts') && !canViewContacts) {
-      toast.error('You do not have permission to view contacts');
-      return;
-    }
-
-    navigate(path);
-  };
-
   if (authLoading || permissionsLoading || loading) {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.loading}>
             <FiActivity style={styles.loadingIcon} />
             <div>Loading dashboard...</div>
@@ -277,6 +248,8 @@ const MailDashboard = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.error}>
             <FiAlertCircle style={styles.errorIcon} />
             <h2>Authentication Error</h2>
@@ -291,6 +264,8 @@ const MailDashboard = () => {
     return (
       <POSAuthWrapper>
         <div style={styles.container}>
+          <MailModuleHeader />
+          <MailModuleTabs />
           <div style={styles.error}>
             <FiAlertTriangle style={styles.errorIcon} />
             <h2>Dashboard Error</h2>
@@ -342,11 +317,9 @@ const MailDashboard = () => {
             </div>
           )}
 
-          {/* Header */}
-          <div style={styles.header}>
-            <h1 style={styles.title}>Tavari Mail Dashboard</h1>
-            <p style={styles.subtitle}>Pay-per-email marketing with unlimited contacts</p>
-          </div>
+          <MailModuleHeader />
+
+          <MailModuleTabs />
 
           {/* Stats Cards */}
           <div style={styles.statsGrid}>
@@ -431,167 +404,6 @@ const MailDashboard = () => {
             </div>
           </div>
 
-          {/* Quick Actions - 3x Grid Layout per Tavari Standards */}
-          <div style={styles.quickActionsHeader}>
-            <h2 style={styles.sectionTitle}>Quick Actions</h2>
-          </div>
-          
-          <div style={styles.buttonGrid}>
-            <PermissionGate 
-              permission="mail.campaigns.create"
-              fallback={
-                <button 
-                  style={styles.disabledButton}
-                  disabled
-                  title="You don't have permission to create campaigns"
-                >
-                  <FiMail style={{...styles.buttonIcon, color: '#ccc'}} />
-                  <span style={{...styles.buttonText, color: '#ccc'}}>Create Campaign</span>
-                  <span style={styles.disabledText}>No Permission</span>
-                </button>
-              }
-            >
-              <button 
-                style={{
-                  ...styles.gridButton,
-                  ...(emailSendingPaused ? styles.disabledButton : {})
-                }}
-                onClick={() => navigateTo('/dashboard/mail/builder')}
-                disabled={emailSendingPaused}
-              >
-                <FiMail style={{
-                  ...styles.buttonIcon,
-                  color: emailSendingPaused ? '#ccc' : 'teal'
-                }} />
-                <span style={{
-                  ...styles.buttonText,
-                  color: emailSendingPaused ? '#ccc' : '#333'
-                }}>Create Campaign</span>
-                {emailSendingPaused && <span style={styles.disabledText}>Paused</span>}
-              </button>
-            </PermissionGate>
-            
-            <PermissionGate 
-              permission="mail.contacts.view"
-              fallback={
-                <button 
-                  style={styles.disabledButton}
-                  disabled
-                  title="You don't have permission to view contacts"
-                >
-                  <FiUsers style={{...styles.buttonIcon, color: '#ccc'}} />
-                  <span style={{...styles.buttonText, color: '#ccc'}}>Manage Contacts</span>
-                  <span style={styles.disabledText}>No Permission</span>
-                </button>
-              }
-            >
-              <button 
-                style={styles.gridButton}
-                onClick={() => navigateTo('/dashboard/mail/contacts')}
-              >
-                <FiUsers style={styles.buttonIcon} />
-                <span style={styles.buttonText}>Manage Contacts</span>
-              </button>
-            </PermissionGate>
-            
-            <PermissionGate 
-              permission="mail.campaigns.view"
-              fallback={
-                <button 
-                  style={styles.disabledButton}
-                  disabled
-                  title="You don't have permission to view campaigns"
-                >
-                  <FiFileText style={{...styles.buttonIcon, color: '#ccc'}} />
-                  <span style={{...styles.buttonText, color: '#ccc'}}>View Campaigns</span>
-                  <span style={styles.disabledText}>No Permission</span>
-                </button>
-              }
-            >
-              <button 
-                style={{
-                  ...styles.gridButton,
-                  ...(emailSendingPaused ? styles.disabledButton : {})
-                }}
-                onClick={() => navigateTo('/dashboard/mail/campaigns')}
-                disabled={emailSendingPaused}
-              >
-                <FiFileText style={{
-                  ...styles.buttonIcon,
-                  color: emailSendingPaused ? '#ccc' : 'teal'
-                }} />
-                <span style={{
-                  ...styles.buttonText,
-                  color: emailSendingPaused ? '#ccc' : '#333'
-                }}>View Campaigns</span>
-                {emailSendingPaused && <span style={styles.disabledText}>Paused</span>}
-              </button>
-            </PermissionGate>
-            
-            <PermissionGate 
-              permission="mail.contacts.import"
-              fallback={
-                <button 
-                  style={styles.disabledButton}
-                  disabled
-                  title="You don't have permission to import contacts"
-                >
-                  <FiUsers style={{...styles.buttonIcon, color: '#ccc'}} />
-                  <span style={{...styles.buttonText, color: '#ccc'}}>Import Contacts</span>
-                  <span style={styles.disabledText}>No Permission</span>
-                </button>
-              }
-            >
-              <button 
-                style={styles.gridButton}
-                onClick={() => navigateTo('/dashboard/mail/contacts')}
-              >
-                <FiUsers style={styles.buttonIcon} />
-                <span style={styles.buttonText}>Import Contacts</span>
-              </button>
-            </PermissionGate>
-            
-            <button 
-              style={styles.gridButton}
-              onClick={() => navigateTo('/dashboard/mail/performance')}
-            >
-              <FiActivity style={styles.buttonIcon} />
-              <span style={styles.buttonText}>Performance Monitor</span>
-            </button>
-            
-            <button 
-              style={styles.gridButton}
-              onClick={() => navigateTo('/dashboard/mail/settings')}
-            >
-              <FiSettings style={styles.buttonIcon} />
-              <span style={styles.buttonText}>Mail Settings</span>
-            </button>
-            
-            <button 
-              style={styles.gridButton}
-              onClick={() => navigateTo('/dashboard/mail/templates')}
-            >
-              <FiFileText style={styles.buttonIcon} />
-              <span style={styles.buttonText}>Email Templates</span>
-            </button>
-            
-            <button 
-              style={styles.gridButton}
-              onClick={() => navigateTo('/dashboard/mail/billing')}
-            >
-              <FiBarChart2 style={styles.buttonIcon} />
-              <span style={styles.buttonText}>Usage & Billing</span>
-            </button>
-            
-            <button 
-              style={styles.gridButton}
-              onClick={() => navigateTo('/dashboard/mail/compliance')}
-            >
-              <FiShield style={styles.buttonIcon} />
-              <span style={styles.buttonText}>Compliance Center</span>
-            </button>
-          </div>
-
           {/* Current Status */}
           {stats.activeSubscription && (
             <div style={styles.statusSection}>
@@ -627,24 +439,6 @@ const MailDashboard = () => {
             </div>
           )}
 
-          {/* Module Visibility for Upselling */}
-          <div style={styles.modulesSection}>
-            <h3 style={styles.sectionTitle}>Other Tavari Modules</h3>
-            <div style={styles.moduleButtons}>
-              <button 
-                style={styles.moduleButton}
-                onClick={() => navigateTo('/dashboard/pos/register')}
-              >
-                Tavari POS
-              </button>
-              <button 
-                style={styles.moduleButton}
-                onClick={() => navigateTo('/dashboard/music/dashboard')}
-              >
-                Tavari Music
-              </button>
-            </div>
-          </div>
         </div>
       </SecurityWrapper>
     </POSAuthWrapper>
@@ -748,21 +542,6 @@ const styles = {
     cursor: 'pointer',
     marginTop: '20px',
   },
-  header: {
-    textAlign: 'center',
-    marginBottom: '30px',
-  },
-  title: {
-    fontSize: '28px',
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: '8px',
-  },
-  subtitle: {
-    fontSize: '16px',
-    color: '#666',
-    margin: 0,
-  },
   statsGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
@@ -789,7 +568,7 @@ const styles = {
     opacity: 0.6,
   },
   statIcon: {
-    fontSize: '24px',
+    fontSize: '28px',
     color: 'teal',
     width: '40px',
     textAlign: 'center',
@@ -798,48 +577,25 @@ const styles = {
     flex: 1,
   },
   statNumber: {
-    fontSize: '24px',
+    fontSize: '16px',
     fontWeight: 'bold',
     color: '#333',
   },
   statLabel: {
-    fontSize: '14px',
+    fontSize: '24px',
     color: '#666',
     marginTop: '4px',
   },
   statSubtext: {
-    fontSize: '12px',
+    fontSize: '24px',
     color: '#999',
     marginTop: '2px',
   },
-  quickActionsHeader: {
-    marginBottom: '20px',
-  },
   sectionTitle: {
-    fontSize: '20px',
+    fontSize: '14px',
     fontWeight: 'bold',
     color: '#333',
     marginBottom: '10px',
-  },
-  buttonGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(3, 1fr)',
-    gap: '20px',
-    marginBottom: '40px',
-  },
-  gridButton: {
-    backgroundColor: 'white',
-    border: '2px solid teal',
-    borderRadius: '8px',
-    padding: '30px 20px',
-    cursor: 'pointer',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: '10px',
-    transition: 'all 0.2s ease',
-    minHeight: '120px',
-    position: 'relative',
   },
   disabledButton: {
     backgroundColor: '#f5f5f5',
@@ -848,11 +604,11 @@ const styles = {
     opacity: 0.7,
   },
   buttonIcon: {
-    fontSize: '32px',
+    fontSize: '12px',
     color: 'teal',
   },
   buttonText: {
-    fontSize: '16px',
+    fontSize: '20px',
     fontWeight: 'bold',
     color: '#333',
     textAlign: 'center',
@@ -860,7 +616,7 @@ const styles = {
   disabledText: {
     position: 'absolute',
     bottom: '8px',
-    fontSize: '12px',
+    fontSize: '32px',
     color: '#999',
     fontStyle: 'italic',
   },
@@ -882,41 +638,17 @@ const styles = {
     gap: '4px',
   },
   statusLabel: {
-    fontSize: '14px',
+    fontSize: '16px',
     color: '#666',
     fontWeight: 'bold',
   },
   statusValue: {
-    fontSize: '18px',
+    fontSize: '12px',
     fontWeight: 'bold',
     color: '#333',
   },
-  modulesSection: {
-    marginTop: '40px',
-    textAlign: 'center',
-  },
-  moduleButtons: {
-    display: 'flex',
-    gap: '20px',
-    justifyContent: 'center',
-    flexWrap: 'wrap',
-  },
-  moduleButton: {
-    backgroundColor: 'teal',
-    color: 'white',
-    border: 'none',
-    borderRadius: '8px',
-    padding: '12px 24px',
-    fontSize: '16px',
-    fontWeight: 'bold',
-    cursor: 'pointer',
-    transition: 'all 0.2s ease',
-  },
   // Mobile responsiveness
   '@media (max-width: 768px)': {
-    buttonGrid: {
-      gridTemplateColumns: '1fr',
-    },
     statsGrid: {
       gridTemplateColumns: '1fr',
     },

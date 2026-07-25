@@ -39,7 +39,7 @@ const SavedCartsScreen = () => {
 
   // Authentication using standardized hook
   const auth = usePOSAuth({
-    requiredRoles: ['cashier', 'manager', 'owner'],
+    requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'SavedCartsScreen'
   });
@@ -372,7 +372,7 @@ const SavedCartsScreen = () => {
         securityLevel="high"
       >
         <POSAuthWrapper 
-          requiredRoles={['cashier', 'manager', 'owner']}
+          requiredRoles={['employee', 'manager', 'owner']}
           requireBusiness={true}
           componentName="SavedCartsScreen"
         >
@@ -471,7 +471,7 @@ const SavedCartsScreen = () => {
       securityLevel="high"
     >
       <POSAuthWrapper 
-        requiredRoles={['cashier', 'manager', 'owner']}
+        requiredRoles={['employee', 'manager', 'owner']}
         requireBusiness={true}
         componentName="SavedCartsScreen"
       >

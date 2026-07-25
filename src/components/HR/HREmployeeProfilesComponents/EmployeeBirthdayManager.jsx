@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { X, User, Calendar, AlertCircle, Save, Trash2 } from 'lucide-react';
 import { supabase } from '../../../supabaseClient';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import PositionLabel from '../PositionLabel';
 
 const EmployeeBirthdayManager = ({
   isOpen,
@@ -416,7 +417,8 @@ const EmployeeBirthdayManager = ({
             <div style={styles.employeeName}>{employee.full_name}</div>
             <div style={styles.employeeDetails}>
               {employee.employee_number && `#${employee.employee_number} • `}
-              {employee.position || 'Employee'} • {employee.employment_status || 'Active'}
+              <PositionLabel businessId={businessId} value={employee.position} emptyFallback="Employee" />
+              {' '}• {employee.employment_status || 'Active'}
             </div>
           </div>
 

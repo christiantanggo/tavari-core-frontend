@@ -12,17 +12,34 @@ import { usePermissions } from '../hooks/usePermissions';
 import POSAuthWrapper from '../components/Auth/POSAuthWrapper';
 import PermissionGate from '../components/Auth/PermissionGate';
 import TavariCheckbox from '../components/UI/TavariCheckbox';
+import TavariModuleHeader from '../components/UI/TavariModuleHeader';
 import { TavariStyles } from '../utils/TavariStyles';
 import toast from 'react-hot-toast';
 
 // Modals
 import AddEmployeeModal from '../components/HR/AddEmployeeModal';
+import PositionLabel from '../components/HR/PositionLabel';
 import FixEmployeeAuthModal from '../components/HR/FixEmployeeAuthModal';
 
 import SessionManager from '../components/SessionManager';
-import PositionsTab from '../components/HR/PositionsTab';
 import RoleManagementTab from '../components/Settings/RoleManagementTab';
-import HierarchyChartTab from '../components/HR/HierarchyChartTab';
+
+/** PostgREST may return embedded FK rows as an array or object depending on relation cardinality. */
+function roleFromBusinessUsersJoin(user) {
+  const bu = user.business_users;
+  if (!bu) return null;
+  if (Array.isArray(bu)) return bu[0]?.role ?? null;
+  return bu.role ?? null;
+}
+
+function roleFromUserRolesJoin(user) {
+  const ur = user.user_roles;
+  if (!ur) return null;
+  if (Array.isArray(ur)) return ur[0]?.role ?? null;
+  return ur.role ?? null;
+}
+
+const EMPLOYEES_MOBILE_MQ = '(max-width: 768px)';
 
 const EmployeeScreen = () => {
   const navigate = useNavigate();
@@ -30,12 +47,23 @@ const EmployeeScreen = () => {
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [activeTab, setActiveTab] = useState('directory'); // 'directory', 'positions', 'roles', or 'hierarchy'
+  const [activeTab, setActiveTab] = useState('directory'); // 'directory' | 'roles' (position & hierarchy: HR module → Employee Management → Position Management)
 
   // Modal state
   const [showAddModal, setShowAddModal] = useState(false);
   const [showFixAuthModal, setShowFixAuthModal] = useState(false);
   const [selectedEmployeeForFix, setSelectedEmployeeForFix] = useState(null);
+  const [isNarrowViewport, setIsNarrowViewport] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(EMPLOYEES_MOBILE_MQ).matches
+  );
+
+  useEffect(() => {
+    const mq = window.matchMedia(EMPLOYEES_MOBILE_MQ);
+    const onChange = () => setIsNarrowViewport(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
 
   // Security context for sensitive employee data
   const {
@@ -106,7 +134,7 @@ const EmployeeScreen = () => {
       setLoading(true);
       setError(null);
       
-      await recordAction('employee_list_view', selectedBusinessId, true);
+      await recordAction('employee_list_view', true, selectedBusinessId);
       
       await logSecurityEvent('employee_data_access', {
         action: 'load_employee_list',
@@ -114,7 +142,9 @@ const EmployeeScreen = () => {
         viewer_role: userRole
       }, 'low');
       
-      const { data: userData, error: userError } = await supabase
+      // Query employees - check both business_users and user_roles to catch employees from contracts
+      // First try business_users (primary link)
+      const { data: userDataFromBusiness, error: businessUserError } = await supabase
         .from('users')
         .select(`
           id, 
@@ -136,7 +166,93 @@ const EmployeeScreen = () => {
         .eq('business_users.business_id', selectedBusinessId)
         .order('first_name');
 
-      if (userError) throw userError;
+      // Also check user_roles for employees who might not have business_users entry yet
+      const { data: userDataFromRoles, error: roleUserError } = await supabase
+        .from('users')
+        .select(`
+          id, 
+          first_name,
+          last_name,
+          full_name, 
+          email,
+          phone,
+          position,
+          department,
+          employment_status,
+          hire_date,
+          termination_date,
+          wage,
+          employee_number,
+          created_at,
+          user_roles!inner(business_id, role, active)
+        `)
+        .eq('user_roles.business_id', selectedBusinessId)
+        .eq('user_roles.active', true)
+        .order('first_name');
+
+      // Merge results, prioritizing business_users entries, avoiding duplicates
+      const userDataMap = new Map();
+      const employeesMissingBusinessUsers = []; // Track employees that need business_users entry created
+      
+      // Add employees from business_users
+      (userDataFromBusiness || []).forEach(user => {
+        userDataMap.set(user.id, {
+          ...user,
+          role: roleFromBusinessUsersJoin(user) || 'employee',
+          source: 'business_users',
+        });
+      });
+
+      // Merge user_roles: same precedence as usePermissions (user_roles wins when both exist)
+      (userDataFromRoles || []).forEach(user => {
+        const urRole = roleFromUserRolesJoin(user) || 'employee';
+        if (!userDataMap.has(user.id)) {
+          userDataMap.set(user.id, {
+            ...user,
+            role: urRole,
+            source: 'user_roles',
+            business_users: { business_id: selectedBusinessId, role: urRole },
+          });
+          employeesMissingBusinessUsers.push({ id: user.id, email: user.email, role: urRole });
+        } else {
+          const existing = userDataMap.get(user.id);
+          userDataMap.set(user.id, {
+            ...existing,
+            role: urRole,
+          });
+        }
+      });
+
+      const userData = Array.from(userDataMap.values());
+      const userError = businessUserError || roleUserError;
+
+      // If we found employees from user_roles but not business_users, create the missing entries
+      if (employeesMissingBusinessUsers.length > 0) {
+        console.log(`🔧 Found ${employeesMissingBusinessUsers.length} employees with user_roles but missing business_users entries. Creating missing entries...`);
+        for (const emp of employeesMissingBusinessUsers) {
+          try {
+            const { error: insertError } = await supabase
+              .from('business_users')
+              .insert({
+                user_id: emp.id,
+                business_id: selectedBusinessId,
+                role: emp.role
+              });
+            if (insertError && insertError.code !== '23505') { // Ignore duplicate key errors
+              console.warn(`⚠️ Failed to create business_users entry for employee ${emp.email}:`, insertError);
+            } else if (!insertError) {
+              console.log(`✅ Created missing business_users entry for employee: ${emp.email}`);
+            }
+          } catch (err) {
+            console.warn(`⚠️ Error creating business_users entry for employee ${emp.email}:`, err);
+          }
+        }
+      }
+
+      if (userError) {
+        console.error('Error fetching employees:', userError);
+        // Continue with what we have, but log the error
+      }
 
       // Transform the data to match expected format
       const transformedEmployees = (userData || []).map(user => {
@@ -155,7 +271,11 @@ const EmployeeScreen = () => {
           wage: user.wage,
           employee_number: user.employee_number,
           created_at: user.created_at,
-          role: user.business_users?.role || 'employee',
+          role:
+            user.role ||
+            roleFromUserRolesJoin(user) ||
+            roleFromBusinessUsersJoin(user) ||
+            'employee',
           business_name: businessData?.name || 'Current Business',
           tenure: user.hire_date ? calculateTenure(user.hire_date) : null
         };
@@ -218,13 +338,13 @@ const EmployeeScreen = () => {
       return;
     }
 
-    const rateLimitOk = await checkRateLimit('employee_view', 30, 60000);
-    if (!rateLimitOk) {
+    const rateLimitRes = await checkRateLimit('employee_view');
+    if (!rateLimitRes?.allowed) {
       toast.error('Too many requests. Please wait a moment.');
       return;
     }
 
-    await recordAction('view_employee_details', employee.id, true);
+    await recordAction('view_employee_details', true, employee.id);
     
     await logSecurityEvent('employee_details_navigation', {
       employee_id: employee.id,
@@ -241,13 +361,13 @@ const EmployeeScreen = () => {
       return;
     }
 
-    const rateLimitOk = await checkRateLimit('add_employee_modal', 10, 60000);
-    if (!rateLimitOk) {
+    const rateLimitRes = await checkRateLimit('add_employee_modal');
+    if (!rateLimitRes?.allowed) {
       toast.error('Too many requests. Please wait a moment.');
       return;
     }
 
-    await recordAction('open_add_employee_modal', null, true);
+    await recordAction('open_add_employee_modal', true, null);
     
     await logSecurityEvent('add_employee_modal_opened', {
       business_id: selectedBusinessId,
@@ -266,7 +386,7 @@ const EmployeeScreen = () => {
       created_by: authUser?.id
     }, 'medium');
 
-    await recordAction('employee_created_success', newEmployeeId, true);
+    await recordAction('employee_created_success', true, newEmployeeId);
     
     toast.success('Employee created successfully');
     fetchEmployees(); // Reload the list
@@ -278,13 +398,13 @@ const EmployeeScreen = () => {
       return;
     }
 
-    const rateLimitOk = await checkRateLimit('fix_auth_modal', 5, 300000);
-    if (!rateLimitOk) {
+    const rateLimitRes = await checkRateLimit('fix_auth_modal');
+    if (!rateLimitRes?.allowed) {
       toast.error('Too many requests. Please wait.');
       return;
     }
 
-    await recordAction('fix_employee_auth', employee.id, true);
+    await recordAction('fix_employee_auth', true, employee.id);
     
     await logSecurityEvent('fix_auth_modal_opened', {
       employee_id: employee.id,
@@ -360,9 +480,11 @@ const EmployeeScreen = () => {
     container: {
       minHeight: '100vh',
       backgroundColor: TavariStyles.colors.gray50,
-      padding: TavariStyles.spacing['3xl'],
-      paddingTop: '80px',
-      boxSizing: 'border-box'
+      padding: isNarrowViewport ? '12px 14px 24px' : TavariStyles.spacing['3xl'],
+      paddingTop: isNarrowViewport ? '68px' : '80px',
+      boxSizing: 'border-box',
+      maxWidth: '100%',
+      overflowX: 'hidden',
     },
     header: {
       marginBottom: TavariStyles.spacing['3xl'],
@@ -380,13 +502,17 @@ const EmployeeScreen = () => {
     },
     headerRow: {
       display: 'flex',
-      gap: TavariStyles.spacing.lg,
-      marginBottom: TavariStyles.spacing['3xl'],
-      alignItems: 'center'
+      flexDirection: isNarrowViewport ? 'column' : 'row',
+      gap: isNarrowViewport ? TavariStyles.spacing.md : TavariStyles.spacing.lg,
+      marginBottom: isNarrowViewport ? TavariStyles.spacing.xl : TavariStyles.spacing['3xl'],
+      alignItems: isNarrowViewport ? 'stretch' : 'center',
     },
     searchInput: {
       ...TavariStyles.components.form?.input,
-      flex: 3,
+      flex: isNarrowViewport ? 'none' : 3,
+      width: isNarrowViewport ? '100%' : undefined,
+      minWidth: 0,
+      boxSizing: 'border-box',
       fontSize: TavariStyles.typography.fontSize.md
     },
     addButton: {
@@ -413,7 +539,7 @@ const EmployeeScreen = () => {
     gridContainer: {
       backgroundColor: TavariStyles.colors.white,
       borderRadius: TavariStyles.borderRadius?.lg || '12px',
-      overflow: 'hidden',
+      overflow: isNarrowViewport ? 'visible' : 'hidden',
       boxShadow: TavariStyles.shadows?.base || '0 2px 4px rgba(0,0,0,0.1)',
       border: `1px solid ${TavariStyles.colors.gray200}`
     },
@@ -500,7 +626,31 @@ const EmployeeScreen = () => {
       height: '200px',
       fontSize: TavariStyles.typography.fontSize.lg,
       color: TavariStyles.colors.gray600
-    }
+    },
+    /** Mobile directory: tap a name to open profile (details live on employee page). */
+    mobileNameList: {
+      display: 'flex',
+      flexDirection: 'column',
+      width: '100%',
+    },
+    mobileNameRow: {
+      width: '100%',
+      boxSizing: 'border-box',
+      padding: '14px 16px',
+      borderBottom: `1px solid ${TavariStyles.colors.gray100}`,
+      cursor: 'pointer',
+      fontSize: TavariStyles.typography.fontSize.md,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      color: TavariStyles.colors.primary,
+      textAlign: 'left',
+      transition: 'background-color 0.15s ease',
+      WebkitTapHighlightColor: 'transparent',
+    },
+    rolesTabWrap: {
+      maxWidth: '100%',
+      overflowX: 'auto',
+      WebkitOverflowScrolling: 'touch',
+    },
   };
 
   if (!canViewEmployees && !permissionsLoading) {
@@ -531,95 +681,104 @@ const EmployeeScreen = () => {
       <SecurityWrapper>
         <SessionManager>
           <div style={styles.container}>
-            {/* Header */}
-            <div style={{ ...styles.header, marginBottom: '12px' }}>
-              <h1 style={{ ...styles.title, fontSize: '28px', marginBottom: '4px' }}>Employee Management</h1>
-              <p style={{ ...styles.subtitle, fontSize: '14px' }}>Manage employees and positions</p>
-            </div>
+            <TavariModuleHeader
+              title="Employee Management"
+              description="Employee directory and role access. For position order, shift premiums, and related settings, use Tavari HR → Employee Management → Position Management."
+              actionLabel={canAddEmployees ? 'Add Employee' : undefined}
+              onAction={handleAddEmployee}
+              containerStyle={
+                isNarrowViewport
+                  ? {
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'stretch',
+                      gap: '14px',
+                    }
+                  : undefined
+              }
+              contentStyle={isNarrowViewport ? { width: '100%', minWidth: 0 } : undefined}
+              actionContainerStyle={
+                isNarrowViewport
+                  ? {
+                      minWidth: 0,
+                      width: '100%',
+                      maxWidth: '100%',
+                      alignSelf: 'stretch',
+                      display: 'block',
+                    }
+                  : undefined
+              }
+              actionButtonStyle={
+                isNarrowViewport
+                  ? {
+                      width: '100%',
+                      minHeight: '48px',
+                      whiteSpace: 'normal',
+                      padding: '12px 16px',
+                    }
+                  : undefined
+              }
+              descriptionStyle={
+                isNarrowViewport
+                  ? { fontSize: '28px', maxWidth: 'none', lineHeight: 1.4 }
+                  : undefined
+              }
+            />
 
             {/* Tab Navigation */}
-            <div style={{
-              display: 'flex',
-              gap: '2px',
-              marginBottom: '20px',
-              backgroundColor: '#e5e7eb',
-              borderRadius: '8px',
-              padding: '4px'
-            }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'row',
+                gap: '2px',
+                marginBottom: '20px',
+                backgroundColor: '#e5e7eb',
+                borderRadius: '8px',
+                padding: '4px',
+              }}
+            >
               <button
+                type="button"
                 onClick={() => setActiveTab('directory')}
                 style={{
                   flex: 1,
-                  padding: '12px 20px',
+                  padding: isNarrowViewport ? '10px 12px' : '12px 20px',
                   backgroundColor: activeTab === 'directory' ? 'white' : 'transparent',
                   color: activeTab === 'directory' ? '#008080' : '#6b7280',
                   border: 'none',
                   borderRadius: '6px',
-                  fontSize: '14px',
+                  fontSize: isNarrowViewport ? '13px' : '14px',
                   fontWeight: 'bold',
                   cursor: 'pointer',
                   transition: 'all 0.2s ease',
-                  boxShadow: activeTab === 'directory' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
+                  boxShadow: activeTab === 'directory' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none',
+                  textAlign: 'center',
                 }}
               >
                 👥 Employee Directory
               </button>
-              <button
-                onClick={() => setActiveTab('positions')}
-                style={{
-                  flex: 1,
-                  padding: '12px 20px',
-                  backgroundColor: activeTab === 'positions' ? 'white' : 'transparent',
-                  color: activeTab === 'positions' ? '#008080' : '#6b7280',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  fontWeight: 'bold',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                  boxShadow: activeTab === 'positions' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
-                }}
-              >
-                💼 Positions
-              </button>
               {canManageRoles && (
                 <button
+                  type="button"
                   onClick={() => setActiveTab('roles')}
                   style={{
                     flex: 1,
-                    padding: '12px 20px',
+                    padding: isNarrowViewport ? '10px 12px' : '12px 20px',
                     backgroundColor: activeTab === 'roles' ? 'white' : 'transparent',
                     color: activeTab === 'roles' ? '#008080' : '#6b7280',
                     border: 'none',
                     borderRadius: '6px',
-                    fontSize: '14px',
+                    fontSize: isNarrowViewport ? '13px' : '14px',
                     fontWeight: 'bold',
                     cursor: 'pointer',
                     transition: 'all 0.2s ease',
-                    boxShadow: activeTab === 'roles' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
+                    boxShadow: activeTab === 'roles' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none',
+                    textAlign: 'center',
                   }}
                 >
                   🔑 Roles & Access
                 </button>
               )}
-              <button
-                onClick={() => setActiveTab('hierarchy')}
-                style={{
-                  flex: 1,
-                  padding: '12px 20px',
-                  backgroundColor: activeTab === 'hierarchy' ? 'white' : 'transparent',
-                  color: activeTab === 'hierarchy' ? '#008080' : '#6b7280',
-                  border: 'none',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  fontWeight: 'bold',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                  boxShadow: activeTab === 'hierarchy' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
-                }}
-              >
-                📊 Hierarchy Chart
-              </button>
             </div>
 
             {/* Error Message */}
@@ -630,52 +789,51 @@ const EmployeeScreen = () => {
             )}
 
             {/* Tab Content */}
-            {activeTab === 'positions' ? (
-              <PositionsTab businessId={selectedBusinessId} />
-            ) : activeTab === 'roles' ? (
-              <RoleManagementTab 
-                businessId={selectedBusinessId}
-                styles={{
-                  section: {
-                    backgroundColor: 'white',
-                    borderRadius: '8px',
-                    padding: '25px',
-                    marginBottom: '20px',
-                    border: '1px solid #e5e7eb'
-                  },
-                  sectionTitle: {
-                    margin: '0 0 20px 0',
-                    fontSize: '18px',
-                    fontWeight: 'bold',
-                    color: '#1f2937',
-                    borderBottom: '2px solid #008080',
-                    paddingBottom: '8px'
-                  }
-                }}
-              />
-            ) : activeTab === 'hierarchy' ? (
-              <HierarchyChartTab businessId={selectedBusinessId} />
+            {activeTab === 'roles' ? (
+              <div style={isNarrowViewport ? styles.rolesTabWrap : undefined}>
+                <RoleManagementTab
+                  businessId={selectedBusinessId}
+                  styles={{
+                    section: {
+                      backgroundColor: 'white',
+                      borderRadius: '8px',
+                      padding: isNarrowViewport ? '16px' : '25px',
+                      marginBottom: '20px',
+                      border: '1px solid #e5e7eb',
+                      boxSizing: 'border-box',
+                      minWidth: isNarrowViewport ? 'min(100%, 520px)' : undefined,
+                    },
+                    sectionTitle: {
+                      margin: '0 0 20px 0',
+                      fontSize: isNarrowViewport ? '16px' : '18px',
+                      fontWeight: 'bold',
+                      color: '#1f2937',
+                      borderBottom: '2px solid #008080',
+                      paddingBottom: '8px',
+                    },
+                  }}
+                />
+              </div>
             ) : (
               <>
                 {/* Search and Add Controls */}
                 <div style={styles.headerRow}>
               <input
                 type="text"
-                placeholder="Search employees by name, email, position, department, or employee #..."
+                placeholder={
+                  isNarrowViewport
+                    ? 'Search name, email, position…'
+                    : 'Search employees by name, email, position, department, or employee #...'
+                }
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 style={styles.searchInput}
               />
-              <PermissionGate permission="hr.employees.add" fallback={null}>
-                <button style={styles.addButton} onClick={handleAddEmployee}>
-                  <span>+</span>
-                  Add Employee
-                </button>
-              </PermissionGate>
             </div>
 
-            {/* Employee Grid */}
+            {/* Employee grid (desktop) / cards (mobile) */}
             <div style={styles.gridContainer}>
+              {!isNarrowViewport && (
               <div style={styles.gridHeader}>
                 <span>Name</span>
                 <span>Email</span>
@@ -686,11 +844,17 @@ const EmployeeScreen = () => {
                 {canViewWages ? <span>Wage</span> : <span>-</span>}
                 {(canFixAuth || canEditEmployees) && <span>Actions</span>}
               </div>
+              )}
 
               {loading ? (
                 <div style={styles.loading}>Loading employees...</div>
               ) : filteredEmployees.length === 0 ? (
-                <div style={styles.emptyState}>
+                <div
+                  style={{
+                    ...styles.emptyState,
+                    ...(isNarrowViewport ? { padding: '36px 16px' } : {}),
+                  }}
+                >
                   <h3 style={styles.emptyTitle}>
                     {search ? 'No employees found' : 'No employees yet'}
                   </h3>
@@ -701,10 +865,49 @@ const EmployeeScreen = () => {
                     }
                   </p>
                   {!search && canAddEmployees && (
-                    <button style={styles.addButton} onClick={handleAddEmployee}>
+                    <button
+                      type="button"
+                      style={{
+                        ...styles.addButton,
+                        ...(isNarrowViewport ? { width: '100%', maxWidth: '100%', boxSizing: 'border-box' } : {}),
+                      }}
+                      onClick={handleAddEmployee}
+                    >
                       Add First Employee
                     </button>
                   )}
+                </div>
+              ) : isNarrowViewport ? (
+                <div style={styles.mobileNameList}>
+                  {filteredEmployees.map((emp) => (
+                    <div
+                      key={emp.id}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleEmployeeClick(emp);
+                        }
+                      }}
+                      style={{
+                        ...styles.mobileNameRow,
+                        ...(emp.termination_date
+                          ? { color: TavariStyles.colors.gray500, textDecoration: 'line-through' }
+                          : {}),
+                      }}
+                      aria-label={`Open profile for ${emp.full_name || 'employee'}`}
+                      onClick={() => handleEmployeeClick(emp)}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = TavariStyles.colors.gray50;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = 'transparent';
+                      }}
+                    >
+                      {emp.full_name || 'Unknown'}
+                    </div>
+                  ))}
                 </div>
               ) : (
                 filteredEmployees.map((emp) => (
@@ -743,7 +946,7 @@ const EmployeeScreen = () => {
                     
                     <span>{emp.email}</span>
                     
-                    <span>{emp.position || '-'}</span>
+                    <span><PositionLabel businessId={selectedBusinessId} value={emp.position} emptyFallback="-" /></span>
                     
                     <span>{emp.department || '-'}</span>
                     
@@ -782,10 +985,11 @@ const EmployeeScreen = () => {
                       <span style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                         {canEditEmployees && (
                           <button
+                            type="button"
                             style={{
                               ...styles.fixAuthButton,
                               backgroundColor: TavariStyles.colors.primary,
-                              fontSize: '11px'
+                              fontSize: '14px'
                             }}
                             onClick={(e) => {
                               e.stopPropagation();
@@ -804,6 +1008,7 @@ const EmployeeScreen = () => {
                         )}
                         {canFixAuth && (
                           <button
+                            type="button"
                             style={styles.fixAuthButton}
                             onClick={(e) => {
                               e.stopPropagation();

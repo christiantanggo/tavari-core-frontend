@@ -9,7 +9,7 @@ export default function Footer() {
   };
 
   const handleEmployeePortalClick = () => {
-    navigate('/login');
+    navigate('/portal/login');
   };
   return (
     <footer style={{
@@ -172,7 +172,7 @@ export default function Footer() {
         padding: "14px 0",
         borderRadius: "0 0 12px 12px"
       }}>
-        Tavari Systems 2025. All rights reserved.
+        Tavari Systems 2026. All rights reserved.
       </div>
     </footer>
   );

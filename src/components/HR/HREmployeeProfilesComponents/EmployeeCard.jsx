@@ -1,14 +1,16 @@
 // components/HR/HREmployeeProfilesComponents/EmployeeCard.jsx - Individual Employee Card Component
 import React, { useState } from 'react';
-import { Eye, Edit, Clock, Award, DollarSign, Calendar, X, Trash2, User, Shield, GraduationCap, FileText } from 'lucide-react';
+import { Edit, Clock, Award, DollarSign, Calendar, X, Trash2, User, Shield, GraduationCap, FileText, ChevronDown, ChevronUp, Send, MapPin, Phone } from 'lucide-react';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import PositionLabel from '../PositionLabel';
+import { formatRoleLabel } from '../../../helpers/businessRoleKeys';
 
 const EmployeeCard = ({
   employee,
+  businessId,
   formatTaxAmount,
   canManageEmployees,
   canViewAuditHistory,
-  onViewEmployee,
   onEditEmployee,
   onManagePremiums,
   onManageCertificates,
@@ -21,8 +23,10 @@ const EmployeeCard = ({
   onManageSIN,
   onToggleStudentPay,
   onViewContract,
-  onCreateContract
+  onCreateContract,
+  onResendPersonalInfo
 }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
   
   // Calculate age from birth_date
   const calculateAge = (birthDate) => {
@@ -47,12 +51,37 @@ const EmployeeCard = ({
     switch (status) {
       case 'active': return TavariStyles.colors.success;
       case 'probation': return TavariStyles.colors.warning;
+      case 'pending': return TavariStyles.colors.gray500;
       case 'suspended': return TavariStyles.colors.danger;
       case 'terminated': return TavariStyles.colors.gray500;
       case 'on_leave': return TavariStyles.colors.info;
       default: return TavariStyles.colors.gray500;
     }
   };
+
+  const LIFECYCLE_VALUES = new Set([
+    'active',
+    'probation',
+    'pending',
+    'terminated',
+    'suspended',
+    'on_leave',
+  ]);
+  const rawLifecycle = (employee.lifecycle_status || '').toLowerCase();
+  const rawEmployment = (employee.employment_status || '').toLowerCase();
+  const lifecycleStatus = LIFECYCLE_VALUES.has(rawLifecycle)
+    ? rawLifecycle
+    : LIFECYCLE_VALUES.has(rawEmployment)
+      ? rawEmployment
+      : rawLifecycle || 'active';
+  const lifecycleLabel =
+    lifecycleStatus === 'probation'
+      ? 'On Probation'
+      : lifecycleStatus === 'pending'
+        ? 'Pending Contract'
+        : lifecycleStatus === 'active'
+          ? 'Active'
+          : (lifecycleStatus || 'unknown').replace(/_/g, ' ');
 
   const styles = {
     employeeCard: {
@@ -61,7 +90,8 @@ const EmployeeCard = ({
       padding: TavariStyles.spacing.xl,
       border: `2px solid ${TavariStyles.colors.gray200}`,
       boxShadow: TavariStyles.shadows?.base || '0 2px 4px rgba(0,0,0,0.1)',
-      transition: TavariStyles.transitions?.normal || 'all 0.2s ease'
+      transition: TavariStyles.transitions?.normal || 'all 0.2s ease',
+      cursor: 'pointer'
     },
     employeeHeader: {
       display: 'flex',
@@ -90,6 +120,30 @@ const EmployeeCard = ({
       borderRadius: TavariStyles.borderRadius?.sm || '4px',
       fontSize: TavariStyles.typography.fontSize.xs,
       fontWeight: TavariStyles.typography.fontWeight.bold
+    },
+    scheduleBadge: {
+      padding: '4px 10px',
+      borderRadius: TavariStyles.borderRadius?.sm || '4px',
+      fontSize: TavariStyles.typography.fontSize.xs,
+      fontWeight: TavariStyles.typography.fontWeight.bold,
+      textTransform: 'uppercase',
+      backgroundColor: `${TavariStyles.colors.primary}12`,
+      color: TavariStyles.colors.primary,
+      border: `1px solid ${TavariStyles.colors.primary}35`,
+      whiteSpace: 'nowrap',
+    },
+    seasonalBadge: {
+      padding: '4px 10px',
+      borderRadius: TavariStyles.borderRadius?.sm || '4px',
+      fontSize: TavariStyles.typography.fontSize.xs,
+      fontWeight: TavariStyles.typography.fontWeight.semibold,
+      backgroundColor: `${TavariStyles.colors.warning}18`,
+      color: TavariStyles.colors.warning,
+      border: `1px solid ${TavariStyles.colors.warning}45`,
+      whiteSpace: 'nowrap',
+      maxWidth: '220px',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
     },
     roleBadge: {
       padding: '4px 8px',
@@ -338,7 +392,14 @@ const EmployeeCard = ({
   const isStudentAge = isStudentEligible();
 
   return (
-    <div style={styles.employeeCard}>
+    <div 
+      style={styles.employeeCard}
+      onClick={(e) => {
+        // Don't expand if clicking on action buttons
+        if (e.target.closest('button')) return;
+        setIsExpanded(!isExpanded);
+      }}
+    >
       <div style={styles.employeeHeader}>
         <div style={styles.employeeTitle}>
           <div style={styles.employeeName}>
@@ -349,165 +410,195 @@ const EmployeeCard = ({
           </div>
           {employee.role && (
             <div style={styles.roleBadge}>
-              Role: {String(employee.role).toLowerCase()}
+              Role: {formatRoleLabel(employee.role)}
             </div>
           )}
         </div>
-        <div 
-          style={{
-            ...styles.statusBadge,
-            backgroundColor: `${getStatusColor(employee.employment_status)}20`,
-            color: getStatusColor(employee.employment_status),
-            border: `1px solid ${getStatusColor(employee.employment_status)}40`
-          }}
-        >
-          {employee.employment_status?.toUpperCase() || 'UNKNOWN'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {employee.seasonal_contract?.display && (
+            <div style={styles.seasonalBadge} title={employee.seasonal_contract.display}>
+              {employee.seasonal_contract.display}
+            </div>
+          )}
+          {employee.work_schedule && (
+            <div style={styles.scheduleBadge}>{employee.work_schedule}</div>
+          )}
+          <div
+            style={{
+              ...styles.statusBadge,
+              backgroundColor: `${getStatusColor(lifecycleStatus)}20`,
+              color: getStatusColor(lifecycleStatus),
+              border: `1px solid ${getStatusColor(lifecycleStatus)}40`
+            }}
+          >
+            {lifecycleLabel.toUpperCase()}
+          </div>
+          {isExpanded ? (
+            <ChevronUp size={20} style={{ color: TavariStyles.colors.gray500, cursor: 'pointer' }} />
+          ) : (
+            <ChevronDown size={20} style={{ color: TavariStyles.colors.gray500, cursor: 'pointer' }} />
+          )}
         </div>
       </div>
 
-      <div style={styles.employeeBody}>
-        <div style={styles.employeeInfo}>
-          <div style={styles.infoRow}>
-            <strong>Email:</strong> {employee.email}
-          </div>
-          {employee.phone && (
+      {isExpanded && (
+        <div style={styles.employeeBody}>
+        {/* Two-column layout for all employee information */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: '20px 40px',
+          ...styles.employeeInfo
+        }}>
+          {/* Left Column */}
+          <div>
             <div style={styles.infoRow}>
-              <strong>Phone:</strong> {employee.phone}
+              <strong>Email:</strong> {employee.email}
             </div>
-          )}
-          {employee.position && (
-            <div style={styles.infoRow}>
-              <strong>Position:</strong> {employee.position}
-            </div>
-          )}
-          {employee.department && (
-            <div style={styles.infoRow}>
-              <strong>Department:</strong> {employee.department}
-            </div>
-          )}
-          {employee.hire_date && (
-            <div style={styles.infoRow}>
-              <strong>Hire Date:</strong> {new Date(employee.hire_date).toLocaleDateString()}
-            </div>
-          )}
-          {employee.probation_end_date && (
-            <div style={styles.infoRow}>
-              <strong>Probation Ends:</strong> {new Date(employee.probation_end_date).toLocaleDateString()}
-            </div>
-          )}
-          {employee.termination_date && (
-            <div style={styles.infoRow}>
-              <strong>Termination Date:</strong> {new Date(employee.termination_date).toLocaleDateString()}
-            </div>
-          )}
-          {employee.tenure && !employee.termination_date && (
-            <div style={styles.infoRow}>
-              <strong>Tenure:</strong> {employee.tenure}
-            </div>
-          )}
-          {employee.wage && (
-            <div style={styles.infoRow}>
-              <strong>Base Wage:</strong> ${formatTaxAmount(employee.wage)}/hour
-            </div>
-          )}
-          {employee.last_raise_date && (
-            <div style={styles.infoRow}>
-              <strong>Last Raise:</strong> {new Date(employee.last_raise_date).toLocaleDateString()}
-            </div>
-          )}
-          
-          {/* Display current vacation pay rate */}
-          <div style={styles.infoRow}>
-            <strong>Vacation Pay:</strong> {
-              employee.vacation_percent 
-                ? `${(employee.vacation_percent * 100).toFixed(1)}%`
-                : `${employee.hire_date && new Date(employee.hire_date) < new Date(Date.now() - 5 * 365 * 24 * 60 * 60 * 1000) ? '6.0' : '4.0'}% (ESA Default)`
-            }
-            {employee.vacation_percent > (employee.hire_date && new Date(employee.hire_date) < new Date(Date.now() - 5 * 365 * 24 * 60 * 60 * 1000) ? 0.06 : 0.04) && 
-              <span style={{color: TavariStyles.colors.success, fontSize: '11px', marginLeft: '4px'}}>
-                (Company Benefit)
-              </span>
-            }
-          </div>
-        </div>
-
-        {/* NEW: Birthday and Age Section */}
-        {(employee.birth_date || canManageEmployees()) && (
-          <div style={styles.birthdaySection}>
-            <div style={styles.birthdayTitle}>
-              <User size={16} />
-              Birthday & Age Information
-            </div>
-            {employee.birth_date ? (
-              <div>
-                <div style={{fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray700}}>
-                  <strong>Birthday:</strong> {new Date(employee.birth_date).toLocaleDateString()}
-                </div>
-                <div style={{fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray700, marginTop: '2px'}}>
-                  <strong>Age:</strong> {age} years old
-                  {isStudentAge && <span style={{color: TavariStyles.colors.warning, marginLeft: '8px'}}>⚠️ Student Age</span>}
-                </div>
+            {employee.phone && (
+              <div style={styles.infoRow}>
+                <strong>Phone:</strong> {employee.phone}
               </div>
-            ) : (
-              <div style={{fontSize: TavariStyles.typography.fontSize.sm, color: TavariStyles.colors.gray500}}>
-                Birthday not set - Click 'Birthday' button to add
+            )}
+            <div style={styles.infoRow}>
+              <strong>Position:</strong>{' '}
+              <PositionLabel businessId={businessId} value={employee.position} emptyFallback="—" />
+            </div>
+            {employee.department && (
+              <div style={styles.infoRow}>
+                <strong>Department:</strong> {employee.department}
+              </div>
+            )}
+            {employee.hire_date && (
+              <div style={styles.infoRow}>
+                <strong>Hire Date:</strong> {new Date(employee.hire_date).toLocaleDateString()}
+              </div>
+            )}
+            {employee.tenure && !employee.termination_date && (
+              <div style={styles.infoRow}>
+                <strong>Tenure:</strong> {employee.tenure}
+              </div>
+            )}
+            {employee.wage && (
+              <div style={styles.infoRow}>
+                <strong>Base Wage:</strong> ${formatTaxAmount(employee.wage)}/hour
+              </div>
+            )}
+            <div style={styles.infoRow}>
+              <strong>Vacation Pay:</strong> {
+                employee.vacation_percent 
+                  ? (() => {
+                      const percent = parseFloat(employee.vacation_percent);
+                      // If stored as percentage (>= 1.0), display directly; if stored as decimal (< 1.0), multiply by 100
+                      return percent >= 1.0 ? `${percent.toFixed(1)}%` : `${(percent * 100).toFixed(1)}%`;
+                    })()
+                  : (() => {
+                      if (employee.hire_date) {
+                        const hireDate = new Date(employee.hire_date);
+                        const yearsOfService = (new Date() - hireDate) / (365.25 * 24 * 60 * 60 * 1000);
+                        return `${yearsOfService >= 5 ? '6.0' : '4.0'}%`;
+                      }
+                      return '4.0%';
+                    })()
+              }
+            </div>
+            {employee.birth_date && (
+              <div style={styles.infoRow}>
+                <strong>Birthday:</strong> {new Date(employee.birth_date).toLocaleDateString()}
+              </div>
+            )}
+            {employee.birth_date && (
+              <div style={styles.infoRow}>
+                <strong>Age:</strong> {age} years old
+                {isStudentAge && <span style={{color: TavariStyles.colors.warning, marginLeft: '8px', fontSize: '11px'}}>⚠️ Student Age</span>}
+              </div>
+            )}
+            {canManageEmployees() && (
+              <div style={styles.infoRow}>
+                <strong>SIN Number:</strong> {employee.sin_number || employee.sin ? '•••-•••-•••' : 'Not provided'}
+              </div>
+            )}
+            {employee.address_line1 && (
+              <div style={styles.infoRow}>
+                <strong>Address Line 1:</strong> {employee.address_line1}
+              </div>
+            )}
+            {employee.address_line2 && (
+              <div style={styles.infoRow}>
+                <strong>Address Line 2:</strong> {employee.address_line2}
+              </div>
+            )}
+            {employee.address_city && (
+              <div style={styles.infoRow}>
+                <strong>City:</strong> {employee.address_city}
               </div>
             )}
           </div>
-        )}
 
-        {/* NEW: Student Pay Status Section */}
-        <div style={styles.studentPaySection}>
-          <div style={styles.studentPayTitle}>
-            <GraduationCap size={16} />
-            Student Minimum Wage Status
-          </div>
-          <div style={{fontSize: TavariStyles.typography.fontSize.sm}}>
-            <div style={{color: TavariStyles.colors.gray700}}>
+          {/* Right Column */}
+          <div>
+            {employee.probation_end_date && (
+              <div style={styles.infoRow}>
+                <strong>Probation Ends:</strong> {new Date(employee.probation_end_date).toLocaleDateString()}
+              </div>
+            )}
+            {employee.termination_date && (
+              <div style={styles.infoRow}>
+                <strong>Termination Date:</strong> {new Date(employee.termination_date).toLocaleDateString()}
+              </div>
+            )}
+            {employee.last_raise_date && (
+              <div style={styles.infoRow}>
+                <strong>Last Raise:</strong> {new Date(employee.last_raise_date).toLocaleDateString()}
+              </div>
+            )}
+            <div style={styles.infoRow}>
               <strong>Eligible for Student Rate:</strong> {isStudentAge ? 'YES (Under 18)' : 'NO (18 or older)'}
             </div>
-            <div style={{color: TavariStyles.colors.gray700, marginTop: '2px'}}>
+            <div style={styles.infoRow}>
               <strong>Student Pay Enabled:</strong> {
                 employee.student_pay_enabled 
                   ? <span style={{color: TavariStyles.colors.success}}>Enabled</span>
                   : <span style={{color: TavariStyles.colors.warning}}>Disabled</span>
               }
             </div>
-            {isStudentAge && employee.student_pay_enabled && (
-              <div style={{
-                marginTop: '4px', 
-                padding: '4px 8px', 
-                backgroundColor: TavariStyles.colors.warning + '20',
-                borderRadius: '4px',
-                color: TavariStyles.colors.warning,
-                fontSize: TavariStyles.typography.fontSize.xs,
-                fontWeight: 'bold'
-              }}>
-                📚 Currently receives student minimum wage rate
+            {employee.address_state && (
+              <div style={styles.infoRow}>
+                <strong>Province/State:</strong> {employee.address_state}
+              </div>
+            )}
+            {employee.address_postal_code && (
+              <div style={styles.infoRow}>
+                <strong>Postal Code:</strong> {employee.address_postal_code}
+              </div>
+            )}
+            {employee.emergency_contact_name && (
+              <div style={styles.infoRow}>
+                <strong>Emergency Contact Name:</strong> {employee.emergency_contact_name}
+              </div>
+            )}
+            {employee.emergency_contact_phone && (
+              <div style={styles.infoRow}>
+                <strong>Emergency Contact Phone:</strong> {employee.emergency_contact_phone}
+              </div>
+            )}
+            {employee.emergency_contact_relationship && (
+              <div style={styles.infoRow}>
+                <strong>Emergency Contact Relationship:</strong> {employee.emergency_contact_relationship}
+              </div>
+            )}
+            {!employee.address_line1 && canManageEmployees() && (
+              <div style={styles.infoRow}>
+                <strong>Address:</strong> <span style={{color: TavariStyles.colors.gray500}}>Not provided</span>
+              </div>
+            )}
+            {!employee.emergency_contact_name && canManageEmployees() && (
+              <div style={styles.infoRow}>
+                <strong>Emergency Contact:</strong> <span style={{color: TavariStyles.colors.gray500}}>Not provided</span>
               </div>
             )}
           </div>
         </div>
-
-        {/* NEW: SIN Number Section (Manager Only) */}
-        {canManageEmployees() && (
-          <div style={styles.sinSection}>
-            <div style={styles.sinTitle}>
-              <Shield size={16} />
-              SIN Number (Restricted Access)
-            </div>
-            <div style={styles.maskedSIN}>
-              {employee.sin_number ? '•••-•••-•••' : 'Not provided'}
-            </div>
-            <div style={{
-              fontSize: TavariStyles.typography.fontSize.xs,
-              color: TavariStyles.colors.gray600,
-              marginTop: TavariStyles.spacing.xs
-            }}>
-              Click 'SIN' button to view/edit with manager PIN verification
-            </div>
-          </div>
-        )}
 
         {/* Lieu Time Section */}
         {employee.lieu_time_enabled && (
@@ -580,19 +671,12 @@ const EmployeeCard = ({
             </div>
           </div>
         )}
-      </div>
+        </div>
+      )}
 
       {/* Employee Actions */}
-      <div style={styles.employeeActions}>
-        <button
-          onClick={() => onViewEmployee(employee)}
-          style={styles.actionButton}
-          title="View Employee"
-        >
-          <Eye size={16} />
-          View
-        </button>
-        
+      {isExpanded && (
+        <div style={styles.employeeActions}>
         {canManageEmployees() && (
           <>
             <button
@@ -613,8 +697,8 @@ const EmployeeCard = ({
               Certificates
             </button>
 
-            {/* Lieu Time button - only show if lieu time is enabled */}
-            {employee.lieu_time_enabled && (
+            {/* Lieu Time button - show manage if enabled, or enable if disabled */}
+            {employee.lieu_time_enabled ? (
               <button
                 onClick={() => onManageLieuTime(employee)}
                 style={{...styles.actionButton, ...styles.lieuTimeButton}}
@@ -622,6 +706,15 @@ const EmployeeCard = ({
               >
                 <Clock size={16} />
                 Lieu Time
+              </button>
+            ) : (
+              <button
+                onClick={() => onEditEmployee(employee)}
+                style={{...styles.actionButton, ...styles.lieuTimeButton, opacity: 0.7}}
+                title="Enable Lieu Time (opens Edit modal)"
+              >
+                <Clock size={16} />
+                Enable Lieu Time
               </button>
             )}
 
@@ -700,6 +793,17 @@ const EmployeeCard = ({
           </button>
         )}
         
+        {onResendPersonalInfo && canManageEmployees() && (
+          <button
+            onClick={() => onResendPersonalInfo(employee)}
+            style={{...styles.actionButton, backgroundColor: '#7c3aed', color: 'white', borderColor: '#7c3aed'}}
+            title="Resend Personal Information Form"
+          >
+            <Send size={16} />
+            Resend Info Form
+          </button>
+        )}
+        
         {canManageEmployees() && (
           <>
             <button
@@ -731,7 +835,8 @@ const EmployeeCard = ({
             </button>
           </>
         )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

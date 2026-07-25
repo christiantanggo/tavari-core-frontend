@@ -1,0 +1,204 @@
+.vending-download-embedded {
+  padding: 0;
+}
+
+.vending-download-embedded .vending-download-card {
+  max-width: none;
+  background: #fff;
+  color: #1e293b;
+  border: 1px solid #e2e8f0;
+  box-shadow: none;
+}
+
+.vending-download-embedded .vending-download-lead {
+  color: #475569;
+}
+
+.vending-download-embedded .vending-download-steps {
+  color: #64748b;
+}
+
+.vending-download-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: linear-gradient(160deg, #0f172a 0%, #1e293b 45%, #334155 100%);
+  color: #f1f5f9;
+  box-sizing: border-box;
+}
+
+.vending-download-card {
+  max-width: 520px;
+  width: 100%;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 20px;
+  padding: 2rem 1.75rem;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.vending-download-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1.25rem;
+}
+
+.vending-download-card h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.65rem;
+  font-weight: 800;
+}
+
+.vending-download-lead {
+  margin: 0 0 1rem;
+  line-height: 1.55;
+  color: #cbd5e1;
+  font-size: 1rem;
+}
+
+.vending-download-version {
+  display: inline-block;
+  margin-bottom: 1.25rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(102, 126, 234, 0.2);
+  color: #a5b4fc;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.vending-download-warn {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  background: rgba(234, 179, 8, 0.15);
+  color: #fde68a;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.vending-download-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 1rem 1.25rem;
+  border: none;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #667eea, #5a67d8);
+  color: #fff;
+  font-size: 1.1rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 8px 24px rgba(102, 126, 234, 0.35);
+}
+
+.vending-download-btn:active {
+  transform: scale(0.98);
+}
+
+.vending-download-list {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.vending-download-status {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.95rem;
+}
+
+.vending-download-apk {
+  display: block;
+  padding: 0.95rem 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.75);
+  color: #f8fafc;
+  text-decoration: none;
+}
+
+.vending-download-apk.latest {
+  border-color: rgba(102, 126, 234, 0.75);
+  background: linear-gradient(135deg, #667eea, #5a67d8);
+  box-shadow: 0 8px 24px rgba(102, 126, 234, 0.35);
+}
+
+.vending-download-apk-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  font-weight: 800;
+}
+
+.vending-download-apk-title > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.vending-download-apk-title strong {
+  flex: none;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vending-download-apk-meta {
+  display: block;
+  margin-top: 0.35rem;
+  color: rgba(226, 232, 240, 0.85);
+  font-size: 0.85rem;
+  word-break: break-word;
+}
+
+.vending-download-steps {
+  margin: 0 0 1.25rem;
+  padding-left: 1.25rem;
+  color: #94a3b8;
+  line-height: 1.6;
+  font-size: 0.95rem;
+}
+
+.vending-download-steps li {
+  margin-bottom: 0.5rem;
+}
+
+.vending-download-hint {
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(34, 197, 94, 0.12);
+  color: #86efac;
+  font-size: 0.9rem;
+}
+
+.vending-download-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #94a3b8;
+  font-size: 0.9rem;
+  text-decoration: underline;
+}
+
+.vending-download-foot {
+  margin: 1.25rem 0 0;
+  font-size: 0.8rem;
+  color: #64748b;
+}

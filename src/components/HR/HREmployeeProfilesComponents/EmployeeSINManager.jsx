@@ -11,6 +11,7 @@ import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
 import POSAuthWrapper from '../../Auth/POSAuthWrapper';
 import TavariCheckbox from '../../UI/TavariCheckbox';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import PositionLabel from '../PositionLabel';
 
 import bcrypt from 'bcryptjs';
 
@@ -671,7 +672,8 @@ const EmployeeSINManager = ({
                 <div style={styles.employeeName}>{employee.full_name}</div>
                 <div style={styles.employeeDetails}>
                   {employee.employee_number && `#${employee.employee_number} • `}
-                  {employee.position || 'Employee'} • {employee.employment_status || 'Active'}
+                  <PositionLabel businessId={businessId} value={employee.position} emptyFallback="Employee" />
+                  {' '}• {employee.employment_status || 'Active'}
                   {employee.email && ` • ${employee.email}`}
                 </div>
                 <div style={styles.employeeDetails}>

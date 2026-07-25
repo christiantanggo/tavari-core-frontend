@@ -18,14 +18,26 @@ const PaymentSummary = ({
   loyaltySettings,
   loyaltyPointsToEarn,
   loyaltyCreditsToEarn,
-  getBalanceDisplay
+  getBalanceDisplay,
+  /** When true, fills parent flex column (equal height with adjacent payment methods panel) */
+  fillColumn = false
 }) => {
   const taxCalc = useTaxCalculations();
 
   const styles = {
     section: {
       ...TavariStyles.layout.card,
-      padding: TavariStyles.spacing.xl
+      padding: TavariStyles.spacing.xl,
+      ...(fillColumn
+        ? {
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100%',
+            boxSizing: 'border-box'
+          }
+        : {})
     },
     
     sectionTitle: {
@@ -35,13 +47,22 @@ const PaymentSummary = ({
       fontWeight: TavariStyles.typography.fontWeight.bold,
       color: TavariStyles.colors.gray800,
       borderBottom: `2px solid ${TavariStyles.colors.primary}`,
-      paddingBottom: TavariStyles.spacing.sm
+      paddingBottom: TavariStyles.spacing.sm,
+      ...(fillColumn ? { flexShrink: 0 } : {})
     },
     
     summaryGrid: {
       display: 'flex',
       flexDirection: 'column',
-      gap: TavariStyles.spacing.sm
+      gap: TavariStyles.spacing.sm,
+      ...(fillColumn
+        ? {
+            flex: 1,
+            minHeight: 0,
+            overflowY: 'auto',
+            WebkitOverflowScrolling: 'touch'
+          }
+        : {})
     },
     
     summaryItem: {
@@ -119,9 +140,15 @@ const PaymentSummary = ({
   };
 
   return (
-    <div style={styles.section}>
+    <div
+      className={fillColumn ? 'payment-screen-summary-fill' : undefined}
+      style={styles.section}
+    >
       <h3 style={styles.sectionTitle}>Payment Summary</h3>
-      <div style={styles.summaryGrid}>
+      <div
+        className={fillColumn ? 'payment-screen-summary-grid' : undefined}
+        style={styles.summaryGrid}
+      >
         <div style={styles.summaryItem}>
           <span>Subtotal:</span>
           <span>${saleSubtotal.toFixed(2)}</span>
@@ -129,7 +156,7 @@ const PaymentSummary = ({
         
         {discountAmount > 0 && (
           <div style={styles.summaryItemDiscount}>
-            <span>Discount:</span>
+            <span>{saleData?.discount_name || 'Discount'}:</span>
             <span>-${discountAmount.toFixed(2)}</span>
           </div>
         )}

@@ -3,23 +3,30 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../../../supabaseClient';
 import { usePOSAuth } from '../../../hooks/usePOSAuth';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import { insertAuditLog } from '../../../utils/auditLogInsert';
+import {
+  fetchRegisterStations,
+  getStationDepositKey,
+} from '../../../services/posRegisterStationsService';
 import bcrypt from 'bcryptjs';
 
 const POSDepositCountComponent = ({ 
   businessId, 
   userId, 
   businessSettings, 
+  taskKioskCredentials = null,
   onDepositComplete 
 }) => {
   const auth = usePOSAuth({
-    requiredRoles: ['manager', 'owner'],
+    requiredRoles: taskKioskCredentials ? null : ['manager', 'owner'],
     requireBusiness: true,
     componentName: 'POSDepositCountComponent'
   });
 
   // State for till selection and data
-  const [selectedTill, setSelectedTill] = useState('');
-  const [availableTills, setAvailableTills] = useState([]);
+  const [selectedStationId, setSelectedStationId] = useState('');
+  const [availableStations, setAvailableStations] = useState([]);
+  const [selectedStation, setSelectedStation] = useState(null);
   const [dailyTransactions, setDailyTransactions] = useState({});
   const [refundData, setRefundData] = useState([]);
 
@@ -65,98 +72,128 @@ const POSDepositCountComponent = ({
   // Load available tills when component mounts
   useEffect(() => {
     if (businessId) {
-      loadAvailableTills();
+      loadAvailableStations();
     }
   }, [businessId]);
 
-  // Load transaction data when till is selected
   useEffect(() => {
-    if (selectedTill && businessId) {
-      loadDailyData();
+    if (selectedStationId && businessId) {
+      const station = availableStations.find((item) => item.id === selectedStationId) || null;
+      setSelectedStation(station);
+    } else {
+      setSelectedStation(null);
     }
-  }, [selectedTill, businessId]);
+  }, [selectedStationId, availableStations, businessId]);
 
-  const loadAvailableTills = async () => {
+  useEffect(() => {
+    if (selectedStation && businessId) {
+      loadDailyData(selectedStation);
+    }
+  }, [selectedStation, businessId]);
+
+  const loadAvailableStations = async () => {
     try {
-      // Get unique terminal IDs from today's transactions
-      const today = new Date().toISOString().split('T')[0];
-      
-      const { data: transactions, error } = await supabase
-        .from('pos_sales')
-        .select('terminal_id')
-        .eq('business_id', businessId)
-        .gte('created_at', `${today}T00:00:00.000Z`)
-        .lt('created_at', `${today}T23:59:59.999Z`);
+      if (taskKioskCredentials) {
+        const { data: ctx, error: ctxError } = await supabase.rpc('task_kiosk_pos_daily_deposit_context', {
+          p_token: taskKioskCredentials.token,
+          p_business_id: businessId,
+          p_employee_id: taskKioskCredentials.employeeId
+        });
+        if (ctxError) throw ctxError;
+        const stations = ctx?.stations || [];
+        setAvailableStations(stations);
+        if (stations.length === 1) {
+          setSelectedStationId(stations[0].id);
+        }
+        return;
+      }
+
+      const { data: stations, error } = await fetchRegisterStations(businessId);
 
       if (error) throw error;
 
-      // Get unique terminal IDs and create till options
-      const uniqueTerminals = [...new Set(transactions?.map(t => t.terminal_id).filter(Boolean))];
-      
-      // Add current terminal if it exists but no transactions yet
-      const currentTerminal = localStorage.getItem('tavari_terminal_id');
-      if (currentTerminal && !uniqueTerminals.includes(currentTerminal)) {
-        uniqueTerminals.push(currentTerminal);
+      setAvailableStations(stations || []);
+
+      if ((stations || []).length === 1) {
+        setSelectedStationId(stations[0].id);
       }
-
-      setAvailableTills(uniqueTerminals.map(terminalId => ({
-        id: terminalId,
-        name: `Till ${terminalId.slice(-4).toUpperCase()}`
-      })));
-
-      // Auto-select current terminal if available
-      if (currentTerminal && uniqueTerminals.includes(currentTerminal)) {
-        setSelectedTill(currentTerminal);
-      }
-
     } catch (err) {
-      console.error('Error loading available tills:', err);
-      setError('Failed to load available tills');
+      console.error('Error loading register stations:', err);
+      setError('Failed to load register stations. Add stations under POS Settings → General.');
     }
   };
 
-  const loadDailyData = async () => {
+  const loadDailyData = async (station) => {
     try {
       setLoading(true);
       const today = new Date().toISOString().split('T')[0];
+      const posTerminalId = station?.terminal_id || null;
 
-      // Load transaction totals by payment method
+      if (!posTerminalId) {
+        setDailyTransactions({ cash: 0, card: 0, gift_card: 0, check: 0, other: 0 });
+        setRefundData([]);
+        return;
+      }
+
+      if (taskKioskCredentials) {
+        const { data: payload, error: rpcError } = await supabase.rpc('task_kiosk_pos_daily_deposit_station_data', {
+          p_token: taskKioskCredentials.token,
+          p_business_id: businessId,
+          p_employee_id: taskKioskCredentials.employeeId,
+          p_terminal_id: posTerminalId,
+          p_deposit_date: today
+        });
+        if (rpcError) throw rpcError;
+        setRefundData(payload?.refunds || []);
+        setDailyTransactions(payload?.totals || { cash: 0, card: 0, gift_card: 0, check: 0, other: 0 });
+        return;
+      }
+
       const { data: sales, error: salesError } = await supabase
         .from('pos_sales')
-        .select('total, payment_method')
+        .select('id, total, payment_method')
         .eq('business_id', businessId)
-        .eq('terminal_id', selectedTill)
+        .eq('terminal_id', posTerminalId)
         .gte('created_at', `${today}T00:00:00.000Z`)
         .lt('created_at', `${today}T23:59:59.999Z`);
 
       if (salesError) throw salesError;
 
-      // Load detailed payment records
-      const { data: payments, error: paymentsError } = await supabase
-        .from('pos_payments')
-        .select('amount, payment_method, custom_method_name')
-        .eq('business_id', businessId)
-        .gte('created_at', `${today}T00:00:00.000Z`)
-        .lt('created_at', `${today}T23:59:59.999Z`);
+      const saleIds = (sales || []).map((sale) => sale.id).filter(Boolean);
+      let payments = [];
 
-      if (paymentsError) throw paymentsError;
+      if (saleIds.length > 0) {
+        const { data: paymentRows, error: paymentsError } = await supabase
+          .from('pos_payments')
+          .select('amount, payment_method, custom_method_name, sale_id')
+          .eq('business_id', businessId)
+          .in('sale_id', saleIds)
+          .gte('created_at', `${today}T00:00:00.000Z`)
+          .lt('created_at', `${today}T23:59:59.999Z`);
 
-      // Load refunds for this terminal - Updated to match your table structure
-      const { data: refunds, error: refundsError } = await supabase
-        .from('pos_refunds')
-        .select('total_refund_amount, refund_method, reason, created_at, refunded_by')
-        .eq('business_id', businessId)
-        .gte('created_at', `${today}T00:00:00.000Z`)
-        .lt('created_at', `${today}T23:59:59.999Z`)
-        .order('created_at', { ascending: false });
-
-      if (refundsError) {
-        console.warn('Error loading refunds (non-critical):', refundsError);
-        // Don't throw error, just set empty refunds
-        setRefundData([]);
-      } else {
-        setRefundData(refunds || []);
+        if (paymentsError) throw paymentsError;
+        payments = paymentRows || [];
       }
+
+      let refunds = [];
+      if (saleIds.length > 0) {
+        const { data: refundRows, error: refundsError } = await supabase
+          .from('pos_refunds')
+          .select('total_refund_amount, refund_method, reason, created_at, refunded_by, original_sale_id')
+          .eq('business_id', businessId)
+          .in('original_sale_id', saleIds)
+          .gte('created_at', `${today}T00:00:00.000Z`)
+          .lt('created_at', `${today}T23:59:59.999Z`)
+          .order('created_at', { ascending: false });
+
+        if (refundsError) {
+          console.warn('Error loading refunds (non-critical):', refundsError);
+        } else {
+          refunds = refundRows || [];
+        }
+      }
+
+      setRefundData(refunds);
 
       // Calculate totals by payment method
       const totals = {
@@ -231,13 +268,15 @@ const POSDepositCountComponent = ({
     return Object.values(otherCounts).reduce((sum, count) => sum + Number(count || 0), 0);
   }, [otherCounts]);
 
+  const selectedFloatAmount = Number(selectedStation?.float_amount ?? businessSettings.default_float_amount ?? 0);
+
   // Calculate variance
   const calculateVariance = useCallback(() => {
     const countedCash = calculateCashTotal();
     const countedOther = calculateOtherTotal();
     const countedTotal = countedCash + countedOther;
     
-    const expectedCash = (dailyTransactions.cash || 0) + (businessSettings.default_float_amount || 0);
+    const expectedCash = (dailyTransactions.cash || 0) + selectedFloatAmount;
     const expectedOther = (dailyTransactions.check || 0) + (dailyTransactions.gift_card || 0);
     const expectedTotal = expectedCash + expectedOther;
     
@@ -250,7 +289,7 @@ const POSDepositCountComponent = ({
       expectedTotal,
       variance: countedTotal - expectedTotal
     };
-  }, [calculateCashTotal, calculateOtherTotal, dailyTransactions, businessSettings]);
+  }, [calculateCashTotal, calculateOtherTotal, dailyTransactions, selectedFloatAmount]);
 
   const variance = calculateVariance();
 
@@ -278,6 +317,21 @@ const POSDepositCountComponent = ({
     }
 
     try {
+      if (taskKioskCredentials) {
+        const { data: manager, error: rpcError } = await supabase.rpc('task_kiosk_validate_manager_pin', {
+          p_token: taskKioskCredentials.token,
+          p_business_id: businessId,
+          p_employee_id: taskKioskCredentials.employeeId,
+          p_manager_pin: managerPin
+        });
+        if (rpcError) throw rpcError;
+        if (manager?.id) {
+          return { success: true, manager };
+        }
+        setManagerPinError('Invalid manager PIN');
+        return { success: false };
+      }
+
       const { data: userRoles, error: rolesError } = await supabase
         .from('user_roles')
         .select('user_id, role')
@@ -322,20 +376,19 @@ const POSDepositCountComponent = ({
 
   // Handle deposit submission
   const handleSubmitDeposit = async () => {
-    if (!selectedTill) {
-      setError('Please select a till');
+    if (!selectedStation) {
+      setError('Please select a register station');
       return;
     }
 
     const varianceAmount = Math.abs(variance.variance);
     const maxVariance = businessSettings.max_drawer_variance || 5.00;
     
-    // Check if manager PIN is required for variance
     if (businessSettings.require_manager_pin_for_variance && varianceAmount > maxVariance) {
       setPendingDeposit({
         ...variance,
         notes: notes.trim(),
-        selectedTill
+        selectedStation
       });
       setShowManagerPinModal(true);
       return;
@@ -351,7 +404,7 @@ const POSDepositCountComponent = ({
       
       const depositData = {
         business_id: businessId,
-        terminal_id: selectedTill,
+        terminal_id: getStationDepositKey(selectedStation),
         deposit_date: new Date().toISOString().split('T')[0],
         
         // Expected amounts
@@ -374,7 +427,7 @@ const POSDepositCountComponent = ({
         cash_breakdown: cashCounts,
         
         // Metadata
-        float_amount: businessSettings.default_float_amount || 0,
+        float_amount: selectedFloatAmount,
         refund_count: refundData.length,
         total_refunds: refundData.reduce((sum, r) => sum + (Number(r.total_refund_amount) || 0), 0),
         
@@ -391,30 +444,55 @@ const POSDepositCountComponent = ({
         submitted_to_bank: false
       };
 
-      const { data: deposit, error: depositError } = await supabase
+      if (taskKioskCredentials) {
+        const { data: depositId, error: saveError } = await supabase.rpc('task_kiosk_pos_daily_deposit_save', {
+          p_token: taskKioskCredentials.token,
+          p_business_id: businessId,
+          p_employee_id: taskKioskCredentials.employeeId,
+          p_deposit: {
+            ...depositData,
+            verified_by: managerApproval?.manager?.id || userId
+          }
+        });
+        if (saveError) throw saveError;
+
+        await insertAuditLog({
+          userId,
+          businessId,
+          details: {
+            action: 'daily_deposit_created',
+            context: 'POSDepositCount',
+            deposit_id: depositId,
+            terminal_id: selectedStation?.terminal_name || getStationDepositKey(selectedStation),
+            variance_amount: variance.variance,
+            manager_approval: !!managerApproval,
+            approved_by: managerApproval?.manager?.full_name,
+            task_kiosk: true
+          },
+        });
+      } else {
+        const { data: deposit, error: depositError } = await supabase
         .from('pos_daily_deposits')
         .insert(depositData)
         .select()
         .single();
 
-      if (depositError) throw depositError;
+        if (depositError) throw depositError;
 
-      // Log the deposit creation
-      await supabase
-        .from('audit_logs')
-        .insert({
-          business_id: businessId,
-          user_id: userId,
-          action: 'daily_deposit_created',
-          context: 'POSDepositCount',
-          metadata: {
+        await insertAuditLog({
+          userId,
+          businessId,
+          details: {
+            action: 'daily_deposit_created',
+            context: 'POSDepositCount',
             deposit_id: deposit.id,
-            terminal_id: selectedTill,
+            terminal_id: selectedStation?.terminal_name || getStationDepositKey(selectedStation),
             variance_amount: variance.variance,
             manager_approval: !!managerApproval,
-            approved_by: managerApproval?.manager?.full_name || managerApproval?.manager?.email
-          }
+            approved_by: managerApproval?.manager?.full_name || managerApproval?.manager?.email,
+          },
         });
+      }
 
       // Reset form
       setCashCounts({
@@ -507,12 +585,26 @@ const POSDepositCountComponent = ({
     { value: 'toonie_roll', label: 'Toonie Rolls', rollValue: 50.00 }
   ];
 
-  if (loading && !selectedTill) {
+  if (availableStations.length === 0) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.section}>
+          <h3 style={styles.sectionTitle}>No register stations configured</h3>
+          <p style={styles.emptyText}>
+            Add register stations under <strong>POS Settings → General → Register Stations</strong>.
+            Each station links POS sales, Helcim, and cash drawer counting together.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading && !selectedStation) {
     return (
       <div style={styles.container}>
         <div style={styles.loading}>
           <div style={TavariStyles.components.loading.spinner}></div>
-          <div>Loading till data...</div>
+          <div>Loading station data...</div>
           <style>{TavariStyles.keyframes.spin}</style>
         </div>
       </div>
@@ -521,23 +613,33 @@ const POSDepositCountComponent = ({
 
   return (
     <div style={styles.container}>
-      {/* Till Selection */}
       <div style={styles.section}>
-        <h3 style={styles.sectionTitle}>Select Till</h3>
+        <h3 style={styles.sectionTitle}>Select Register Station</h3>
         <select
-          value={selectedTill}
-          onChange={(e) => setSelectedTill(e.target.value)}
+          value={selectedStationId}
+          onChange={(e) => setSelectedStationId(e.target.value)}
           style={styles.tillSelect}
         >
-          <option value="">Select a till to count...</option>
-          {availableTills.map(till => (
-            <option key={till.id} value={till.id}>{till.name}</option>
+          <option value="">Select a station to count...</option>
+          {availableStations.map((station) => (
+            <option key={station.id} value={station.id}>
+              {station.terminal_name} (float ${Number(station.float_amount || 0).toFixed(2)})
+            </option>
           ))}
         </select>
       </div>
 
-      {selectedTill && (
+      {selectedStation && (
         <>
+          <div style={styles.tillMeta}>
+            <span><strong>Float:</strong> {formatCurrency(selectedFloatAmount)}</span>
+            <span><strong>POS ID:</strong> {selectedStation.terminal_id}</span>
+            {selectedStation.helcim_device_code ? (
+              <span><strong>Helcim:</strong> {selectedStation.helcim_device_code}</span>
+            ) : (
+              <span><strong>Helcim:</strong> not configured</span>
+            )}
+          </div>
           {/* Cash Counting Grid */}
           <div style={styles.section}>
             <h3 style={styles.sectionTitle}>Cash Count</h3>
@@ -638,7 +740,7 @@ const POSDepositCountComponent = ({
           {/* Refunds Display */}
           {refundData.length > 0 && (
             <div style={styles.section}>
-              <h3 style={styles.sectionTitle}>Refunds for This Till</h3>
+              <h3 style={styles.sectionTitle}>Refunds for This Station</h3>
               <div style={styles.refundsList}>
                 {refundData.map((refund, index) => (
                   <div key={index} style={styles.refundItem}>
@@ -720,7 +822,7 @@ const POSDepositCountComponent = ({
           <div style={styles.actions}>
             <button
               onClick={handleSubmitDeposit}
-              disabled={loading || !selectedTill}
+              disabled={loading || !selectedStation}
               style={{
                 ...TavariStyles.components.button.base,
                 ...TavariStyles.components.button.variants.primary,
@@ -865,7 +967,21 @@ const styles = {
   tillSelect: {
     ...TavariStyles.components.form.select,
     width: '100%',
-    maxWidth: '300px'
+    maxWidth: '420px'
+  },
+
+  tillMeta: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: TavariStyles.spacing.lg,
+    marginBottom: TavariStyles.spacing.lg,
+    color: TavariStyles.colors.gray700,
+    fontSize: TavariStyles.typography.fontSize.sm,
+  },
+
+  emptyText: {
+    color: TavariStyles.colors.gray600,
+    lineHeight: TavariStyles.typography.lineHeight.relaxed,
   },
 
   denominationGrid: {

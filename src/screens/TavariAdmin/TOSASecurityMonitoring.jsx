@@ -10,6 +10,7 @@ import { SecurityWrapper, useSecurityContext } from '../../Security';
 import { useTOSATavariAuth } from '../../hooks/useTOSATavariAuth';
 import { useTOSAMultiBusinessData } from '../../hooks/useTOSAMultiBusinessData';
 import { usePermissions } from '../../hooks/usePermissions';
+import { formatDateTimeForBusiness, formatDateNumeric, getBusinessRangeStartIso, getBusinessTimezone } from '../../utils/businessDateFormat';
 
 // Foundation Components
 import { TavariStyles } from '../../utils/TavariStyles';
@@ -70,6 +71,8 @@ const TOSASecurityMonitoring = () => {
     timeRange: '7',
     businessId: 'all'
   });
+  const selectedBusinessTimezone =
+    getBusinessTimezone(businesses?.find((business) => business.id === selectedBusinessId));
 
   // TOSA is now open - no auth check needed
   // Removed authentication requirement
@@ -157,10 +160,11 @@ const TOSASecurityMonitoring = () => {
       }
 
       // Time range filter
-      const daysAgo = parseInt(filters.timeRange);
-      const startDate = new Date();
-      startDate.setDate(startDate.getDate() - daysAgo);
-      query = query.gte('created_at', startDate.toISOString());
+      const daysAgo = parseInt(filters.timeRange, 10);
+      query = query.gte(
+        'created_at',
+        getBusinessRangeStartIso(Math.max(daysAgo - 1, 0), selectedBusinessTimezone)
+      );
 
       const { data, error: queryError } = await query;
 
@@ -233,7 +237,7 @@ const TOSASecurityMonitoring = () => {
       }, 'critical');
 
       const csvData = securityEvents.map(event => ({
-        timestamp: new Date(event.created_at).toLocaleString(),
+        timestamp: formatDateTimeForBusiness(event.created_at, selectedBusinessTimezone),
         business: event.businesses?.name || 'Unknown',
         severity: event.severity,
         event_type: event.event_type,
@@ -488,7 +492,7 @@ const TOSASecurityMonitoring = () => {
   const criticalEvents = securityEvents.filter(e => e.severity === 'critical').length;
   const highEvents = securityEvents.filter(e => e.severity === 'high').length;
   const todayEvents = securityEvents.filter(e => 
-    new Date(e.created_at).toDateString() === new Date().toDateString()
+    formatDateNumeric(e.created_at, selectedBusinessTimezone) === formatDateNumeric(new Date(), selectedBusinessTimezone)
   ).length;
 
   return (
@@ -663,7 +667,7 @@ const TOSASecurityMonitoring = () => {
                         }}
                       >
                         <td style={styles.td}>
-                          {new Date(event.created_at).toLocaleString()}
+                          {formatDateTimeForBusiness(event.created_at, selectedBusinessTimezone)}
                         </td>
                         <td style={styles.td}>
                           {event.businesses?.name || 'System'}

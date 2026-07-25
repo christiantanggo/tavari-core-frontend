@@ -45,15 +45,19 @@ const LowStockReport = ({
       setLoading(true);
       
       // Use the EXACT same query pattern as POSInventory.jsx
-      const { data: inventory, error } = await supabase
+      let query = supabase
         .from('pos_inventory')
         .select('*')
         .eq('business_id', auth.selectedBusinessId);
 
+      query = query.or('is_active.eq.true,is_active.is.null');
+
+      const { data: inventory, error } = await query;
+
       if (error) throw error;
 
       // Filter for stock tracking items and calculate metrics
-      const enrichedInventory = inventory?.filter(item => item.track_stock).map(item => {
+      const enrichedInventory = inventory?.filter(item => item.track_stock && item.is_active !== false).map(item => {
         const currentStock = Number(item.stock_quantity) || 0;
         const minLevel = Number(item.low_stock_threshold) || 5;
         const costPrice = Number(item.cost) || 0;

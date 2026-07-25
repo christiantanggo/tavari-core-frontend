@@ -11,13 +11,52 @@ import { usePermissions } from '../hooks/usePermissions';
 import { SecurityWrapper, useSecurityContext } from '../Security';
 import PermissionGate from '../components/Auth/PermissionGate';
 import toast from 'react-hot-toast';
+import FixEmployeeAuthModal from '../components/HR/FixEmployeeAuthModal';
+import PositionSelectWithNew from '../components/HR/PositionSelectWithNew';
+import { updateBusinessEmploymentStatus } from '../utils/businessEmploymentStatus';
+import AddPositionModal from '../components/HR/AddPositionModal';
+import {
+  FALLBACK_BUSINESS_ROLE_KEYS,
+  formatRoleLabel,
+  resolveCanonicalRoleKey,
+  rolesAreEquivalentKeys,
+} from '../helpers/businessRoleKeys';
+
+const EDITOR_MOBILE_MQ = '(max-width: 768px)';
+
+function normalizeAuthEmail(email) {
+  return (email || '').trim().toLowerCase();
+}
+
+/** public.users row for the signed-in operator (JWT email may map to a different id than auth.uid()). */
+async function fetchOperatorPublicUserRow(supabaseClient, authUser) {
+  const em = normalizeAuthEmail(authUser?.email);
+  if (em) {
+    const { data, error } = await supabaseClient
+      .from('users')
+      .select('id, pin')
+      .eq('email', em)
+      .maybeSingle();
+    if (!error && data) return data;
+  }
+  if (authUser?.id) {
+    const { data, error } = await supabaseClient
+      .from('users')
+      .select('id, pin')
+      .eq('id', authUser.id)
+      .maybeSingle();
+    if (!error && data) return data;
+  }
+  return null;
+}
 
 const EmployeeEditor = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const availableRoles = ['customer', 'employee', 'keyholder', 'manager', 'admin', 'owner'];
 
   const [employee, setEmployee] = useState(null);
+  const [roleOptionKeys, setRoleOptionKeys] = useState(FALLBACK_BUSINESS_ROLE_KEYS);
+  const [originalEmployee, setOriginalEmployee] = useState(null); // Store original employee data to compare changes
   const [editing, setEditing] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmFinal, setConfirmFinal] = useState(false);
@@ -28,6 +67,23 @@ const EmployeeEditor = () => {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(true);
+  const [showFixAuthModal, setShowFixAuthModal] = useState(false);
+  const [showAddPositionModal, setShowAddPositionModal] = useState(false);
+  const [positionSelectRemountKey, setPositionSelectRemountKey] = useState(0);
+  /** public.users.id for the logged-in person (may differ from authUser.id). */
+  const [operatorPublicUserId, setOperatorPublicUserId] = useState(null);
+
+  const [isNarrowViewport, setIsNarrowViewport] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(EDITOR_MOBILE_MQ).matches
+  );
+
+  useEffect(() => {
+    const mq = window.matchMedia(EDITOR_MOBILE_MQ);
+    const onChange = () => setIsNarrowViewport(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
 
   // Security context for sensitive employee data
   const {
@@ -58,6 +114,23 @@ const EmployeeEditor = () => {
     requireBusiness: true,
     componentName: 'EmployeeEditor'
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!authUser?.id) {
+        setOperatorPublicUserId(null);
+        return;
+      }
+      const row = await fetchOperatorPublicUserRow(supabase, authUser);
+      if (!cancelled) {
+        setOperatorPublicUserId(row?.id ?? authUser.id);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser]);
 
   // Permission system
   const { 
@@ -93,8 +166,18 @@ const EmployeeEditor = () => {
   const fetchEmployee = async () => {
     if (!selectedBusinessId) return;
 
+    // Validate that id is a valid UUID format
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!id || !uuidRegex.test(id)) {
+      console.warn('[EmployeeEditor] Invalid employee ID format:', id);
+      console.log('[EmployeeEditor] Redirecting to employees list - invalid ID');
+      toast.error('Invalid employee ID');
+      navigate('/dashboard/employees');
+      return;
+    }
+
     try {
-      await recordAction('employee_view', id, true);
+      await recordAction('employee_view', true, id);
       
       console.log('[EmployeeEditor] Fetching employee data...', { id, selectedBusinessId });
       
@@ -114,13 +197,74 @@ const EmployeeEditor = () => {
       }
 
       if (data) {
+        const { data: permRows } = await supabase
+          .from('role_permissions')
+          .select('role_key')
+          .eq('business_id', selectedBusinessId);
+
+        const uniqueKeys = Array.from(
+          new Set((permRows || []).map((r) => r.role_key).filter(Boolean))
+        ).sort();
+        const permissionKeys = uniqueKeys.length ? uniqueKeys : FALLBACK_BUSINESS_ROLE_KEYS;
+        setRoleOptionKeys(permissionKeys);
+
+        // Permissions and HR profiles read role from user_roles first; keep UI aligned with that source.
+        const { data: userRoleRow } = await supabase
+          .from('user_roles')
+          .select('role')
+          .eq('user_id', id)
+          .eq('business_id', selectedBusinessId)
+          .eq('active', true)
+          .maybeSingle();
+
+        const buFirst = data.business_users?.[0] || {};
+        const rawEffective = userRoleRow?.role ?? buFirst.role ?? 'employee';
+        const effectiveRole = resolveCanonicalRoleKey(rawEffective, permissionKeys);
+
+        const normalized = {
+          ...data,
+          business_users: [{ ...buFirst, role: effectiveRole }],
+        };
+
+        // Persist canonical spelling when DB only differs by synonym (e.g. keyholder vs key_holder).
+        try {
+          if (
+            userRoleRow?.role &&
+            userRoleRow.role !== effectiveRole &&
+            rolesAreEquivalentKeys(userRoleRow.role, effectiveRole)
+          ) {
+            await supabase
+              .from('user_roles')
+              .update({ role: effectiveRole })
+              .eq('user_id', id)
+              .eq('business_id', selectedBusinessId);
+          }
+          if (
+            buFirst.role != null &&
+            buFirst.role !== effectiveRole &&
+            rolesAreEquivalentKeys(buFirst.role, effectiveRole)
+          ) {
+            await supabase
+              .from('business_users')
+              .update({ role: effectiveRole })
+              .eq('user_id', id)
+              .eq('business_id', selectedBusinessId);
+          }
+        } catch (syncErr) {
+          console.warn('[EmployeeEditor] Role spelling sync skipped:', syncErr?.message || syncErr);
+        }
+
         console.log('[EmployeeEditor] Employee data loaded:', {
           id: data.id,
           name: data.full_name,
-          business_users: data.business_users,
-          role: data.business_users?.[0]?.role
+          business_users: normalized.business_users,
+          role: effectiveRole,
+          user_roles_role: userRoleRow?.role,
+          business_users_role_before: buFirst.role,
+          permission_role_keys: permissionKeys,
         });
-        setEmployee(data);
+        setEmployee(normalized);
+        setOriginalEmployee({ ...normalized }); // Store original data for comparison
         await logSecurityEvent('employee_details_accessed', {
           employee_id: id,
           business_id: selectedBusinessId,
@@ -141,7 +285,7 @@ const EmployeeEditor = () => {
     }
   };
 
-  const handleChange = (field, value) => {
+  const handleChange = async (field, value) => {
     if (!canEditEmployees) {
       toast.error('You do not have permission to edit employees');
       return;
@@ -168,7 +312,7 @@ const EmployeeEditor = () => {
         return;
       }
       // Prevent users from changing their own role
-      if (employee?.id === authUser?.id) {
+      if (employee?.id === (operatorPublicUserId ?? authUser?.id)) {
         toast.error('You cannot change your own role');
         return;
       }
@@ -189,15 +333,70 @@ const EmployeeEditor = () => {
       return;
     }
 
-    // Validate input
-    const validation = validateInput(value, field, { required: false });
-    if (!validation.isValid) {
-      toast.error(validation.error);
+    // Validate input based on field type
+    // For number fields, validate as numeric; for other fields, use text validation
+    const numberFields = ['wage', 'additional_tax_per_period', 'max_paid_hours_per_period'];
+    const isNumberField = numberFields.includes(field);
+    
+    // Allow empty values for number fields (user might be clearing/typing)
+    if (isNumberField && (value === '' || value === null || value === undefined)) {
+      setEmployee({ ...employee, [field]: null });
+      setEditing({ ...editing, [field]: true });
       return;
     }
-
-    setEmployee({ ...employee, [field]: value });
-    setEditing({ ...editing, [field]: true });
+    
+    try {
+      // For number fields, validate as numeric
+      if (isNumberField) {
+        const numValue = parseFloat(value);
+        if (isNaN(numValue)) {
+          console.warn('[EmployeeEditor] Invalid number value for', field, ':', value);
+          // Don't show error toast while typing - allow user to continue
+          // Only validate on blur or when they try to save
+          setEmployee({ ...employee, [field]: value });
+          setEditing({ ...editing, [field]: true });
+          return;
+        }
+        
+        if (numValue < 0) {
+          toast.error(`${field === 'wage' ? 'Wage' : field === 'additional_tax_per_period' ? 'Additional tax' : field} cannot be negative`);
+          return;
+        }
+        
+        // For additional_tax_per_period, allow reasonable values (0 to 50000 per period)
+        if (field === 'additional_tax_per_period' && numValue > 50000) {
+          toast.error('Additional tax per period seems unusually high. Please verify.');
+          // Still allow it, but warn the user
+        }
+        
+        console.log(`[EmployeeEditor] Setting ${field} to:`, numValue, '(type:', typeof numValue, ')');
+        setEmployee({ ...employee, [field]: numValue });
+      } else {
+        // For text fields, validate using security context
+        const validationType = field === 'email' ? 'email' : field === 'phone' ? 'phone' : 'text';
+        
+        // For email and phone, allow typing freely — validate on blur or save
+        if (field === 'email' || field === 'phone') {
+          setEmployee({ ...employee, [field]: value });
+        } else {
+          // For other text fields, use full validation
+          const validation = await validateInput(value ?? '', validationType, field);
+          if (validation.valid === false) {
+            console.error('[EmployeeEditor] Validation failed for', field, ':', validation.error);
+            toast.error(validation.error || 'Invalid value');
+            return;
+          }
+          setEmployee({ ...employee, [field]: validation.sanitized ?? value });
+        }
+      }
+      setEditing({ ...editing, [field]: true });
+    } catch (error) {
+      console.error('[EmployeeEditor] Validation error for', field, ':', error);
+      // If validation fails unexpectedly, still allow the change but log the error
+      // This prevents blocking legitimate input due to validation bugs
+      setEmployee({ ...employee, [field]: value });
+      setEditing({ ...editing, [field]: true });
+    }
   };
 
   const handleSave = async () => {
@@ -212,19 +411,28 @@ const EmployeeEditor = () => {
     }
 
     // Rate limit check
-    const rateLimitOk = await checkRateLimit('employee_save', 10, 60000);
-    if (!rateLimitOk) {
+    const rateLimitOk = await checkRateLimit('save_employee');
+    if (!rateLimitOk?.allowed) {
       toast.error('Too many save attempts. Please wait a moment.');
       return;
     }
 
     try {
-      await recordAction('employee_update', id, true);
+      await recordAction('employee_update', true, id);
+
+      if (employee.phone && String(employee.phone).trim()) {
+        const phoneValidation = await validateInput(String(employee.phone).trim(), 'phone', 'phone');
+        if (phoneValidation.valid === false) {
+          toast.error(phoneValidation.error || 'Invalid phone number');
+          return;
+        }
+      }
 
       // Prepare user update data (exclude business_users from the update)
       const { business_users, ...userUpdateData } = employee;
       
       console.log('[EmployeeEditor] User update data (excluding business_users):', userUpdateData);
+      console.log('[EmployeeEditor] Additional tax per period in update:', userUpdateData.additional_tax_per_period, '(type:', typeof userUpdateData.additional_tax_per_period, ')');
       console.log('[EmployeeEditor] Business users data:', business_users);
       
       // Update users table
@@ -238,6 +446,10 @@ const EmployeeEditor = () => {
         throw userError;
       }
       console.log('[EmployeeEditor] Successfully updated users table');
+
+      // Note: If email was changed, the auth account email will need to be updated separately
+      // using the "Fix Auth" modal or by an admin. This is intentional to prevent accidental
+      // auth account issues. The users table email is updated above.
 
       // Check if role was changed - if editing.role is true, we need to update
       const roleNeedsUpdate = editing.role === true;
@@ -331,6 +543,46 @@ const EmployeeEditor = () => {
           }
           console.log('[EmployeeEditor] Successfully created business_users record:', insertData);
         }
+
+        // Keep user_roles in sync — when present, this row drives permissions (usePermissions / usePOSAuth).
+        const { data: existingUr, error: urSelectErr } = await supabase
+          .from('user_roles')
+          .select('id')
+          .eq('user_id', id)
+          .eq('business_id', selectedBusinessId)
+          .maybeSingle();
+
+        if (urSelectErr) {
+          console.error('[EmployeeEditor] Error checking user_roles:', urSelectErr);
+          throw urSelectErr;
+        }
+
+        if (existingUr) {
+          const { error: urUpdateErr } = await supabase
+            .from('user_roles')
+            .update({ role: newRole })
+            .eq('user_id', id)
+            .eq('business_id', selectedBusinessId);
+
+          if (urUpdateErr) {
+            console.error('[EmployeeEditor] Error updating user_roles:', urUpdateErr);
+            throw urUpdateErr;
+          }
+        } else {
+          const { error: urInsertErr } = await supabase
+            .from('user_roles')
+            .insert({
+              user_id: id,
+              business_id: selectedBusinessId,
+              role: newRole,
+              active: true,
+            });
+
+          if (urInsertErr) {
+            console.error('[EmployeeEditor] Error inserting user_roles:', urInsertErr);
+            throw urInsertErr;
+          }
+        }
       } else {
         console.log('[EmployeeEditor] Role was not changed, skipping business_users update');
       }
@@ -347,6 +599,7 @@ const EmployeeEditor = () => {
       await fetchEmployee();
       
       setEditing({});
+      setOriginalEmployee(employee); // Update original employee data after successful save
       console.log('[EmployeeEditor] ========== SAVE COMPLETE ==========');
       toast.success('Employee updated successfully');
     } catch (err) {
@@ -366,25 +619,44 @@ const EmployeeEditor = () => {
       return;
     }
 
-    const rateLimitOk = await checkRateLimit('employee_terminate', 5, 300000);
-    if (!rateLimitOk) {
+    const rateLimitOk = await checkRateLimit('employee_terminate');
+    if (!rateLimitOk?.allowed) {
       toast.error('Too many termination attempts. Please wait.');
       return;
     }
 
     try {
-      await recordAction('employee_terminate', id, true);
+      console.log('[EmployeeEditor] Attempting to terminate employee:', {
+        employee_id: id,
+        employee_email: employee?.email,
+        business_id: selectedBusinessId
+      });
 
-      const { error } = await supabase
-        .from('users')
-        .update({ 
-          employment_status: 'terminated',
-          status: 'terminated',
-          termination_date: new Date().toISOString().split('T')[0]
-        })
-        .eq('id', id);
+      await recordAction('employee_terminate', true, id);
 
-      if (error) throw error;
+      const terminationDay = new Date().toISOString().split('T')[0];
+      const { data: updateResult, error } = await updateBusinessEmploymentStatus(supabase, {
+        userId: id,
+        businessId: selectedBusinessId,
+        employment_status: 'terminated',
+        termination_date: terminationDay,
+      });
+
+      if (error) {
+        console.error('[EmployeeEditor] Error terminating employee:', {
+          error,
+          employee_id: id,
+          employee_email: employee?.email,
+        });
+        throw error;
+      }
+
+      if (!updateResult) {
+        console.warn('[EmployeeEditor] Termination update returned no rows. Employee ID may not exist:', id);
+        throw new Error('Employee membership not found for this business.');
+      }
+
+      console.log('[EmployeeEditor] Employee terminated successfully:', updateResult);
 
       await logSecurityEvent('employee_terminated', {
         employee_id: id,
@@ -401,11 +673,19 @@ const EmployeeEditor = () => {
 
       toast.success('Employee marked as terminated');
     } catch (err) {
+      console.error('[EmployeeEditor] Exception terminating employee:', {
+        error: err,
+        message: err.message,
+        stack: err.stack,
+        employee_id: id,
+        employee_email: employee?.email
+      });
       await logSecurityEvent('employee_termination_error', {
         error: err.message,
-        employee_id: id
+        employee_id: id,
+        error_details: JSON.stringify(err)
       }, 'high');
-      toast.error('Failed to terminate employee');
+      toast.error(`Failed to terminate employee: ${err.message || 'Unknown error'}`);
     }
   };
 
@@ -430,27 +710,32 @@ const EmployeeEditor = () => {
       return;
     }
 
-    const rateLimitOk = await checkRateLimit('employee_delete', 3, 300000);
-    if (!rateLimitOk) {
+    const rateLimitOk = await checkRateLimit('delete_employee');
+    if (!rateLimitOk?.allowed) {
       toast.error('Too many deletion attempts. Please wait.');
       return;
     }
 
+    if (!selectedBusinessId) {
+      toast.error('No business selected');
+      return;
+    }
+
+    if (String(id) === String(operatorPublicUserId ?? authUser?.id)) {
+      toast.error('You cannot remove your own account from the roster here.');
+      return;
+    }
+
     try {
-      await recordAction('employee_delete_attempt', id, true);
+      await recordAction('employee_delete_attempt', true, id);
 
-      const { data: currentUser } = await supabase
-        .from('users')
-        .select('pin')
-        .eq('id', authUser?.id)
-        .single();
-
-      if (!currentUser?.pin) {
+      const operatorRow = await fetchOperatorPublicUserRow(supabase, authUser);
+      if (!operatorRow?.pin) {
         toast.error('Current user PIN not found');
         return;
       }
 
-      const match = await bcrypt.compare(pinPrompt, currentUser.pin);
+      const match = await bcrypt.compare(pinPrompt, operatorRow.pin);
       if (!match) {
         await logSecurityEvent('employee_delete_incorrect_pin', {
           employee_id: id,
@@ -460,46 +745,41 @@ const EmployeeEditor = () => {
         return;
       }
 
-      // Delete in correct order: user_roles → business_users → users
-      // Step 1: Delete from user_roles first
-      const { error: rolesError } = await supabase
-        .from('user_roles')
-        .delete()
-        .eq('user_id', id);
+      // RLS often blocks direct DELETE on user_roles/business_users; use SECURITY DEFINER RPC
+      const { data: rpcResult, error: rpcError } = await supabase.rpc('remove_employee_from_business', {
+        p_target_user_id: id,
+        p_business_id: selectedBusinessId
+      });
 
-      if (rolesError) throw rolesError;
+      if (rpcError) throw rpcError;
 
-      // Step 2: Delete from business_users
-      const { error: businessUserError } = await supabase
-        .from('business_users')
-        .delete()
-        .eq('user_id', id);
+      const removedCount =
+        (rpcResult?.user_roles_deleted != null ? Number(rpcResult.user_roles_deleted) : 0) +
+        (rpcResult?.business_users_deleted != null ? Number(rpcResult.business_users_deleted) : 0);
 
-      if (businessUserError) throw businessUserError;
-
-      // Step 3: Delete from users
-      const { error: userError } = await supabase
-        .from('users')
-        .delete()
-        .eq('id', id);
-
-      if (userError) throw userError;
+      if (!rpcResult?.ok || removedCount === 0) {
+        throw new Error(
+          'No roster rows were removed. The employee may not belong to this business, or they were already removed.'
+        );
+      }
 
       await logSecurityEvent('employee_deleted', {
         employee_id: id,
         business_id: selectedBusinessId,
         deleted_by: authUser?.id,
-        employee_name: getEmployeeName()
+        employee_name: getEmployeeName(),
+        user_roles_removed: rpcResult?.user_roles_deleted ?? 0,
+        business_users_removed: rpcResult?.business_users_deleted ?? 0,
       }, 'critical');
 
-      toast.success('Employee permanently deleted');
+      toast.success(`${getEmployeeName() || 'Employee'} removed from this business.`);
       navigate('/dashboard/employees');
     } catch (err) {
       await logSecurityEvent('employee_deletion_error', {
         error: err.message,
         employee_id: id
       }, 'critical');
-      toast.error('Failed to delete employee');
+      toast.error(`Failed to remove employee: ${err.message || 'Unknown error'}`);
     }
   };
 
@@ -519,27 +799,22 @@ const EmployeeEditor = () => {
       return;
     }
 
-    const rateLimitOk = await checkRateLimit('pin_reset', 5, 300000);
-    if (!rateLimitOk) {
+    const rateLimitOk = await checkRateLimit('pin_reset');
+    if (!rateLimitOk?.allowed) {
       toast.error('Too many PIN reset attempts. Please wait.');
       return;
     }
 
     try {
-      await recordAction('employee_pin_reset_attempt', id, true);
+      await recordAction('employee_pin_reset_attempt', true, id);
 
-      const { data: currentUser } = await supabase
-        .from('users')
-        .select('pin')
-        .eq('id', authUser?.id)
-        .single();
-
-      if (!currentUser?.pin) {
+      const operatorRow = await fetchOperatorPublicUserRow(supabase, authUser);
+      if (!operatorRow?.pin) {
         toast.error('Current user PIN not found');
         return;
       }
 
-      const match = await bcrypt.compare(pinPrompt, currentUser.pin);
+      const match = await bcrypt.compare(pinPrompt, operatorRow.pin);
       if (!match) {
         await logSecurityEvent('pin_reset_incorrect_auth_pin', {
           employee_id: id,
@@ -603,32 +878,27 @@ const EmployeeEditor = () => {
       return;
     }
 
-    const rateLimitOk = await checkRateLimit('password_reset', 5, 300000);
-    if (!rateLimitOk) {
+    const rateLimitOk = await checkRateLimit('password_reset');
+    if (!rateLimitOk?.allowed) {
       toast.error('Too many password reset attempts. Please wait.');
       return;
     }
 
     try {
-      await recordAction('employee_password_reset_attempt', id, true);
+      await recordAction('employee_password_reset_attempt', true, id);
 
-      const { data: currentUser, error: userError } = await supabase
-        .from('users')
-        .select('pin')
-        .eq('id', authUser?.id)
-        .single();
-
-      if (userError || !currentUser?.pin) {
+      const operatorRow = await fetchOperatorPublicUserRow(supabase, authUser);
+      if (!operatorRow?.pin) {
         toast.error('Could not verify your PIN. Please try again.');
         return;
       }
 
       let pinValid = false;
     
-      if (currentUser.pin.startsWith('$2b$') || currentUser.pin.startsWith('$2a$')) {
-        pinValid = await bcrypt.compare(pinPrompt, currentUser.pin);
+      if (operatorRow.pin.startsWith('$2b$') || operatorRow.pin.startsWith('$2a$')) {
+        pinValid = await bcrypt.compare(pinPrompt, operatorRow.pin);
       } else {
-        pinValid = String(pinPrompt).trim() === String(currentUser.pin).trim();
+        pinValid = String(pinPrompt).trim() === String(operatorRow.pin).trim();
       }
 
       if (!pinValid) {
@@ -679,6 +949,17 @@ const EmployeeEditor = () => {
       if (!response.ok) {
         const errorMessage = result?.error || result?.message || `Password reset failed: ${response.status}`;
         console.error('[EmployeeEditor] Password reset error:', errorMessage);
+        
+        // Check if error is due to missing auth account
+        if (errorMessage.includes('No auth account found') || errorMessage.includes('Use "Fix Auth"')) {
+          toast.error('This employee does not have an auth account yet. Creating one now...', {
+            duration: 4000
+          });
+          // Automatically open Fix Auth modal
+          setShowFixAuthModal(true);
+          return; // Don't throw error, just show the modal
+        }
+        
         throw new Error(errorMessage);
       }
 
@@ -713,6 +994,39 @@ const EmployeeEditor = () => {
 
   const getEmployeeRole = () => {
     return employee?.business_users?.[0]?.role || 'employee';
+  };
+
+  const calculateTenure = (hireDate) => {
+    if (!hireDate) return '-';
+    const hire = new Date(hireDate);
+    const now = new Date();
+    const years = now.getFullYear() - hire.getFullYear();
+    const months = now.getMonth() - hire.getMonth();
+    let totalMonths = years * 12 + months;
+    if (now.getDate() < hire.getDate()) totalMonths--;
+    
+    if (totalMonths < 12) {
+      return `${totalMonths} month${totalMonths !== 1 ? 's' : ''}`;
+    } else {
+      const yearsOnly = Math.floor(totalMonths / 12);
+      const remainingMonths = totalMonths % 12;
+      if (remainingMonths === 0) {
+        return `${yearsOnly} year${yearsOnly !== 1 ? 's' : ''}`;
+      }
+      return `${yearsOnly} year${yearsOnly !== 1 ? 's' : ''} ${remainingMonths} month${remainingMonths !== 1 ? 's' : ''}`;
+    }
+  };
+
+  const calculateAge = (birthDate) => {
+    if (!birthDate) return '-';
+    const birth = new Date(birthDate);
+    const now = new Date();
+    let age = now.getFullYear() - birth.getFullYear();
+    const monthDiff = now.getMonth() - birth.getMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < birth.getDate())) {
+      age--;
+    }
+    return age;
   };
 
   if (loading || authLoading || permissionsLoading) {
@@ -792,26 +1106,75 @@ const EmployeeEditor = () => {
     );
   }
 
+  const nv = isNarrowViewport;
+  const editorFieldRow = {
+    display: 'flex',
+    flexDirection: nv ? 'column' : 'row',
+    alignItems: nv ? 'stretch' : 'center',
+    marginBottom: '20px',
+    gap: nv ? '8px' : '20px',
+  };
+  const editorFieldLabel = {
+    fontWeight: '600',
+    color: '#374151',
+    ...(nv ? {} : { minWidth: '200px' }),
+    fontSize: '16px',
+  };
+  const editorFieldValue = { flex: 1, minWidth: 0 };
+  const editorTwoColGrid = {
+    display: 'grid',
+    gridTemplateColumns: nv ? '1fr' : '1fr 1fr',
+    gap: nv ? '16px' : '20px 40px',
+  };
+  const editorCardPadding = nv ? '18px 14px' : '30px';
+  const editorPageGutter = nv ? '14px' : '20px';
+  const editorMobileFullWidth = nv ? { width: '100%', boxSizing: 'border-box' } : {};
+
+  const handleEmailBlur = async (value) => {
+    // Validate email format only when user leaves the field
+    if (value && value.trim()) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(value.trim())) {
+        toast.error('Invalid email format. Please enter a valid email address.');
+        return;
+      }
+      // Normalize email (lowercase, trim) when they're done typing
+      const normalizedEmail = value.trim().toLowerCase();
+      if (normalizedEmail !== value) {
+        setEmployee({ ...employee, email: normalizedEmail });
+      }
+    }
+  };
+
+  const handlePhoneBlur = async (value) => {
+    if (!value || !value.trim()) return;
+    try {
+      const validation = await validateInput(value.trim(), 'phone', 'phone');
+      if (validation.valid === false) {
+        toast.error(validation.error || 'Invalid phone number');
+        return;
+      }
+      const sanitized = validation.sanitized ?? value.trim();
+      if (sanitized !== value) {
+        setEmployee({ ...employee, phone: sanitized });
+      }
+    } catch (error) {
+      console.error('[EmployeeEditor] Phone validation error:', error);
+    }
+  };
+
   const renderRow = (label, key, value, type = 'text') => {
     const isWageField = key === 'wage';
     const isEditable = canEditEmployees && (!isWageField || canEditWages);
+    const isEmailField = key === 'email';
+    const isPhoneField = key === 'phone';
 
     return (
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        marginBottom: '20px',
-        gap: '20px'
-      }}>
-        <div style={{
-          fontWeight: '600',
-          color: '#374151',
-          minWidth: '200px',
-          fontSize: '16px'
-        }}>
+      <div style={editorFieldRow}>
+        <div style={editorFieldLabel}>
           {label}
         </div>
-        <div style={{ flex: 1 }}>
+        <div style={editorFieldValue}>
           <input
             type={type}
             value={value || ''}
@@ -838,6 +1201,13 @@ const EmployeeEditor = () => {
             onBlur={(e) => {
               e.target.style.borderColor = '#d1d5db';
               e.target.style.boxShadow = 'none';
+              // Validate email/phone when user leaves the field
+              if (isEmailField) {
+                handleEmailBlur(e.target.value);
+              }
+              if (isPhoneField) {
+                handlePhoneBlur(e.target.value);
+              }
             }}
           />
         </div>
@@ -856,8 +1226,8 @@ const EmployeeEditor = () => {
           minHeight: '100vh',
           backgroundColor: '#f9fafb',
           paddingTop: '60px',
-          paddingLeft: '20px',
-          paddingRight: '20px',
+          paddingLeft: editorPageGutter,
+          paddingRight: editorPageGutter,
           paddingBottom: '20px'
         }}>
           <style>
@@ -870,13 +1240,13 @@ const EmployeeEditor = () => {
           </style>
 
           <div style={{
-            maxWidth: '900px',
+            maxWidth: nv ? '100%' : '900px',
             margin: '0 auto'
           }}>
             {/* Header */}
             <div style={{ marginBottom: '30px' }}>
               <h1 style={{ 
-                fontSize: '32px', 
+                fontSize: nv ? '24px' : '32px', 
                 fontWeight: 'bold', 
                 color: '#111827',
                 margin: '0 0 8px 0'
@@ -885,24 +1255,24 @@ const EmployeeEditor = () => {
               </h1>
               <p style={{ 
                 color: '#6b7280', 
-                fontSize: '16px',
+                fontSize: '32px',
                 margin: 0
               }}>
-                Editing: {getEmployeeName()} • Role: {getEmployeeRole()}
+                Editing: {getEmployeeName()} • Role: {formatRoleLabel(getEmployeeRole())}
               </p>
             </div>
 
             {/* Employee Information Card */}
             <div style={{
               backgroundColor: 'white',
-              padding: '30px',
+              padding: editorCardPadding,
               borderRadius: '12px',
               border: '1px solid #e5e7eb',
               boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
               marginBottom: '30px'
             }}>
               <h2 style={{
-                fontSize: '24px',
+                fontSize: nv ? '20px' : '24px',
                 fontWeight: '600',
                 color: '#111827',
                 margin: '0 0 30px 0'
@@ -910,36 +1280,82 @@ const EmployeeEditor = () => {
                 Basic Information
               </h2>
 
-              {renderRow('Full Name', 'full_name', employee.full_name)}
-              {renderRow('First Name', 'first_name', employee.first_name)}
-              {renderRow('Last Name', 'last_name', employee.last_name)}
-              {renderRow('Email Address', 'email', employee.email, 'email')}
-              {renderRow('Phone Number', 'phone', employee.phone, 'tel')}
-              {renderRow('Employee Number', 'employee_number', employee.employee_number)}
-              {renderRow('Position/Title', 'position', employee.position)}
-              {renderRow('Department', 'department', employee.department)}
-              {renderRow('Hire Date', 'hire_date', employee.hire_date, 'date')}
-              {renderRow('Wage (per hour)', 'wage', employee.wage, 'number')}
+              {/* Two-column layout (single column on mobile) */}
+              <div style={editorTwoColGrid}>
+                {/* Left Column */}
+                <div>
+                  {renderRow('Full Name', 'full_name', employee.full_name)}
+                  {renderRow('First Name', 'first_name', employee.first_name)}
+                  {renderRow('Last Name', 'last_name', employee.last_name)}
+                  {renderRow('Email Address', 'email', employee.email, 'email')}
+                  {renderRow('Phone Number', 'phone', employee.phone, 'tel')}
+                  {renderRow('Employee Number', 'employee_number', employee.employee_number)}
+                </div>
 
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                marginBottom: '20px',
-                gap: '20px'
-              }}>
-                <div style={{
-                  fontWeight: '600',
-                  color: '#374151',
-                  minWidth: '200px',
-                  fontSize: '16px'
-                }}>
+                {/* Right Column */}
+                <div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Position/Title
+                    </div>
+                    <div style={editorFieldValue}>
+                      <PositionSelectWithNew
+                        key={positionSelectRemountKey}
+                        businessId={selectedBusinessId}
+                        value={employee.position || ''}
+                        onChange={(v) => handleChange('position', v)}
+                        disabled={!canEditEmployees}
+                        selectStyle={{
+                          width: '100%',
+                          padding: '12px 16px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '8px',
+                          fontSize: '16px',
+                          boxSizing: 'border-box',
+                          backgroundColor: !canEditEmployees ? '#f9fafb' : 'white'
+                        }}
+                        onRequestNewPosition={() => setShowAddPositionModal(true)}
+                      />
+                    </div>
+                  </div>
+                  {renderRow('Department', 'department', employee.department)}
+                  {renderRow('Hire Date', 'hire_date', employee.hire_date, 'date')}
+                  {renderRow('Wage (per hour)', 'wage', employee.wage, 'number')}
+                  {employee.vacation_percent && (
+                    <div style={editorFieldRow}>
+                      <div style={editorFieldLabel}>
+                        Vacation Pay
+                      </div>
+                      <div style={{ ...editorFieldValue, color: '#374151', fontSize: '24px' }}>
+                        {(() => {
+                          const percent = parseFloat(employee.vacation_percent || 0);
+                          // If stored as percentage (>= 1.0), display directly; if stored as decimal (< 1.0), multiply by 100
+                          return percent >= 1.0 ? `${percent.toFixed(1)}%` : `${(percent * 100).toFixed(1)}%`;
+                        })()}
+                      </div>
+                    </div>
+                  )}
+                  {employee.hire_date && (
+                    <div style={editorFieldRow}>
+                      <div style={editorFieldLabel}>
+                        Tenure
+                      </div>
+                      <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                        {calculateTenure(employee.hire_date)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div style={editorFieldRow}>
+                <div style={editorFieldLabel}>
                   Role
                 </div>
-                <div style={{ flex: 1 }}>
+                <div style={editorFieldValue}>
                   <select
                     value={getEmployeeRole()}
                     onChange={(e) => handleChange('role', e.target.value)}
-                    disabled={!canEditEmployees || employee?.id === authUser?.id}
+                    disabled={!canEditEmployees || employee?.id === (operatorPublicUserId ?? authUser?.id)}
                     style={{
                       width: '100%',
                       padding: '12px 16px',
@@ -948,34 +1364,24 @@ const EmployeeEditor = () => {
                       fontSize: '16px',
                       outline: 'none',
                       boxSizing: 'border-box',
-                      backgroundColor: (canEditEmployees && employee?.id !== authUser?.id) ? 'white' : '#f9fafb',
-                      cursor: (canEditEmployees && employee?.id !== authUser?.id) ? 'pointer' : 'not-allowed'
+                      backgroundColor: (canEditEmployees && employee?.id !== (operatorPublicUserId ?? authUser?.id)) ? 'white' : '#f9fafb',
+                      cursor: (canEditEmployees && employee?.id !== (operatorPublicUserId ?? authUser?.id)) ? 'pointer' : 'not-allowed'
                     }}
                   >
-                    {availableRoles.map(role => (
-                      <option key={role} value={role}>
-                        {role.charAt(0).toUpperCase() + role.slice(1)}
+                    {(roleOptionKeys.length ? roleOptionKeys : FALLBACK_BUSINESS_ROLE_KEYS).map((roleKey) => (
+                      <option key={roleKey} value={roleKey}>
+                        {formatRoleLabel(roleKey)}
                       </option>
                     ))}
                   </select>
                 </div>
               </div>
 
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                marginBottom: '20px',
-                gap: '20px'
-              }}>
-                <div style={{
-                  fontWeight: '600',
-                  color: '#374151',
-                  minWidth: '200px',
-                  fontSize: '16px'
-                }}>
+              <div style={editorFieldRow}>
+                <div style={editorFieldLabel}>
                   Employment Status
                 </div>
-                <div style={{ flex: 1 }}>
+                <div style={editorFieldValue}>
                   <select
                     value={employee.employment_status || employee.status || 'active'}
                     onChange={(e) => handleChange('employment_status', e.target.value)}
@@ -1001,6 +1407,156 @@ const EmployeeEditor = () => {
               </div>
             </div>
 
+            {/* Personal Information Card - Two Column Layout */}
+            <div style={{
+              backgroundColor: 'white',
+              padding: editorCardPadding,
+              borderRadius: '12px',
+              border: '1px solid #e5e7eb',
+              boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
+              marginBottom: '30px'
+            }}>
+              <h2 style={{
+                fontSize: nv ? '20px' : '24px',
+                fontWeight: '600',
+                color: '#111827',
+                margin: '0 0 30px 0'
+              }}>
+                Personal Information
+              </h2>
+
+              {/* Two-column layout (single column on mobile) */}
+              <div style={editorTwoColGrid}>
+                {/* Left Column */}
+                <div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Birth Date:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.birth_date ? new Date(employee.birth_date).toLocaleDateString() : '-'}
+                    </div>
+                  </div>
+                  {employee.birth_date && (
+                    <div style={editorFieldRow}>
+                      <div style={editorFieldLabel}>
+                        Age:
+                      </div>
+                      <div style={{ ...editorFieldValue, color: '#374151', fontSize: '24px' }}>
+                        {calculateAge(employee.birth_date)} years old
+                      </div>
+                    </div>
+                  )}
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      SIN Number:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.sin || employee.sin_number || 'Not provided'}
+                    </div>
+                  </div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Address Line 1:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.address_line1 || '-'}
+                    </div>
+                  </div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Address Line 2:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.address_line2 || '-'}
+                    </div>
+                  </div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      City:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.address_city || '-'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Column */}
+                <div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Province/State:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.address_state || '-'}
+                    </div>
+                  </div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Postal Code:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.address_postal_code || '-'}
+                    </div>
+                  </div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Emergency Contact Name:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.emergency_contact_name || '-'}
+                    </div>
+                  </div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Emergency Contact Phone:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.emergency_contact_phone || '-'}
+                    </div>
+                  </div>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
+                      Emergency Contact Relationship:
+                    </div>
+                    <div style={{ ...editorFieldValue, color: '#374151', fontSize: '16px' }}>
+                      {employee.emergency_contact_relationship || '-'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Payroll Settings Card */}
+            <div style={{
+              backgroundColor: 'white',
+              padding: editorCardPadding,
+              borderRadius: '12px',
+              border: '1px solid #e5e7eb',
+              boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
+              marginBottom: '30px'
+            }}>
+              <h2 style={{
+                fontSize: nv ? '20px' : '24px',
+                fontWeight: '600',
+                color: '#111827',
+                margin: '0 0 30px 0'
+              }}>
+                Payroll Settings
+              </h2>
+
+              {renderRow('Additional Tax Per Period', 'additional_tax_per_period', employee.additional_tax_per_period, 'number')}
+              <div style={{
+                fontSize: '16px',
+                color: '#6b7280',
+                marginTop: '-10px',
+                marginBottom: '20px',
+                fontStyle: 'italic'
+              }}>
+                Additional federal tax amount to deduct from each pay period. This will automatically be included in payroll runs.
+              </div>
+            </div>
+
             {/* Security Settings Card */}
             <PermissionGate
               permissions={['hr.employees.reset_pin', 'hr.employees.reset_password']}
@@ -1009,14 +1565,14 @@ const EmployeeEditor = () => {
             >
               <div style={{
                 backgroundColor: 'white',
-                padding: '30px',
+                padding: editorCardPadding,
                 borderRadius: '12px',
                 border: '1px solid #e5e7eb',
                 boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
                 marginBottom: '30px'
               }}>
                 <h2 style={{
-                  fontSize: '24px',
+                  fontSize: nv ? '20px' : '24px',
                   fontWeight: '600',
                   color: '#111827',
                   margin: '0 0 30px 0'
@@ -1026,21 +1582,11 @@ const EmployeeEditor = () => {
 
                 {/* PIN Section */}
                 <PermissionGate permission="hr.employees.reset_pin" fallback={null}>
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    marginBottom: '30px',
-                    gap: '20px'
-                  }}>
-                    <div style={{
-                      fontWeight: '600',
-                      color: '#374151',
-                      minWidth: '200px',
-                      fontSize: '16px'
-                    }}>
+                  <div style={{ ...editorFieldRow, marginBottom: nv ? '20px' : '30px' }}>
+                    <div style={editorFieldLabel}>
                       PIN (requires your PIN)
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div style={editorFieldValue}>
                       {!pinEditMode ? (
                         <button 
                           onClick={() => setPinEditMode(true)}
@@ -1054,7 +1600,8 @@ const EmployeeEditor = () => {
                             fontWeight: '600',
                             cursor: 'pointer',
                             transition: 'all 0.2s ease',
-                            outline: 'none'
+                            outline: 'none',
+                            ...editorMobileFullWidth,
                           }}
                           onMouseOver={(e) => {
                             e.target.style.backgroundColor = '#f0fdfa';
@@ -1098,7 +1645,12 @@ const EmployeeEditor = () => {
                               boxSizing: 'border-box'
                             }}
                           />
-                          <div style={{ display: 'flex', gap: '12px' }}>
+                          <div style={{
+                            display: 'flex',
+                            flexDirection: nv ? 'column' : 'row',
+                            gap: '12px',
+                            alignItems: nv ? 'stretch' : 'center',
+                          }}>
                             <button 
                               onClick={handlePinChange}
                               style={{
@@ -1111,7 +1663,8 @@ const EmployeeEditor = () => {
                                 fontWeight: '600',
                                 cursor: 'pointer',
                                 transition: 'background-color 0.2s ease',
-                                outline: 'none'
+                                outline: 'none',
+                                ...editorMobileFullWidth,
                               }}
                               onMouseOver={(e) => e.target.style.backgroundColor = '#0F766E'}
                               onMouseOut={(e) => e.target.style.backgroundColor = '#14B8A6'}
@@ -1134,7 +1687,8 @@ const EmployeeEditor = () => {
                                 fontWeight: '600',
                                 cursor: 'pointer',
                                 transition: 'background-color 0.2s ease',
-                                outline: 'none'
+                                outline: 'none',
+                                ...editorMobileFullWidth,
                               }}
                               onMouseOver={(e) => e.target.style.backgroundColor = '#4b5563'}
                               onMouseOut={(e) => e.target.style.backgroundColor = '#6b7280'}
@@ -1150,21 +1704,11 @@ const EmployeeEditor = () => {
 
                 {/* Password Section */}
                 <PermissionGate permission="hr.employees.reset_password" fallback={null}>
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    marginBottom: '20px',
-                    gap: '20px'
-                  }}>
-                    <div style={{
-                      fontWeight: '600',
-                      color: '#374151',
-                      minWidth: '200px',
-                      fontSize: '16px'
-                    }}>
+                  <div style={editorFieldRow}>
+                    <div style={editorFieldLabel}>
                       Password (requires your PIN)
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div style={editorFieldValue}>
                       {!passwordEditMode ? (
                         <button 
                           onClick={() => setPasswordEditMode(true)}
@@ -1178,7 +1722,8 @@ const EmployeeEditor = () => {
                             fontWeight: '600',
                             cursor: 'pointer',
                             transition: 'all 0.2s ease',
-                            outline: 'none'
+                            outline: 'none',
+                            ...editorMobileFullWidth,
                           }}
                           onMouseOver={(e) => {
                             e.target.style.backgroundColor = '#f0fdfa';
@@ -1202,7 +1747,7 @@ const EmployeeEditor = () => {
                               padding: '12px 16px',
                               border: '1px solid #d1d5db',
                               borderRadius: '8px',
-                              fontSize: '16px',
+                              fontSize: '18px',
                               outline: 'none',
                               boxSizing: 'border-box'
                             }}
@@ -1235,7 +1780,12 @@ const EmployeeEditor = () => {
                               boxSizing: 'border-box'
                             }}
                           />
-                          <div style={{ display: 'flex', gap: '12px' }}>
+                          <div style={{
+                            display: 'flex',
+                            flexDirection: nv ? 'column' : 'row',
+                            gap: '12px',
+                            alignItems: nv ? 'stretch' : 'center',
+                          }}>
                             <button 
                               onClick={handlePasswordChange}
                               style={{
@@ -1244,11 +1794,12 @@ const EmployeeEditor = () => {
                                 color: 'white',
                                 border: 'none',
                                 borderRadius: '8px',
-                                fontSize: '16px',
+                                fontSize: '13px',
                                 fontWeight: '600',
                                 cursor: 'pointer',
                                 transition: 'background-color 0.2s ease',
-                                outline: 'none'
+                                outline: 'none',
+                                ...editorMobileFullWidth,
                               }}
                               onMouseOver={(e) => e.target.style.backgroundColor = '#0F766E'}
                               onMouseOut={(e) => e.target.style.backgroundColor = '#14B8A6'}
@@ -1268,11 +1819,12 @@ const EmployeeEditor = () => {
                                 color: 'white',
                                 border: 'none',
                                 borderRadius: '8px',
-                                fontSize: '16px',
+                                fontSize: '13px',
                                 fontWeight: '600',
                                 cursor: 'pointer',
                                 transition: 'background-color 0.2s ease',
-                                outline: 'none'
+                                outline: 'none',
+                                ...editorMobileFullWidth,
                               }}
                               onMouseOver={(e) => e.target.style.backgroundColor = '#4b5563'}
                               onMouseOut={(e) => e.target.style.backgroundColor = '#6b7280'}
@@ -1293,7 +1845,9 @@ const EmployeeEditor = () => {
               display: 'flex',
               gap: '16px',
               marginBottom: '30px',
-              flexWrap: 'wrap'
+              flexWrap: 'wrap',
+              flexDirection: nv ? 'column' : 'row',
+              alignItems: nv ? 'stretch' : 'flex-start',
             }}>
               {Object.keys(editing).length > 0 && canEditEmployees && (
                 <button 
@@ -1304,11 +1858,12 @@ const EmployeeEditor = () => {
                     color: 'white',
                     border: 'none',
                     borderRadius: '8px',
-                    fontSize: '16px',
+                    fontSize: '13px',
                     fontWeight: '600',
                     cursor: 'pointer',
                     transition: 'background-color 0.2s ease',
-                    outline: 'none'
+                    outline: 'none',
+                    ...editorMobileFullWidth,
                   }}
                   onMouseOver={(e) => e.target.style.backgroundColor = '#0F766E'}
                   onMouseOut={(e) => e.target.style.backgroundColor = '#14B8A6'}
@@ -1326,11 +1881,12 @@ const EmployeeEditor = () => {
                     color: 'white',
                     border: 'none',
                     borderRadius: '8px',
-                    fontSize: '16px',
+                    fontSize: '13px',
                     fontWeight: '600',
                     cursor: 'pointer',
                     transition: 'background-color 0.2s ease',
-                    outline: 'none'
+                    outline: 'none',
+                    ...editorMobileFullWidth,
                   }}
                   onMouseOver={(e) => e.target.style.backgroundColor = '#d97706'}
                   onMouseOut={(e) => e.target.style.backgroundColor = '#f59e0b'}
@@ -1348,16 +1904,17 @@ const EmployeeEditor = () => {
                     color: 'white',
                     border: 'none',
                     borderRadius: '8px',
-                    fontSize: '16px',
+                    fontSize: '13px',
                     fontWeight: '600',
                     cursor: 'pointer',
                     transition: 'background-color 0.2s ease',
-                    outline: 'none'
+                    outline: 'none',
+                    ...editorMobileFullWidth,
                   }}
                   onMouseOver={(e) => e.target.style.backgroundColor = '#dc2626'}
                   onMouseOut={(e) => e.target.style.backgroundColor = '#ef4444'}
                 >
-                  {confirmFinal ? 'Confirm & Delete' : confirmDelete ? 'Confirm Again' : 'Delete Employee'}
+                  {confirmFinal ? 'Confirm & remove' : confirmDelete ? 'Confirm again' : 'Remove from business'}
                 </button>
               </PermissionGate>
             </div>
@@ -1372,7 +1929,7 @@ const EmployeeEditor = () => {
               }}>
                 <h3 style={{
                   color: '#991b1b',
-                  fontSize: '18px',
+                  fontSize: '14px',
                   fontWeight: '600',
                   margin: '0 0 12px 0'
                 }}>
@@ -1382,7 +1939,7 @@ const EmployeeEditor = () => {
                   color: '#7f1d1d',
                   margin: '0 0 16px 0'
                 }}>
-                  This action cannot be undone. Please enter your PIN to permanently delete this employee.
+                  This removes the employee from this business roster (membership and role for this location). It does not delete their Tavari login if they are linked elsewhere. Enter your PIN to confirm.
                 </p>
                 <input
                   type="password"
@@ -1393,10 +1950,11 @@ const EmployeeEditor = () => {
                     padding: '12px 16px',
                     border: '1px solid #fca5a5',
                     borderRadius: '8px',
-                    fontSize: '16px',
+                    fontSize: '13px',
                     outline: 'none',
                     boxSizing: 'border-box',
-                    width: '200px'
+                    width: nv ? '100%' : '200px',
+                    maxWidth: '100%',
                   }}
                 />
               </div>
@@ -1411,11 +1969,12 @@ const EmployeeEditor = () => {
                 border: '2px solid #14B8A6',
                 color: '#374151',
                 borderRadius: '8px',
-                fontSize: '16px',
+                fontSize: '13px',
                 fontWeight: '600',
                 cursor: 'pointer',
                 transition: 'all 0.2s ease',
-                outline: 'none'
+                outline: 'none',
+                ...editorMobileFullWidth,
               }}
               onMouseOver={(e) => {
                 e.target.style.backgroundColor = '#f0fdfa';
@@ -1430,6 +1989,31 @@ const EmployeeEditor = () => {
             </button>
           </div>
         </div>
+
+        {/* Fix Employee Auth Modal */}
+        {employee && (
+          <FixEmployeeAuthModal
+            isOpen={showFixAuthModal}
+            onClose={() => setShowFixAuthModal(false)}
+            employee={employee}
+            onSuccess={async () => {
+              setShowFixAuthModal(false);
+              toast.success('Auth account created! You can now reset the password.');
+              // Optionally reload employee data to reflect auth status
+              await fetchEmployee();
+            }}
+          />
+        )}
+        <AddPositionModal
+          isOpen={showAddPositionModal}
+          businessId={selectedBusinessId}
+          zIndex={1100}
+          onClose={() => setShowAddPositionModal(false)}
+          onCreated={(positionName) => {
+            void handleChange('position', positionName);
+            setPositionSelectRemountKey((k) => k + 1);
+          }}
+        />
       </SessionManager>
     </POSAuthWrapper>
   );

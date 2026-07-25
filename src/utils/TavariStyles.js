@@ -55,15 +55,15 @@ export const TavariStyles = {
     
     // Font Sizes
     fontSize: {
-      xs: '12px',
-      sm: '13px',
-      base: '14px',
-      md: '15px',
-      lg: '16px',
-      xl: '18px',
-      '2xl': '20px',
-      '3xl': '24px',
-      '4xl': '32px'
+      xs: '15px',
+      sm: '16px',
+      base: '18px',
+      md: '19px',
+      lg: '20px',
+      xl: '23px',
+      '2xl': '25px',
+      '3xl': '30px',
+      '4xl': '40px'
     },
     
     // Font Weights
@@ -235,7 +235,8 @@ export const TavariStyles = {
         fontSize: '14px',
         transition: 'border-color 0.2s',
         fontFamily: 'inherit',
-        backgroundColor: '#ffffff'
+        backgroundColor: '#ffffff',
+        width: '90%'
       },
       
       label: {
@@ -252,7 +253,20 @@ export const TavariStyles = {
         borderRadius: '6px',
         fontSize: '14px',
         backgroundColor: '#ffffff',
-        cursor: 'pointer'
+        cursor: 'pointer',
+        width: '90%'
+      },
+      
+      textarea: {
+        padding: '12px 16px',
+        border: '1px solid #d1d5db',
+        borderRadius: '6px',
+        fontSize: '14px',
+        transition: 'border-color 0.2s',
+        fontFamily: 'inherit',
+        backgroundColor: '#ffffff',
+        width: '90%',
+        resize: 'vertical'
       }
     },
 
@@ -269,7 +283,7 @@ export const TavariStyles = {
       table: {
         width: '100%',
         borderCollapse: 'collapse',
-        fontSize: '14px'
+        fontSize: '13px'
       },
       
       headerRow: {
@@ -282,7 +296,7 @@ export const TavariStyles = {
         textAlign: 'left',
         fontWeight: '600',
         color: '#374151',
-        fontSize: '13px',
+        fontSize: '18px',
         textTransform: 'uppercase',
         letterSpacing: '0.05em'
       },
@@ -383,7 +397,7 @@ export const TavariStyles = {
         justifyContent: 'center',
         alignItems: 'center',
         height: '200px',
-        fontSize: '18px',
+        fontSize: '13px',
         color: '#6b7280'
       },
       
@@ -452,7 +466,7 @@ export const TavariStyles = {
         display: 'flex',
         justifyContent: 'space-between',
         margin: '3px 0',
-        fontSize: '13px',
+        fontSize: '14px',
         fontWeight: '500',
         color: '#4CAF50'
       }
@@ -563,6 +577,69 @@ export const TavariStyles = {
     desktop: '1280px',
     wide: '1536px'
   }
+};
+
+// Compatibility aliases (Digital Signage and other modules expect these paths)
+TavariStyles.layouts = {
+  container: {
+    ...TavariStyles.layout.container,
+    maxWidth: '1400px',
+    margin: '0 auto',
+    width: '100%'
+  },
+  centerContent: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'column',
+    minHeight: '400px',
+    padding: TavariStyles.spacing['4xl']
+  }
+};
+
+TavariStyles.typography.heading = {
+  h1: {
+    fontSize: TavariStyles.typography.fontSize['3xl'],
+    fontWeight: TavariStyles.typography.fontWeight.bold,
+    color: TavariStyles.colors.gray800,
+    margin: 0
+  },
+  h2: {
+    fontSize: TavariStyles.typography.fontSize['2xl'],
+    fontWeight: TavariStyles.typography.fontWeight.bold,
+    color: TavariStyles.colors.gray800,
+    margin: 0
+  },
+  h3: {
+    fontSize: TavariStyles.typography.fontSize.xl,
+    fontWeight: TavariStyles.typography.fontWeight.semibold,
+    color: TavariStyles.colors.gray800,
+    margin: 0
+  },
+  h4: {
+    fontSize: TavariStyles.typography.fontSize.lg,
+    fontWeight: TavariStyles.typography.fontWeight.semibold,
+    color: TavariStyles.colors.gray800,
+    margin: 0
+  }
+};
+
+TavariStyles.typography.body = {
+  fontSize: TavariStyles.typography.fontSize.base,
+  color: TavariStyles.colors.gray600,
+  lineHeight: TavariStyles.typography.lineHeight.normal,
+  margin: 0
+};
+
+TavariStyles.components.card = { ...TavariStyles.layout.card };
+TavariStyles.components.input = { ...TavariStyles.components.form.input };
+TavariStyles.components.button.primary = {
+  ...TavariStyles.components.button.base,
+  ...TavariStyles.components.button.variants.primary
+};
+TavariStyles.components.button.secondary = {
+  ...TavariStyles.components.button.base,
+  ...TavariStyles.components.button.variants.secondary
 };
 
 // Export individual sections for easier importing

@@ -1,0 +1,236 @@
+.vending-staff-trigger {
+  position: fixed;
+  top: 0;
+  right: 0.65rem;
+  z-index: 10300;
+  width: 48px;
+  height: 48px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #334155;
+  font-size: 1.15rem;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  /* Align with .vending-kiosk-topbar height so products never sit under the lock. */
+}
+
+.vending-staff-trigger:active {
+  transform: scale(0.96);
+}
+
+.vending-staff-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10250;
+  max-height: min(85vh, 640px);
+  overflow: auto;
+  background: rgba(255, 255, 255, 0.98);
+  padding: 3.25rem 1.25rem 1.25rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  border-bottom-left-radius: 16px;
+  border-bottom-right-radius: 16px;
+}
+
+.vending-staff-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.vending-staff-panel-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  color: #1e293b;
+}
+
+.vending-staff-panel-sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+.vending-staff-lock-btn {
+  padding: 0.45rem 0.85rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.vending-staff-reload-section {
+  margin: 0 0 1rem;
+  padding: 0.9rem;
+  background: #ecfdf5;
+  border: 1px solid #99f6e4;
+  border-radius: 12px;
+}
+
+.vending-staff-reload-section h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+  color: #0f766e;
+}
+
+.vending-staff-reload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.vending-staff-reload-btn {
+  flex: 1 1 140px;
+  min-height: 52px;
+  padding: 0.75rem 1rem;
+  border: 2px solid #0f766e;
+  border-radius: 12px;
+  background: #fff;
+  color: #0f766e;
+  font-size: 1.05rem;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.vending-staff-reload-btn--primary {
+  background: #0f766e;
+  color: #fff;
+  border-color: #0f766e;
+}
+
+.vending-staff-reload-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.vending-staff-test-banner {
+  margin: 0 0 0.75rem;
+  padding: 0.45rem 0.75rem;
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.vending-staff-last-action {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.vending-staff-manual-vend {
+  margin: 1rem 0;
+  padding: 0.85rem;
+  background: #f8fafc;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+}
+
+.vending-staff-manual-vend h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.vending-staff-help {
+  margin: 0 0 0.65rem;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.vending-staff-manual-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.65rem;
+}
+
+.vending-staff-manual-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #475569;
+}
+
+.vending-staff-manual-row select {
+  min-width: 72px;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+}
+
+.vending-staff-lane {
+  font-size: 0.8rem;
+  color: #64748b;
+  padding-bottom: 0.45rem;
+}
+
+.vending-staff-vend-btn {
+  padding: 0.5rem 0.85rem;
+  border: none;
+  border-radius: 8px;
+  background: #dc2626;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.vending-staff-vend-btn:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.vending-staff-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.75rem 0;
+}
+
+.vending-staff-actions button {
+  padding: 0.5rem 0.85rem;
+  border: none;
+  border-radius: 8px;
+  background: #334155;
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.vending-staff-debug-wrap {
+  margin-top: 0.75rem;
+}
+
+.vending-staff-debug-toggle {
+  padding: 0.45rem 0.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.vending-staff-debug-wrap .vending-debug-panel {
+  position: static;
+  max-width: none;
+  max-height: none;
+  margin-top: 0.75rem;
+  left: auto;
+  right: auto;
+  bottom: auto;
+}
+
+.vending-staff-meta {
+  margin: 0.75rem 0 0;
+  font-size: 0.75rem;
+  color: #94a3b8;
+}

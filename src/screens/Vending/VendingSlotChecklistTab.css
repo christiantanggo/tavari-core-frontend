@@ -1,0 +1,173 @@
+.vending-checklist-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.vending-checklist-stat {
+  padding: 0.5rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.vending-checklist-stat.pass {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.vending-checklist-stat.fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.vending-checklist-stat.pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.vending-checklist-grid-wrap {
+  overflow-x: auto;
+  margin-top: 1rem;
+}
+
+.vending-checklist-grid {
+  border-collapse: separate;
+  border-spacing: 6px;
+  min-width: 100%;
+}
+
+.vending-checklist-grid th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #64748b;
+  text-align: center;
+  padding: 0 4px 6px;
+}
+
+.vending-checklist-row-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #475569;
+  text-align: right;
+  padding-right: 8px;
+  white-space: nowrap;
+}
+
+.vending-checklist-cell {
+  vertical-align: top;
+  min-width: 108px;
+  max-width: 120px;
+}
+
+.vending-checklist-card {
+  border-radius: 10px;
+  border: 2px solid #e2e8f0;
+  padding: 8px;
+  background: #fff;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.vending-checklist-card.untested {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.vending-checklist-card.pass {
+  border-color: #22c55e;
+  background: #f0fdf4;
+}
+
+.vending-checklist-card.fail {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.vending-checklist-pos {
+  font-weight: 800;
+  font-size: 0.8rem;
+  color: #0f172a;
+  margin-bottom: 4px;
+}
+
+.vending-checklist-lane {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.vending-checklist-lane input {
+  width: 42px;
+  padding: 2px 4px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-family: ui-monospace, monospace;
+}
+
+.vending-checklist-product {
+  color: #64748b;
+  margin-bottom: 6px;
+  min-height: 2.5em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.vending-checklist-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.vending-checklist-actions button {
+  flex: 1;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 2px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.vending-checklist-actions .btn-vend {
+  background: #6366f1;
+  color: #fff;
+  flex: 1 1 100%;
+  margin-bottom: 4px;
+}
+
+.vending-checklist-actions .btn-pass {
+  background: #22c55e;
+  color: #fff;
+}
+
+.vending-checklist-actions .btn-fail {
+  background: #ef4444;
+  color: #fff;
+}
+
+.vending-checklist-actions .btn-reset {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.vending-checklist-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.vending-checklist-empty {
+  text-align: center;
+  color: #94a3b8;
+  background: #f8fafc;
+  vertical-align: middle;
+}

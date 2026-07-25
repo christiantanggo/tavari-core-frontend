@@ -6,12 +6,12 @@ import { logAction } from '../../helpers/posAudit';
 import { TavariStyles } from '../../utils/TavariStyles';
 import POSAuthWrapper from '../../components/Auth/POSAuthWrapper';
 import { usePermissions } from '../../hooks/usePermissions';
-import PermissionGate from '../../components/Auth/PermissionGate';
 import TavariCheckbox from '../../components/UI/TavariCheckbox';
 import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { SecurityWrapper } from '../../Security';
 import { useSecurityContext } from '../../Security';
 import { usePOSAuth } from '../../hooks/usePOSAuth';
+import { getPosLineSubtotal } from '../../utils/posLinePricing';
 
 const POSDiscountsContent = ({ authState }) => {
   const { selectedBusinessId, authUser } = authState;
@@ -35,20 +35,46 @@ const POSDiscountsContent = ({ authState }) => {
     hasPermission,
     hasAnyPermission,
     hasElevatedPrivileges,
+    isLoggedInUserManager,
+    hasLoggedInUserElevatedPrivileges,
     loading: permissionsLoading
   } = usePermissions();
+
+  const hasElevatedAccess = hasElevatedPrivileges();
+  const hasLoggedInManagerAccess = isLoggedInUserManager();
+  const hasLoggedInElevatedAccess = hasLoggedInUserElevatedPrivileges();
+  const hasPosScreenRole = ['employee', 'manager', 'owner', 'admin'].includes(authState?.userRole || '');
+  const canManageDiscountsByRole =
+    ['manager', 'owner', 'admin'].includes(authState?.userRole || '') ||
+    hasLoggedInManagerAccess;
 
   // Permission checks
   const canViewDiscounts = hasAnyPermission([
     'pos.discounts.view',
     'pos.discounts.create',
-    'pos.discounts.edit'
-  ]) || hasElevatedPrivileges();
+    'pos.discounts.edit',
+    'pos.discounts.update'
+  ]) || hasElevatedAccess || hasLoggedInElevatedAccess || hasPosScreenRole;
 
-  const canCreateDiscounts = hasPermission('pos.discounts.create') || hasElevatedPrivileges();
-  const canEditDiscounts = hasPermission('pos.discounts.edit') || hasElevatedPrivileges();
-  const canDeleteDiscounts = hasPermission('pos.discounts.delete') || hasElevatedPrivileges();
-  const canToggleStatus = hasPermission('pos.discounts.toggle_status') || hasElevatedPrivileges();
+  const canCreateDiscounts =
+    hasPermission('pos.discounts.create') ||
+    hasPermission('pos.discounts.edit') ||
+    hasPermission('pos.discounts.update') ||
+    hasElevatedAccess ||
+    hasLoggedInElevatedAccess ||
+    canManageDiscountsByRole;
+  const canEditDiscounts =
+    hasPermission('pos.discounts.edit') ||
+    hasPermission('pos.discounts.update') ||
+    hasElevatedAccess ||
+    hasLoggedInElevatedAccess ||
+    canManageDiscountsByRole;
+  const canDeleteDiscounts =
+    hasPermission('pos.discounts.delete') ||
+    hasElevatedAccess ||
+    hasLoggedInElevatedAccess ||
+    canManageDiscountsByRole;
+  const canToggleStatus = canEditDiscounts;
   
   // Tax calculations hook for discount validation and preview
   const {
@@ -103,13 +129,6 @@ const POSDiscountsContent = ({ authState }) => {
   const [editCombineWithOthers, setEditCombineWithOthers] = useState(true);
   const [editApplyBeforeTax, setEditApplyBeforeTax] = useState(true);
 
-  useEffect(() => {
-    if (selectedBusinessId && canViewDiscounts) {
-      fetchDiscounts();
-      loadPreviewCart();
-    }
-  }, [selectedBusinessId, canViewDiscounts]);
-
   // Load sample cart items for discount preview calculations
   const loadPreviewCart = async () => {
     try {
@@ -119,7 +138,7 @@ const POSDiscountsContent = ({ authState }) => {
       }, 'low');
 
       const { data: products, error } = await supabase
-        .from('pos_products')
+        .from('pos_inventory')
         .select('id, name, price, category_id')
         .eq('business_id', selectedBusinessId)
         .eq('is_active', true)
@@ -190,17 +209,27 @@ const POSDiscountsContent = ({ authState }) => {
     }
   };
 
+  useEffect(() => {
+    if (!selectedBusinessId || permissionsLoading) {
+      return;
+    }
+
+    if (!canViewDiscounts) {
+      setLoading(false);
+      return;
+    }
+
+    fetchDiscounts();
+    loadPreviewCart();
+  }, [selectedBusinessId, permissionsLoading, canViewDiscounts]);
+
   // Calculate discount impact with tax considerations
   const calculateDiscountPreview = (discount, cartItems = previewCart) => {
     if (!cartItems?.length) return { subtotal: 0, discountAmount: 0, taxAmount: 0, total: 0 };
 
     // Calculate subtotal
     const subtotal = cartItems.reduce((sum, item) => {
-      const basePrice = Number(item.price) || 0;
-      const modifiersTotal = item.modifiers?.reduce((mSum, mod) => {
-        return mSum + (Number(mod.price) || 0);
-      }, 0) || 0;
-      return sum + ((basePrice + modifiersTotal) * (Number(item.quantity) || 1));
+      return sum + getPosLineSubtotal(item);
     }, 0);
 
     // Calculate discount amount
@@ -1060,7 +1089,7 @@ const POSDiscountsContent = ({ authState }) => {
     }
   };
 
-  if (loading || permissionsLoading) {
+  if (loading) {
     return (
       <div style={styles.container}>
         <div style={styles.loading}>Loading discounts...</div>
@@ -1139,185 +1168,173 @@ const POSDiscountsContent = ({ authState }) => {
 
       {/* Add New Discount */}
       {canCreateDiscounts && (
-        <PermissionGate
-          permissions={['pos.discounts.create']}
-          requireElevated
-          fallback={
-            <div style={styles.noAccessContainer}>
-              <p style={styles.noAccessText}>
-                ⚠️ You do not have permission to create discounts (requires manager/owner)
-              </p>
+        <div style={styles.addSection}>
+          <h3 style={styles.sectionTitle}>Add New Discount</h3>
+          <div style={styles.form}>
+            <div style={styles.formRow}>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Discount Name *</label>
+                <input
+                  type="text"
+                  placeholder="e.g., Senior Discount, Happy Hour"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  style={styles.input}
+                />
+              </div>
+
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Type *</label>
+                <select
+                  value={newType}
+                  onChange={(e) => setNewType(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="percentage">Percentage</option>
+                  <option value="fixed">Fixed Amount</option>
+                </select>
+              </div>
+
+              <div style={styles.formGroup}>
+                <label style={styles.label}>
+                  Value * {newType === 'percentage' ? '(%)' : '($)'}
+                </label>
+                <input
+                  type="number"
+                  placeholder={newType === 'percentage' ? '10' : '5.00'}
+                  value={newValue}
+                  onChange={(e) => setNewValue(e.target.value)}
+                  style={styles.input}
+                  step={newType === 'percentage' ? '1' : '0.01'}
+                  min="0"
+                  max={newType === 'percentage' ? '100' : undefined}
+                />
+              </div>
             </div>
-          }
-        >
-          <div style={styles.addSection}>
-            <h3 style={styles.sectionTitle}>Add New Discount</h3>
-            <div style={styles.form}>
-              <div style={styles.formRow}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Discount Name *</label>
-                  <input
-                    type="text"
-                    placeholder="e.g., Senior Discount, Happy Hour"
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    style={styles.input}
-                  />
-                </div>
 
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Type *</label>
-                  <select
-                    value={newType}
-                    onChange={(e) => setNewType(e.target.value)}
-                    style={styles.select}
-                  >
-                    <option value="percentage">Percentage</option>
-                    <option value="fixed">Fixed Amount</option>
-                  </select>
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>
-                    Value * {newType === 'percentage' ? '(%)' : '($)'}
-                  </label>
-                  <input
-                    type="number"
-                    placeholder={newType === 'percentage' ? '10' : '5.00'}
-                    value={newValue}
-                    onChange={(e) => setNewValue(e.target.value)}
-                    style={styles.input}
-                    step={newType === 'percentage' ? '1' : '0.01'}
-                    min="0"
-                    max={newType === 'percentage' ? '100' : undefined}
-                  />
-                </div>
+            <div style={styles.formRow}>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Apply To</label>
+                <select
+                  value={newApplicationType}
+                  onChange={(e) => setNewApplicationType(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="transaction">Entire Transaction</option>
+                  <option value="item">Per Item</option>
+                </select>
               </div>
 
-              <div style={styles.formRow}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Apply To</label>
-                  <select
-                    value={newApplicationType}
-                    onChange={(e) => setNewApplicationType(e.target.value)}
-                    style={styles.select}
-                  >
-                    <option value="transaction">Entire Transaction</option>
-                    <option value="item">Per Item</option>
-                  </select>
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Minimum Purchase ($)</label>
-                  <input
-                    type="number"
-                    placeholder="0.00 = no minimum"
-                    value={newMinPurchase}
-                    onChange={(e) => setNewMinPurchase(e.target.value)}
-                    style={styles.input}
-                    step="0.01"
-                    min="0"
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Maximum Uses</label>
-                  <input
-                    type="number"
-                    placeholder="Leave blank = unlimited"
-                    value={newMaxUses}
-                    onChange={(e) => setNewMaxUses(e.target.value)}
-                    style={styles.input}
-                    min="1"
-                  />
-                </div>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Minimum Purchase ($)</label>
+                <input
+                  type="number"
+                  placeholder="0.00 = no minimum"
+                  value={newMinPurchase}
+                  onChange={(e) => setNewMinPurchase(e.target.value)}
+                  style={styles.input}
+                  step="0.01"
+                  min="0"
+                />
               </div>
 
-              <div style={styles.formRow}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Valid From (Optional)</label>
-                  <input
-                    type="date"
-                    value={newValidFrom}
-                    onChange={(e) => setNewValidFrom(e.target.value)}
-                    style={styles.input}
-                  />
-                </div>
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Valid To (Optional)</label>
-                  <input
-                    type="date"
-                    value={newValidTo}
-                    onChange={(e) => setNewValidTo(e.target.value)}
-                    style={styles.input}
-                  />
-                </div>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Maximum Uses</label>
+                <input
+                  type="number"
+                  placeholder="Leave blank = unlimited"
+                  value={newMaxUses}
+                  onChange={(e) => setNewMaxUses(e.target.value)}
+                  style={styles.input}
+                  min="1"
+                />
               </div>
-
-              <div style={styles.formRow}>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Description (Optional)</label>
-                  <textarea
-                    placeholder="Additional details about this discount..."
-                    value={newDescription}
-                    onChange={(e) => setNewDescription(e.target.value)}
-                    style={styles.textarea}
-                    rows="2"
-                  />
-                </div>
-              </div>
-
-              <div style={styles.checkboxGrid}>
-                <div style={styles.checkboxGroup}>
-                  <div style={styles.checkboxGroupTitle}>Application Rules</div>
-                  <TavariCheckbox
-                    checked={newAutoApply}
-                    onChange={(checked) => setNewAutoApply(checked)}
-                    label="Auto-apply when conditions are met"
-                    size="md"
-                  />
-                  <TavariCheckbox
-                    checked={newManagerRequired}
-                    onChange={(checked) => setNewManagerRequired(checked)}
-                    label="Require manager approval"
-                    size="md"
-                  />
-                  <TavariCheckbox
-                    checked={newCombineWithOthers}
-                    onChange={(checked) => setNewCombineWithOthers(checked)}
-                    label="Can combine with other discounts"
-                    size="md"
-                  />
-                </div>
-
-                <div style={styles.checkboxGroup}>
-                  <div style={styles.checkboxGroupTitle}>Tax Behavior</div>
-                  <TavariCheckbox
-                    checked={newApplyBeforeTax}
-                    onChange={(checked) => setNewApplyBeforeTax(checked)}
-                    label="Apply discount before tax calculation"
-                    size="md"
-                  />
-                  <TavariCheckbox
-                    checked={newTaxExempt}
-                    onChange={(checked) => setNewTaxExempt(checked)}
-                    label="Discount is tax exempt (reduces taxable amount)"
-                    size="md"
-                  />
-                </div>
-              </div>
-
-              <button 
-                onClick={addDiscount}
-                style={styles.addButton}
-                disabled={!newName.trim() || !newValue}
-              >
-                Add Discount
-              </button>
             </div>
+
+            <div style={styles.formRow}>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Valid From (Optional)</label>
+                <input
+                  type="date"
+                  value={newValidFrom}
+                  onChange={(e) => setNewValidFrom(e.target.value)}
+                  style={styles.input}
+                />
+              </div>
+
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Valid To (Optional)</label>
+                <input
+                  type="date"
+                  value={newValidTo}
+                  onChange={(e) => setNewValidTo(e.target.value)}
+                  style={styles.input}
+                />
+              </div>
+            </div>
+
+            <div style={styles.formRow}>
+              <div style={styles.formGroup}>
+                <label style={styles.label}>Description (Optional)</label>
+                <textarea
+                  placeholder="Additional details about this discount..."
+                  value={newDescription}
+                  onChange={(e) => setNewDescription(e.target.value)}
+                  style={styles.textarea}
+                  rows="2"
+                />
+              </div>
+            </div>
+
+            <div style={styles.checkboxGrid}>
+              <div style={styles.checkboxGroup}>
+                <div style={styles.checkboxGroupTitle}>Application Rules</div>
+                <TavariCheckbox
+                  checked={newAutoApply}
+                  onChange={(checked) => setNewAutoApply(checked)}
+                  label="Auto-apply when conditions are met"
+                  size="md"
+                />
+                <TavariCheckbox
+                  checked={newManagerRequired}
+                  onChange={(checked) => setNewManagerRequired(checked)}
+                  label="Require manager approval"
+                  size="md"
+                />
+                <TavariCheckbox
+                  checked={newCombineWithOthers}
+                  onChange={(checked) => setNewCombineWithOthers(checked)}
+                  label="Can combine with other discounts"
+                  size="md"
+                />
+              </div>
+
+              <div style={styles.checkboxGroup}>
+                <div style={styles.checkboxGroupTitle}>Tax Behavior</div>
+                <TavariCheckbox
+                  checked={newApplyBeforeTax}
+                  onChange={(checked) => setNewApplyBeforeTax(checked)}
+                  label="Apply discount before tax calculation"
+                  size="md"
+                />
+                <TavariCheckbox
+                  checked={newTaxExempt}
+                  onChange={(checked) => setNewTaxExempt(checked)}
+                  label="Discount is tax exempt (reduces taxable amount)"
+                  size="md"
+                />
+              </div>
+            </div>
+
+            <button 
+              onClick={addDiscount}
+              style={styles.addButton}
+              disabled={!newName.trim() || !newValue}
+            >
+              Add Discount
+            </button>
           </div>
-        </PermissionGate>
+        </div>
       )}
 
       {/* Discounts Table */}

@@ -8,6 +8,10 @@ import { useTaxCalculations } from '../../../hooks/useTaxCalculations';
 import POSAuthWrapper from '../../../components/Auth/POSAuthWrapper';
 import TavariCheckbox from '../../../components/UI/TavariCheckbox';
 import { TavariStyles } from '../../../utils/TavariStyles';
+import {
+  deletePayrollRunWithRefunds,
+  fetchPayrollEntriesForDelete,
+} from '../../../helpers/Payroll/deletePayrollRun';
 
 const PETDraftLookupModal = ({ 
   isOpen, 
@@ -182,57 +186,64 @@ const PETDraftLookupModal = ({
     }
   };
 
-  // FIXED: Simplified mass delete function
+  const deleteDraftWithLieuRefund = async (draftRun) => {
+    const payrollEntries = await fetchPayrollEntriesForDelete(supabase, draftRun.id);
+    await deletePayrollRunWithRefunds({
+      supabase,
+      run: {
+        id: draftRun.id,
+        business_id: businessId,
+        pay_period_start: draftRun.pay_period_start,
+        pay_period_end: draftRun.pay_period_end,
+        status: draftRun.status || 'draft',
+      },
+      payrollEntries,
+      authUser,
+      logSecurityEvent,
+      recordAction,
+    });
+  };
+
   const massDeleteDrafts = async () => {
     if (selectedDrafts.size === 0) {
       alert('Please select drafts to delete');
       return;
     }
 
-    if (!confirm(`Are you sure you want to delete ${selectedDrafts.size} draft payroll runs? This cannot be undone.`)) {
+    const count = selectedDrafts.size;
+    if (
+      !confirm(
+        `Delete ${count} draft payroll run(s)?\n\n` +
+          'Any lieu time used in those drafts will be returned to employee balances. This cannot be undone.'
+      )
+    ) {
       return;
     }
 
     try {
       setDeleting(true);
-      
-      // FIXED: Safe security logging
+
       try {
         await logSecurityEvent('mass_draft_payroll_deletion', {
           business_id: businessId,
-          draft_count: selectedDrafts.size,
-          draft_ids: Array.from(selectedDrafts)
+          draft_count: count,
+          draft_ids: Array.from(selectedDrafts),
         }, 'medium');
       } catch (securityError) {
         console.warn('Security logging failed, continuing...', securityError);
       }
 
-      // Delete entries first (foreign key constraint)
-      const { error: entriesError } = await supabase
-        .from('hrpayroll_entries')
-        .delete()
-        .in('payroll_run_id', Array.from(selectedDrafts));
-
-      if (entriesError) {
-        throw new Error(`Failed to delete entries: ${entriesError.message}`);
+      const runsToDelete = draftPayrollRuns.filter((d) => selectedDrafts.has(d.id));
+      for (const draftRun of runsToDelete) {
+        await deleteDraftWithLieuRefund(draftRun);
       }
 
-      // Delete the payroll runs
-      const { error: runsError } = await supabase
-        .from('hrpayroll_runs')
-        .delete()
-        .in('id', Array.from(selectedDrafts));
-
-      if (runsError) {
-        throw new Error(`Failed to delete payroll runs: ${runsError.message}`);
-      }
-
-      // Clear selection and refresh list
       setSelectedDrafts(new Set());
       await loadDraftPayrollRuns();
-      
-      alert(`${selectedDrafts.size} draft payroll runs deleted successfully.`);
 
+      alert(
+        `${count} draft payroll run(s) deleted. Lieu time from those drafts was restored to employee balances.`
+      );
     } catch (error) {
       console.error('Error deleting draft payrolls:', error);
       alert('Error deleting draft payrolls: ' + error.message);
@@ -241,61 +252,34 @@ const PETDraftLookupModal = ({
     }
   };
 
-  // FIXED: Simplified single delete function
   const deleteDraftPayrollRun = async (draftRun) => {
-    if (!confirm(`Are you sure you want to delete the draft payroll for ${draftRun.pay_period_start} to ${draftRun.pay_period_end}? This cannot be undone.`)) {
+    if (
+      !confirm(
+        `Delete the draft payroll for ${draftRun.pay_period_start} to ${draftRun.pay_period_end}?\n\n` +
+          'Lieu time used in this draft will be returned to employee balances. This cannot be undone.'
+      )
+    ) {
       return;
     }
 
     try {
-      // FIXED: Safe security logging
-      try {
-        await logSecurityEvent('draft_payroll_deleted', {
-          business_id: businessId,
-          payroll_run_id: draftRun.id,
-          pay_period: `${draftRun.pay_period_start} to ${draftRun.pay_period_end}`,
-          user_role: userRole,
-          user_id: authUser?.id
-        }, 'medium');
-      } catch (securityError) {
-        console.warn('Security logging failed, continuing...', securityError);
-      }
+      setDeleting(true);
+      await deleteDraftWithLieuRefund(draftRun);
 
-      // Delete entries first (foreign key constraint)
-      const { error: entriesError } = await supabase
-        .from('hrpayroll_entries')
-        .delete()
-        .eq('payroll_run_id', draftRun.id);
-
-      if (entriesError) {
-        throw new Error(`Failed to delete entries: ${entriesError.message}`);
-      }
-
-      // Delete the payroll run
-      const { error: runError } = await supabase
-        .from('hrpayroll_runs')
-        .delete()
-        .eq('id', draftRun.id);
-
-      if (runError) {
-        throw new Error(`Failed to delete payroll run: ${runError.message}`);
-      }
-
-      // Remove from selection if it was selected
-      setSelectedDrafts(prev => {
+      setSelectedDrafts((prev) => {
         const newSelection = new Set(prev);
         newSelection.delete(draftRun.id);
         return newSelection;
       });
 
-      // Refresh the draft list
       await loadDraftPayrollRuns();
-      
-      alert('Draft payroll deleted successfully.');
 
+      alert('Draft payroll deleted. Lieu time was restored to employee balances.');
     } catch (error) {
       console.error('Error deleting draft payroll:', error);
       alert('Error deleting draft payroll: ' + error.message);
+    } finally {
+      setDeleting(false);
     }
   };
 

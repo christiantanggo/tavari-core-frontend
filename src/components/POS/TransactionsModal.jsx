@@ -6,6 +6,7 @@ import { useTaxCalculations } from '../../hooks/useTaxCalculations';
 import { TavariStyles } from '../../utils/TavariStyles';
 import { logAction } from '../../helpers/posAudit';
 import dayjs from 'dayjs';
+import { buildSaleAttributionDisplay } from '../../utils/posSaleAttribution';
 
 /**
  * TransactionsModal - Step 98: Create TransactionsModal.jsx for lookup by receipt # or QR code
@@ -19,7 +20,7 @@ const TransactionsModal = ({
   title = 'Transaction Lookup'
 }) => {
   const auth = usePOSAuth({
-    requiredRoles: ['cashier', 'manager', 'owner'],
+    requiredRoles: ['employee', 'manager', 'owner'],
     requireBusiness: true,
     componentName: 'TransactionsModal'
   });
@@ -330,14 +331,13 @@ const TransactionsModal = ({
             *,
             inventory (name, price, sku)
           ),
-          pos_payments (*),
-          users!pos_sales_cashier_id_fkey (full_name, email)
+          pos_payments (*)
         `)
         .eq('business_id', auth.selectedBusinessId);
 
       // Search by receipt number or QR code
       if (searchType === 'receipt') {
-        query = query.eq('receipt_number', searchValue.toUpperCase());
+        query = query.eq('sale_number', searchValue.toUpperCase());
       } else if (searchType === 'qr') {
         query = query.eq('qr_code', searchValue);
       }
@@ -350,27 +350,53 @@ const TransactionsModal = ({
 
       console.log(`TransactionsModal: Found ${salesData?.length || 0} transactions`);
 
+      const userIds = [
+        ...new Set(
+          (salesData || [])
+            .flatMap((sale) => [sale.user_id, sale.operator_user_id, sale.login_user_id])
+            .filter(Boolean)
+        )
+      ];
+
+      let usersById = {};
+      if (userIds.length > 0) {
+        const { data: userRows, error: usersError } = await supabase
+          .from('users')
+          .select('id, full_name, email')
+          .in('id', userIds);
+
+        if (usersError) throw usersError;
+
+        usersById = (userRows || []).reduce((acc, user) => {
+          acc[user.id] = user;
+          return acc;
+        }, {});
+      }
+
       // Process transaction data
       const processedTransactions = (salesData || []).map(sale => {
         const items = sale.pos_sale_items || [];
         const payments = sale.pos_payments || [];
-        const cashier = sale.users || {};
+        const attribution = buildSaleAttributionDisplay(sale, usersById);
 
         const subtotal = items.reduce((sum, item) => {
-          return sum + (item.price * item.quantity);
+          return sum + ((item.price || item.unit_price || 0) * (item.quantity || 0));
         }, 0);
 
-        const totalTax = sale.tax_amount || 0;
-        const total = sale.total_amount || (subtotal + totalTax);
+        const totalTax = sale.tax || sale.tax_amount || 0;
+        const total = sale.total || sale.total_amount || (subtotal + totalTax);
 
         return {
           id: sale.id,
-          receiptNumber: sale.receipt_number,
+          receiptNumber: sale.sale_number,
           qrCode: sale.qr_code,
           date: sale.created_at,
           customerName: sale.customer_name || 'Walk-in',
           customerPhone: sale.customer_phone,
-          cashierName: cashier.full_name || cashier.email || 'Unknown',
+          cashierName: attribution.displayName,
+          cashierDisplay: attribution.displayWithContext,
+          loginUserName: attribution.loginUserName,
+          showDualAttribution: attribution.showBoth,
           items,
           payments,
           subtotal,
@@ -565,6 +591,11 @@ const TransactionsModal = ({
             <div>
               <span style={styles.infoLabel}>Cashier:</span><br/>
               <span style={styles.infoValue}>{transaction.cashierName}</span>
+              {transaction.showDualAttribution && (
+                <div style={{ fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray500 }}>
+                  Logged in as {transaction.loginUserName}
+                </div>
+              )}
             </div>
             <div>
               <span style={styles.infoLabel}>Items:</span><br/>
@@ -622,6 +653,11 @@ const TransactionsModal = ({
               <div>
                 <span style={styles.infoLabel}>Cashier:</span><br/>
                 <span style={styles.infoValue}>{selectedTransaction.cashierName}</span>
+                {selectedTransaction.showDualAttribution && (
+                  <div style={{ fontSize: TavariStyles.typography.fontSize.xs, color: TavariStyles.colors.gray500 }}>
+                    Logged in as {selectedTransaction.loginUserName}
+                  </div>
+                )}
               </div>
               <div>
                 <span style={styles.infoLabel}>Status:</span><br/>

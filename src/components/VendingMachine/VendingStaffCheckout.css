@@ -1,0 +1,97 @@
+.vending-staff-checkout-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.vending-staff-checkout-panel {
+  position: relative;
+  background: #fff;
+  border-radius: 16px;
+  max-width: 520px;
+  width: 100%;
+  max-height: 96vh;
+  overflow: auto;
+  padding: 28px 24px 24px;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.22);
+}
+
+.vending-staff-checkout-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  border: none;
+  background: transparent;
+  font-size: 33px;
+  line-height: 1;
+  cursor: pointer;
+  color: #64748b;
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+}
+
+.vending-staff-checkout-close:active {
+  background: #f1f5f9;
+}
+
+.vending-staff-pin-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin: 0 0 18px;
+}
+
+.vending-staff-pin-items span {
+  background: #f1f5f9;
+  color: #0f172a;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.vending-staff-checkout-summary h2 {
+  margin: 0 0 8px;
+  font-size: 1.5rem;
+}
+
+.vending-staff-checkout-staff {
+  margin: 0 0 12px;
+  color: #0f766e;
+  font-size: 1.1rem;
+}
+
+.vending-staff-checkout-error {
+  color: #dc2626;
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.vending-staff-checkout-warn {
+  color: #b45309;
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.vending-staff-checkout-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.vending-staff-checkout-items li {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 1.05rem;
+}
